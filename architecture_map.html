@@ -1,0 +1,3562 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EV-GNN Architecture Map Stage 4</title>
+<style>
+/* ==== STYLES ==== */
+:root {
+  --bg-page:#0A0A0A; --bg-panel:#111; --bg-panel-alt:#161616;
+  --border:#1F1F1F; --border-strong:#2A2A2A;
+  --text-primary:#E5E5E5; --text-secondary:#8A8A8A; --text-muted:#5A5A5A;
+  --accent:#CC785C; --accent-soft:#6B8E7F; --accent-warn:#D4A75A;
+  --accent-manual:#B57EDC;
+  --edge-import:#3A3A3A;
+  --zoom:1;
+  --map-canvas-width:1800px;
+  --side-lane-gap:190px;
+}
+* { box-sizing:border-box; margin:0; padding:0; }
+html, body {
+  height:100%; background:var(--bg-page); color:var(--text-primary);
+  font-family:"JetBrains Mono","IBM Plex Mono","SF Mono",Menlo,Consolas,monospace;
+  font-size:13px; line-height:1.6; overflow:hidden;
+}
+::-webkit-scrollbar { width:8px; height:8px; }
+::-webkit-scrollbar-track { background:transparent; }
+::-webkit-scrollbar-thumb { background:#2A2A2A; border-radius:3px; }
+::-webkit-scrollbar-thumb:hover { background:#3A3A3A; }
+
+.app { height:100vh; display:flex; flex-direction:column; }
+
+.header {
+  height:40px; flex-shrink:0; display:flex; align-items:center;
+  padding:0 16px; background:var(--bg-panel); border-bottom:1px solid var(--border);
+  color:var(--text-secondary); font-size:13px; gap:2px;
+}
+.header .caret {
+  color:var(--accent); animation:blink 1s steps(1) infinite; margin-left:2px;
+}
+@keyframes blink { 50% { opacity:0; } }
+
+.tab-bar {
+  height:36px; flex-shrink:0; display:flex; background:var(--bg-panel);
+  border-bottom:1px solid var(--border); padding-left:12px;
+}
+.tab {
+  height:100%; padding:0 18px; display:flex; align-items:center; cursor:pointer;
+  color:var(--text-secondary); font-size:12px; background:transparent;
+  border:none; border-bottom:2px solid transparent;
+  font-family:inherit; letter-spacing:0.02em; transition:color .12s ease;
+}
+.tab:hover { color:var(--text-primary); }
+.tab.active {
+  color:var(--accent); background:var(--bg-panel-alt);
+  border-bottom:2px solid var(--accent);
+}
+.tab.active[data-tab="results"] { color:var(--accent-warn); border-bottom-color:var(--accent-warn); }
+.tab.active[data-tab="paper"] { color:var(--accent-soft); border-bottom-color:var(--accent-soft); }
+.tab.active[data-tab="manual"]  { color:var(--accent-manual); border-bottom-color:var(--accent-manual); }
+
+.main {
+  flex:1; display:grid; grid-template-columns:22% 48% 30%;
+  overflow:hidden; min-height:0;
+}
+.main[data-active-tab="manual"] { display:block; overflow:hidden; }
+.main[data-active-tab="manual"] .column { display:none !important; }
+.main[data-active-tab="manual"] .manual-page { display:flex !important; height:100%; }
+.main:not([data-active-tab="manual"]) .manual-page { display:none !important; }
+
+/* v5 legend scope fix:
+   The import/class-inheritance legend is only useful in Training Path because
+   side-cards and dependency edges are rendered only there. Evaluation and
+   Results are sequential/post-hoc flows, so the legend is intentionally hidden. */
+.main[data-active-tab="evaluation"] .legend,
+.main[data-active-tab="results"] .legend,
+.main[data-active-tab="paper"] .legend,
+.main[data-active-tab="manual"] .legend { display:none !important; }
+.main[data-active-tab="paper"] #map-controls { display:none !important; }
+.main[data-active-tab="paper"] .map-scroll { overflow-x:hidden; }
+.main[data-active-tab="paper"] .map-content { min-width:100%; width:100%; padding-right:0; }
+
+.column {
+  overflow-y:auto; padding:16px; position:relative; min-height:0;
+}
+.column + .column { border-left:1px solid var(--border); }
+
+.column-header {
+  font-size:10px; color:var(--text-muted); text-transform:uppercase;
+  letter-spacing:0.08em; margin-bottom:14px; flex-shrink:0;
+}
+
+/* tree */
+.tree-item {
+  white-space:pre; cursor:pointer; padding:1px 4px 1px 18px; margin:0;
+  color:var(--text-primary); font-size:12px; border-radius:2px;
+  line-height:1.7; position:relative;
+}
+.tree-item:hover { background:var(--bg-panel-alt); }
+.tree-item.is-folder { color:var(--text-secondary); }
+.tree-item.is-root { color:var(--text-muted); font-size:11px; padding-left:4px; }
+.tree-item.selected { color:var(--accent); }
+.tree-item.selected::before {
+  content:"›"; position:absolute; left:6px; top:1px; color:var(--accent);
+}
+
+/* map column */
+#map-col { display:flex; flex-direction:column; overflow:hidden; padding:16px; }
+.map-header-row {
+  display:flex; justify-content:space-between; align-items:center;
+  gap:12px; flex-wrap:wrap; margin-bottom:14px;
+}
+.map-header-left {
+  display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; flex:1; min-width:0;
+}
+.map-controls { display:flex; align-items:center; gap:4px; flex-shrink:0; }
+.ctrl-btn {
+  background:transparent; border:1px solid var(--border-strong);
+  color:var(--text-secondary); font-family:inherit; font-size:11px;
+  padding:3px 10px; border-radius:2px; cursor:pointer;
+  min-width:28px; text-align:center;
+  transition:color .12s, border-color .12s;
+}
+.ctrl-btn:hover { color:var(--text-primary); border-color:var(--text-muted); }
+.zoom-label { color:var(--text-muted); font-size:10px; min-width:38px; text-align:center; cursor:pointer; }
+
+.map-scroll {
+  flex:1; overflow-x:scroll; overflow-y:auto; min-height:0; margin:0 -16px;
+  padding:0 16px 16px;
+  scrollbar-gutter:stable both-edges;
+}
+.map-content {
+  position:relative;
+  min-width:calc(var(--map-canvas-width) * var(--zoom));
+  width:calc(var(--map-canvas-width) * var(--zoom));
+  display:block;
+  padding-right:16px;
+}
+.mindmap-wrap { position:relative; min-height:100%; width:100%; }
+
+/* v9: filter bar is fixed above the scroll canvas and never scrolls horizontally.
+   When width is insufficient, groups wrap into vertical rows instead. */
+#filter-bar-host {
+  flex-shrink:0;
+  position:relative;
+  z-index:5;
+  background:var(--bg-page);
+  overflow-x:visible;
+  overflow-y:visible;
+}
+.filter-bar {
+  display:flex;
+  flex-direction:column;
+  align-items:stretch;
+  gap:8px;
+  padding:2px 0 14px;
+  margin-bottom:14px;
+  border-bottom:1px dashed var(--border);
+}
+.filter-group {
+  display:flex;
+  align-items:center;
+  gap:5px;
+  flex-wrap:wrap;
+  width:100%;
+  min-width:0;
+}
+.filter-label {
+  color:var(--text-muted); font-size:10px; text-transform:uppercase;
+  letter-spacing:0.06em; margin-right:4px;
+}
+.filter-chip {
+  background:transparent; border:1px solid var(--border-strong);
+  color:var(--text-secondary); font-family:inherit; font-size:11px;
+  padding:3px 9px; border-radius:2px; cursor:pointer;
+  transition:color .12s, border-color .12s, background .12s;
+}
+.filter-chip:hover { color:var(--text-primary); border-color:var(--text-muted); }
+.filter-chip.active {
+  background:rgba(204,120,92,0.08); border-color:var(--accent); color:var(--accent);
+}
+
+.zoomable { position:relative; width:100%; font-size:calc(13px * var(--zoom)); }
+
+/* The map uses a fixed-width scroll canvas. The main spine is centred
+   inside that canvas, while side-cards occupy a left lane. This prevents
+   side trees from pushing the main spine off-centre or overlapping it. */
+.flow {
+  position:relative; display:flex; flex-direction:column; align-items:center;
+  z-index:2; padding-top:4px; padding-left:0; width:100%; min-width:100%;
+}
+
+.node {
+  position:relative; background:var(--bg-panel-alt);
+  border:1px solid var(--border-strong); border-radius:4px;
+  padding:calc(10px * var(--zoom)) calc(14px * var(--zoom));
+  min-width:calc(320px * var(--zoom)); max-width:calc(460px * var(--zoom));
+  text-align:left; cursor:pointer; z-index:3;
+  transition:border-color .12s ease, box-shadow .12s ease;
+}
+.node:hover { border-color:var(--accent); }
+.node.selected { border-color:var(--accent); box-shadow:inset 0 0 0 1px var(--accent); }
+.node.expanded { box-shadow:inset 3px 0 0 var(--accent); }
+.node.expanded.selected { box-shadow:inset 3px 0 0 var(--accent), inset 0 0 0 1px var(--accent); }
+
+.node-title { color:var(--text-primary); font-size:calc(13px * var(--zoom)); font-weight:500; }
+.node-sub { color:var(--text-secondary); font-size:calc(11px * var(--zoom)); margin-top:2px; line-height:1.45; }
+
+.variant-chips {
+  margin-top:9px; display:flex; flex-wrap:wrap; gap:5px 6px;
+}
+.variant-chip {
+  background:var(--bg-page); border:1px solid var(--border);
+  color:var(--text-muted);
+  font-size:calc(10px * var(--zoom));
+  padding:calc(2px * var(--zoom)) calc(7px * var(--zoom));
+  border-radius:2px; cursor:pointer; font-family:inherit; line-height:1.5;
+  transition:color .12s, border-color .12s, background .12s;
+}
+.variant-chip:hover { color:var(--text-primary); border-color:var(--border-strong); }
+.variant-chip.match {
+  color:var(--accent); border-color:var(--accent);
+  background:rgba(204,120,92,0.10);
+}
+.variant-chip.ablation { color:var(--text-muted); opacity:0.55; font-style:italic; }
+.variant-chip.ablation.active {
+  opacity:1; color:var(--accent-warn); border-color:var(--accent-warn);
+  background:rgba(212,167,90,0.10);
+}
+
+.connector {
+  height:calc(36px * var(--zoom));
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+}
+.connector .line { width:1.5px; height:calc(22px * var(--zoom)); background:var(--accent); }
+.connector .chev {
+  font-size:calc(11px * var(--zoom)); line-height:1; margin-top:-2px;
+  color:var(--accent); font-family:inherit;
+}
+
+.side-expansion-spacer {
+  width:100%; display:flex; justify-content:center; align-items:stretch;
+  pointer-events:none;
+}
+.side-expansion-spacer .line {
+  width:1.5px; height:100%; background:var(--accent);
+}
+
+.flow.amber .connector .line { background:var(--accent-warn); }
+.flow.amber .connector .chev { color:var(--accent-warn); }
+.flow.amber .cat-items { border-left-color:var(--accent-warn); }
+
+/* side cards */
+.side-box {
+  position:absolute; background:var(--bg-panel-alt);
+  border:1px solid var(--border-strong); border-radius:3px;
+  padding:calc(5px * var(--zoom)) calc(9px * var(--zoom));
+  font-size:calc(11px * var(--zoom)); color:var(--text-secondary);
+  cursor:pointer; z-index:3; white-space:nowrap; max-width:calc(320px * var(--zoom));
+  transition:border-color .12s ease, color .12s ease;
+}
+.side-box:hover { color:var(--accent); border-color:var(--accent); }
+.side-box.selected { color:var(--accent); border-color:var(--accent); }
+.side-box.filter-match { color:var(--accent); border-color:var(--accent); }
+.side-box .sb-label {
+  color:var(--text-muted); font-size:calc(9px * var(--zoom));
+  display:block; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:1px;
+}
+.side-box.inherit .sb-label { color:var(--accent-soft); }
+.side-box.option .sb-label { color:var(--accent-warn); }
+
+.edges-svg {
+  position:absolute; top:0; left:0; width:100%; height:100%;
+  overflow:visible; pointer-events:none; z-index:1;
+}
+
+.legend {
+  flex-shrink:0; align-self:flex-start; background:var(--bg-panel-alt);
+  border:1px solid var(--border); padding:8px 10px; font-size:10px;
+  color:var(--text-secondary); border-radius:3px; margin-top:12px;
+}
+.legend .item { display:flex; align-items:center; gap:10px; margin:3px 0; }
+.legend .swatch { display:inline-block; width:24px; height:0; }
+.legend .swatch.run     { border-top:1.5px solid var(--accent); }
+.legend .swatch.import  { border-top:1px solid var(--edge-import); }
+.legend .swatch.inherit { border-top:1px dashed var(--accent-soft); }
+
+/* results */
+.results-root-node {
+  background:var(--bg-panel-alt); border:1px solid var(--accent-warn);
+  border-radius:4px; padding:8px 14px; font-size:calc(12px * var(--zoom));
+  color:var(--accent-warn); text-align:center; min-width:calc(320px * var(--zoom));
+}
+.cat-group { width:100%; max-width:calc(480px * var(--zoom)); margin:0 auto 16px; }
+.cat-title {
+  color:var(--accent-warn); font-size:calc(11px * var(--zoom));
+  margin:8px 0; text-transform:uppercase; letter-spacing:0.06em; white-space:pre;
+}
+.cat-items {
+  display:flex; flex-direction:column; gap:6px;
+  padding-left:16px; border-left:1px solid var(--accent-warn); margin-left:12px;
+}
+.cat-items .node { min-width:0; max-width:100%; width:100%; }
+
+
+/* paper-code mapping */
+.paper-code-view {
+  width:100%; max-width:1100px; margin:0 auto; padding:4px 0 40px;
+}
+.paper-intro {
+  border:1px solid var(--border); background:var(--bg-panel-alt);
+  border-left:3px solid var(--accent-soft); border-radius:4px;
+  padding:12px 14px; margin-bottom:14px; color:var(--text-secondary);
+  font-size:11px; line-height:1.65;
+}
+.paper-card {
+  display:grid; grid-template-columns:minmax(220px, 32%) 1fr;
+  gap:0; border:1px solid var(--border-strong); border-radius:5px;
+  background:var(--bg-panel-alt); margin-bottom:10px; overflow:hidden;
+}
+.paper-left {
+  padding:13px 14px; border-right:1px solid var(--border);
+  background:rgba(107,142,127,0.045);
+}
+.paper-badge {
+  display:inline-block; color:var(--accent-soft); border:1px solid var(--accent-soft);
+  border-radius:2px; padding:2px 8px; font-size:10px; letter-spacing:0.06em;
+  text-transform:uppercase; margin-bottom:8px;
+}
+.paper-title { color:var(--text-primary); font-size:12px; line-height:1.45; }
+.paper-note { color:var(--text-muted); font-size:10px; margin-top:6px; line-height:1.5; }
+.paper-right { padding:12px 14px; }
+.code-ref-list { display:flex; flex-direction:column; gap:7px; }
+.code-ref {
+  display:block; width:100%; text-align:left; background:var(--bg-page);
+  border:1px solid var(--border); color:var(--text-secondary);
+  font-family:inherit; font-size:11px; line-height:1.5;
+  padding:7px 9px; border-radius:3px; cursor:pointer;
+  transition:color .12s, border-color .12s, background .12s;
+}
+.code-ref:hover { color:var(--accent); border-color:var(--accent); background:rgba(204,120,92,0.06); }
+.code-ref .code-file { color:var(--accent); }
+.code-ref .code-symbol { color:var(--text-secondary); }
+.code-ref.external { cursor:default; color:var(--text-muted); border-style:dashed; }
+.code-ref.external:hover { color:var(--text-muted); border-color:var(--border); background:var(--bg-page); }
+.code-ref.external .code-file { color:var(--accent-warn); }
+.app-footer {
+  height:28px; flex-shrink:0; border-top:1px solid var(--border);
+  background:var(--bg-panel); color:var(--text-muted); display:flex;
+  align-items:center; justify-content:center; gap:8px; font-size:10px;
+  letter-spacing:0.04em; white-space:nowrap;
+}
+.app-footer a { color:var(--accent); text-decoration:none; border-bottom:1px dotted var(--accent); }
+.app-footer a:hover { border-bottom-style:solid; }
+@media (max-width:900px) {
+  .paper-card { grid-template-columns:1fr; }
+  .paper-left { border-right:none; border-bottom:1px solid var(--border); }
+}
+
+/* inspector */
+.detail-default {
+  font-size:11px; color:var(--text-secondary); line-height:1.85;
+  white-space:pre-wrap; padding:4px 0;
+}
+.detail-default .accent { color:var(--accent); }
+.detail-default .soft   { color:var(--accent-soft); }
+.detail-default .gray   { color:var(--text-muted); }
+
+.detail-title-row { margin-bottom:14px; padding-bottom:10px; border-bottom:1px solid var(--border); }
+.detail-path { color:var(--accent); font-size:13px; word-break:break-all; }
+.detail-role { color:var(--text-secondary); font-size:11px; margin-top:4px; line-height:1.55; }
+
+.ablation-banner {
+  background:rgba(212,167,90,0.06); border-left:2px solid var(--accent-warn);
+  padding:9px 11px; margin:-4px 0 16px;
+  font-size:11px; color:var(--text-secondary); line-height:1.6;
+}
+.ablation-banner .bnr-head { color:var(--text-primary); margin-bottom:6px; font-size:11px; }
+.ablation-banner .bnr-name { color:var(--accent-warn); }
+.ablation-banner .bnr-kind { color:var(--text-muted); font-size:10px; }
+.ablation-banner .bnr-body { margin-bottom:6px; }
+.ablation-banner .bnr-ref { color:var(--accent-soft); font-size:10px; }
+
+.detail-row {
+  display:grid; grid-template-columns:96px 1fr; gap:10px;
+  margin-bottom:10px; font-size:11px; line-height:1.55;
+}
+.detail-row .key {
+  color:var(--text-muted); font-size:10px; text-transform:uppercase;
+  letter-spacing:0.05em; padding-top:1px;
+}
+.detail-row .val { color:var(--text-primary); word-break:break-word; font-size:11px; }
+.detail-row .val .empty { color:var(--text-muted); font-style:italic; }
+.detail-row .val.paper-ref { color:var(--accent-soft); }
+.detail-row .val ul { list-style:none; padding:0; margin:0; }
+.detail-row .val li {
+  font-size:11px; color:var(--text-secondary); position:relative;
+  padding-left:14px; line-height:1.65;
+}
+.detail-row .val li::before { content:"─"; position:absolute; left:0; color:var(--text-muted); }
+.detail-row .val li.link { color:var(--accent); cursor:pointer; }
+.detail-row .val li.link:hover { text-decoration:underline; }
+
+.mindmap-title-row { display:flex; align-items:baseline; flex-wrap:wrap; gap:10px; }
+.filter-summary { color:var(--text-muted); font-size:10px; }
+.filter-summary .pill { color:var(--accent); }
+
+/* ==== MANUAL — redesigned in v4 ==== */
+.manual-page {
+  height:100%; overflow:hidden; display:flex; flex-direction:column;
+  background:var(--bg-page);
+}
+.manual-header {
+  display:flex; justify-content:space-between; align-items:center;
+  padding:18px 40px 16px; border-bottom:1px solid var(--border); flex-shrink:0;
+  gap:12px;
+}
+.manual-title-row {
+  display:flex; align-items:baseline; gap:14px; flex-wrap:wrap;
+}
+.manual-title {
+  color:var(--text-primary); font-size:14px; letter-spacing:0.02em;
+}
+.manual-crumb {
+  color:var(--text-secondary); font-size:11px;
+  letter-spacing:0.08em; text-transform:uppercase;
+  border:1px solid var(--border-strong); padding:2px 9px; border-radius:2px;
+}
+.lang-toggle { display:flex; gap:4px; flex-shrink:0; }
+.lang-btn {
+  background:transparent; border:1px solid var(--border-strong);
+  color:var(--text-secondary); font-family:inherit; font-size:12px;
+  padding:4px 12px; cursor:pointer; border-radius:2px;
+}
+.lang-btn:hover { color:var(--text-primary); border-color:var(--text-muted); }
+.lang-btn.active { border-color:var(--accent); color:var(--accent); }
+
+.manual-body {
+  flex:1; display:flex; min-height:0; overflow:hidden;
+}
+.manual-sub-tabs {
+  width:280px; flex-shrink:0; border-right:1px solid var(--border);
+  padding:24px 18px; overflow-y:auto; display:flex; flex-direction:column;
+  gap:8px;
+}
+.manual-sub-tabs .manual-sub-header {
+  font-size:10px; color:var(--text-muted); text-transform:uppercase;
+  letter-spacing:0.08em; margin-bottom:6px;
+}
+.manual-sub-tab {
+  background:transparent; border:1px solid var(--border-strong);
+  color:var(--text-secondary); font-family:inherit; font-size:12px;
+  padding:9px 12px; border-radius:2px; cursor:pointer;
+  text-align:left; line-height:1.4;
+  transition:color .12s, border-color .12s, background .12s;
+}
+.manual-sub-tab:hover { color:var(--text-primary); border-color:var(--text-muted); }
+.manual-sub-tab.active {
+  color:var(--accent); border-color:var(--accent);
+  background:rgba(204,120,92,0.10);
+}
+
+#manual-content {
+  flex:1; overflow-y:auto; padding:32px 40px 80px;
+  font-size:13px; line-height:1.78; color:var(--text-primary);
+}
+#manual-content .pane-inner { max-width:760px; margin:0 auto; }
+#manual-content h1 { font-size:17px; color:var(--accent); margin-bottom:8px; font-weight:500; }
+#manual-content .subtitle { color:var(--text-muted); font-size:11px; margin-bottom:30px; }
+#manual-content h2 {
+  font-size:12px; color:var(--accent); margin:32px 0 12px;
+  font-weight:500; text-transform:uppercase; letter-spacing:0.08em;
+  border-top:1px solid var(--border); padding-top:24px;
+}
+#manual-content h2:first-of-type { border-top:none; padding-top:0; }
+#manual-content p { margin-bottom:12px; color:var(--text-primary); }
+#manual-content p.disclaimer {
+  background:var(--bg-panel-alt); border-left:2px solid var(--accent-warn);
+  padding:10px 14px; font-size:12px; color:var(--text-secondary);
+  border-radius:0 2px 2px 0;
+}
+#manual-content .table {
+  font-size:12px; color:var(--text-secondary); background:var(--bg-panel-alt);
+  padding:12px 16px; border-radius:3px; margin:8px 0 16px;
+  white-space:pre; font-family:inherit; overflow-x:auto; border:1px solid var(--border);
+}
+#manual-content code { color:var(--accent); background:var(--bg-panel-alt); padding:1px 5px; border-radius:2px; font-size:12px; }
+#manual-content a { color:var(--accent); text-decoration:none; border-bottom:1px dotted var(--accent); }
+#manual-content a:hover { border-bottom-style:solid; }
+#manual-content ul, #manual-content ol { padding-left:0; list-style:none; margin:6px 0 14px; }
+#manual-content ul li, #manual-content ol li {
+  position:relative; padding-left:16px; margin-bottom:4px; color:var(--text-secondary);
+}
+#manual-content ul li::before { content:"─"; position:absolute; left:0; color:var(--text-muted); }
+#manual-content ol { counter-reset:m; }
+#manual-content ol li { counter-increment:m; }
+#manual-content ol li::before { content:counter(m) "."; position:absolute; left:0; color:var(--text-muted); }
+#manual-content .footer {
+  margin-top:48px; padding-top:16px; border-top:1px solid var(--border);
+  font-size:10px; color:var(--text-muted); line-height:1.7;
+}
+
+@media (max-width:900px) {
+  .main:not([data-active-tab="manual"]) { grid-template-columns:30% 40% 30%; }
+  .manual-sub-tabs { width:220px; padding:18px 12px; }
+  .manual-header { padding:14px 20px; }
+  #manual-content { padding:24px 24px 60px; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="header">
+    <span>~/EV-GNN-main $ architecture_map_stage4.html</span>
+    <span class="caret">▊</span>
+  </div>
+  <div class="tab-bar">
+    <button class="tab active" data-tab="manual">[ Manual ]</button>
+    <button class="tab" data-tab="training">[ Training Path ]</button>
+    <button class="tab" data-tab="evaluation">[ Evaluation Path ]</button>
+    <button class="tab" data-tab="results">[ Results Analysis Path ]</button>
+    <button class="tab" data-tab="paper">[ Paper ↔ Code ]</button>
+  </div>
+  <div class="main" id="main-area" data-active-tab="manual">
+    <div class="column" id="tree-col">
+      <div class="column-header">── files ──</div>
+      <div id="file-tree"></div>
+    </div>
+    <div class="column" id="map-col">
+      <div class="column-header map-header-row">
+        <div class="map-header-left mindmap-title-row">
+          <span id="mindmap-title">── execution flow: training path ──</span>
+          <span id="filter-summary" class="filter-summary"></span>
+        </div>
+        <div class="map-controls" id="map-controls">
+          <button class="ctrl-btn" id="zoom-out" title="zoom out">−</button>
+          <span class="zoom-label" id="zoom-label" title="reset zoom to 100%">100%</span>
+          <button class="ctrl-btn" id="zoom-in" title="zoom in">+</button>
+          <button class="ctrl-btn" id="recenter" title="scroll back to spine center">recenter</button>
+        </div>
+      </div>
+      <div id="filter-bar-host"></div>
+      <div class="map-scroll" id="map-scroll">
+        <div class="map-content" id="map-content">
+          <div class="zoomable" id="zoomable">
+            <div class="mindmap-wrap" id="mindmap-wrap"></div>
+          </div>
+        </div>
+      </div>
+      <div class="legend">
+        <div class="item"><span class="swatch run"></span><span>runtime execution</span></div>
+        <div class="item"><span class="swatch import"></span><span>import dependency</span></div>
+        <div class="item"><span class="swatch inherit"></span><span>class inheritance</span></div>
+      </div>
+    </div>
+    <div class="column" id="detail-col">
+      <div class="column-header">── inspector ──</div>
+      <div id="detail-content"></div>
+    </div>
+    <div class="manual-page" id="manual-page">
+      <div class="manual-header">
+        <div class="manual-title-row">
+          <span class="manual-title">EV-GNN Architecture Map</span>
+          <span class="manual-crumb">Manual</span>
+        </div>
+        <div class="lang-toggle">
+          <button class="lang-btn active" data-lang="en">[ EN ]</button>
+          <button class="lang-btn" data-lang="zh">[ 中 ]</button>
+        </div>
+      </div>
+      <div class="manual-body">
+        <div class="manual-sub-tabs" id="manual-sub-tabs"></div>
+        <div id="manual-content"></div>
+      </div>
+    </div>
+  </div>
+  <div class="app-footer">── EV-GNN baseline · Orfanoudakis et al. 2025 · Comms Eng 4:118 ── <a href="https://doi.org/10.1038/s44172-025-00457-8" target="_blank">[paper]</a> <a href="https://github.com/StavrosOrf/EV-GNN" target="_blank">[repo]</a></div>
+</div>
+
+<script>
+/* ==== DATA ==== */
+
+const TREE = {
+  name:'EV-GNN-main', isRoot:true,
+  children:[
+    {type:'file',name:'train_RL_GNN.py'},
+    {type:'file',name:'train_baselines.py'},
+    {type:'file',name:'evaluator.py'},
+    {type:'file',name:'requirements.txt'},
+    {type:'file',name:'README.md'},
+    {type:'folder',name:'config_files',open:false,children:[
+      {type:'file',name:'PublicPST.yaml'},
+      {type:'file',name:'PublicPST_100.yaml'},
+      {type:'file',name:'PublicPST_1000.yaml'},
+      {type:'file',name:'PublicPST_100_g1.yaml'},
+      {type:'file',name:'PublicPST_100_g2.yaml'},
+      {type:'file',name:'PublicPST_100_g3.yaml'},
+      {type:'file',name:'PublicPST_500.yaml'},
+      {type:'file',name:'PublicPST_500_g1.yaml'},
+      {type:'file',name:'PublicPST_500_g2.yaml'},
+      {type:'file',name:'PublicPST_500_g3.yaml'},
+      {type:'file',name:'PublicPST_GNN_example.yaml'},
+      {type:'file',name:'V2G_ProfixMaxWithLoads_25.yaml'},
+      {type:'file',name:'V2G_ProfixMaxWithLoads_100.yaml'},
+      {type:'file',name:'V2G_ProfixMaxWithLoads_500.yaml'}
+    ]},
+    {type:'folder',name:'utils',open:true,children:[
+      {type:'file',name:'state.py'},
+      {type:'file',name:'replay_buffer.py'},
+      {type:'file',name:'action_wrapper.py'}
+    ]},
+    {type:'folder',name:'TD3',open:true,children:[
+      {type:'file',name:'TD3.py'},
+      {type:'file',name:'TD3_GNN.py'},
+      {type:'file',name:'TD3_ActionGNN.py'}
+    ]},
+    {type:'folder',name:'SAC',open:false,children:[
+      {type:'file',name:'sac.py'},
+      {type:'file',name:'actionSAC.py'},
+      {type:'file',name:'model.py'},
+      {type:'file',name:'utils.py'}
+    ]},
+    {type:'folder',name:'Results_Analysis',open:false,children:[
+      {type:'file',name:'component_analysis.py'},
+      {type:'file',name:'discrete_eda.py'},
+      {type:'file',name:'generalization_eda.py'},
+      {type:'file',name:'gnn_fx_explain.py'},
+      {type:'file',name:'max_performance_results.py'},
+      {type:'file',name:'mean_performance_comparison.py'},
+      {type:'file',name:'parse_evaluator_results.py'},
+      {type:'file',name:'rewards_eda.py'},
+      {type:'file',name:'sb3_reward_eda.py'},
+      {type:'file',name:'state_action_eda.py'},
+      {type:'file',name:'v2g_rewards_eda.py'},
+      {type:'file',name:'v2g_stats eda.py'}
+    ]}
+  ]
+};
+
+const FILTERS = {
+  problem:[
+    {id:'PublicPST',label:'PublicPST'},
+    {id:'V2G',label:'V2G'}
+  ],
+  policy:[
+    {id:'TD3',label:'TD3'},
+    {id:'TD3_GNN',label:'TD3_GNN'},
+    {id:'TD3_ActionGNN',label:'TD3_ActionGNN'},
+    {id:'SAC',label:'SAC'},
+    {id:'SAC_GNN',label:'SAC_GNN'},
+    {id:'SAC_ActionGNN',label:'SAC_ActionGNN'}
+  ],
+  action:[
+    {id:'Continuous',label:'Continuous'},
+    {id:'Three-step',label:'Three-step'}
+  ]
+};
+
+let filters = { problem:'PublicPST', policy:'TD3_ActionGNN', action:'Continuous' };
+
+const MAPS = {
+  training:[
+    { id:'config', title:'Config YAML', sub:'problem-family routing',
+      file:'config_files/PublicPST.yaml',
+      chips:[
+        {label:'PublicPST family',file:'config_files/PublicPST.yaml',match:{problem:'PublicPST'}},
+        {label:'V2G family',file:'config_files/V2G_ProfixMaxWithLoads_25.yaml',match:{problem:'V2G'}}
+      ]
+    },
+    { id:'train', title:'train_RL_GNN.py', sub:'argparse → reward + state routing → training loop',
+      file:'train_RL_GNN.py' },
+    { id:'env', title:'EV2Gym environment', sub:"gym.make('evs-v1') — external ev2gym package",
+      file:'train_RL_GNN.py' },
+    { id:'state', title:'State function', sub:'utils/state.py — builds PyG graph observation',
+      file:'utils/state.py',
+      chips:[
+        {label:'PublicPST_GNN',file:'utils/state.py',match:{problem:'PublicPST'}},
+        {label:'V2G_ProfitMax_with_Loads_GNN',file:'utils/state.py',match:{problem:'V2G'}},
+        {label:'PublicPST_GNN_no_position_encoding',file:'utils/state.py',kind:'ablation'},
+        {label:'PublicPST_GNN_full_graph',file:'utils/state.py',kind:'ablation'}
+      ]
+    },
+    { id:'policy', title:'Policy', sub:'classic RL · FX-GNN · EV-GNN',
+      file:'TD3/TD3_ActionGNN.py',
+      chips:[
+        {label:'TD3.py',file:'TD3/TD3.py',match:{policy:'TD3'}},
+        {label:'TD3_GNN.py',file:'TD3/TD3_GNN.py',match:{policy:'TD3_GNN'}},
+        {label:'TD3_ActionGNN.py',file:'TD3/TD3_ActionGNN.py',match:{policy:'TD3_ActionGNN'}},
+        {label:'SAC/sac.py',file:'SAC/sac.py',match:{policy:'SAC'}},
+        {label:'SAC_GNN',file:'SAC/sac.py',match:{policy:'SAC_GNN'}},
+        {label:'SAC/actionSAC.py',file:'SAC/actionSAC.py',match:{policy:'SAC_ActionGNN'}}
+      ]
+    },
+    { id:'buffer', title:'Replay Buffer', sub:'utils/replay_buffer.py — three storage variants',
+      file:'utils/replay_buffer.py',
+      chips:[
+        {label:'ReplayBuffer',file:'utils/replay_buffer.py',match:{policy:['TD3','SAC']}},
+        {label:'GNN_ReplayBuffer',file:'utils/replay_buffer.py',match:{policy:['TD3_GNN','SAC_GNN']}},
+        {label:'ActionGNN_ReplayBuffer',file:'utils/replay_buffer.py',match:{policy:['TD3_ActionGNN','SAC_ActionGNN']}}
+      ]
+    },
+    { id:'step', title:'env.step(mapped_action)', sub:'reward → next state → train step',
+      file:'train_RL_GNN.py' },
+    { id:'eval', title:'Evaluation', sub:'eval_policy → saved_models → wandb',
+      file:'train_RL_GNN.py' }
+  ],
+  evaluation:[
+    {id:'eval_root',title:'evaluator.py',sub:'entry point for benchmark comparisons',file:'evaluator.py'},
+    {id:'load_rl',title:'Load trained repository RL/GNN models',sub:'TD3 / TD3_GNN / TD3_ActionGNN / SAC / SAC_GNN / SAC_ActionGNN',file:'evaluator.py'},
+    {id:'load_sb3',title:'Load selected SB3 / sb3-contrib checkpoints',sub:'PPO, A2C, DDPG, TQC, TRPO, ARS, RecurrentPPO; custom SAC/TD3 load via repo classes',file:'train_baselines.py'},
+    {id:'load_heur',title:'Available heuristic + MPC / oracle branches',sub:'RoundRobin, AFAP, OCMF, eMPC, PowerTrackingErrorrMin, V2GProfitMaxOracleGB',file:'evaluator.py'},
+    {id:'run',title:'Run evaluation cycles',sub:'paper Table 2 reports 100 runs; source default n_test_cycles = 1',file:'evaluator.py'},
+    {id:'save',title:'Save evaluation artefacts',sub:'data.csv + plot_results_dict.pkl; optional replay_buffers.pkl',file:'Results_Analysis/parse_evaluator_results.py'}
+  ],
+  results:[
+    { cat:'Performance comparison', items:[
+      {title:'max_performance_results.py',file:'Results_Analysis/max_performance_results.py'},
+      {title:'mean_performance_comparison.py',file:'Results_Analysis/mean_performance_comparison.py'},
+      {title:'parse_evaluator_results.py',file:'Results_Analysis/parse_evaluator_results.py'}
+    ]},
+    { cat:'Reward EDA', items:[
+      {title:'rewards_eda.py',file:'Results_Analysis/rewards_eda.py'},
+      {title:'sb3_reward_eda.py',file:'Results_Analysis/sb3_reward_eda.py'},
+      {title:'v2g_rewards_eda.py',file:'Results_Analysis/v2g_rewards_eda.py'}
+    ]},
+    { cat:'State / action EDA', items:[
+      {title:'state_action_eda.py',file:'Results_Analysis/state_action_eda.py'},
+      {title:'discrete_eda.py',file:'Results_Analysis/discrete_eda.py'},
+      {title:'v2g_stats eda.py',file:'Results_Analysis/v2g_stats eda.py'}
+    ]},
+    { cat:'GNN explainability & generalization', items:[
+      {title:'component_analysis.py',file:'Results_Analysis/component_analysis.py'},
+      {title:'generalization_eda.py',file:'Results_Analysis/generalization_eda.py'},
+      {title:'gnn_fx_explain.py',file:'Results_Analysis/gnn_fx_explain.py'}
+    ]}
+  ]
+};
+
+const SPINE_SIDE_BOXES = {
+  train:[
+    {type:'import',label:'IMPORT',text:'utils/state.py',file:'utils/state.py'},
+    {type:'import',label:'IMPORT',text:'utils/action_wrapper.py',file:'utils/action_wrapper.py'},
+    {type:'import',label:'IMPORT',text:'utils/replay_buffer.py',file:'utils/replay_buffer.py'}
+  ],
+  policy:[
+    {type:'inherit',label:'INHERITS PATTERN',text:'TD3/TD3.py (classic)',file:'TD3/TD3.py'}
+  ]
+};
+
+function getConfigFamilyEdges(problem) {
+  const list = problem === 'PublicPST' ? [
+    'PublicPST.yaml','PublicPST_100.yaml','PublicPST_500.yaml','PublicPST_1000.yaml',
+    'PublicPST_100_g1.yaml','PublicPST_100_g2.yaml','PublicPST_100_g3.yaml',
+    'PublicPST_500_g1.yaml','PublicPST_500_g2.yaml','PublicPST_500_g3.yaml',
+    'PublicPST_GNN_example.yaml'
+  ] : [
+    'V2G_ProfixMaxWithLoads_25.yaml',
+    'V2G_ProfixMaxWithLoads_100.yaml',
+    'V2G_ProfixMaxWithLoads_500.yaml'
+  ];
+  return list.map(f => ({type:'option',label:'YAML',text:f,file:'config_files/'+f}));
+}
+
+function getSideBoxesForExpandedNode() {
+  if (expandedSpineNode === 'config') return getConfigFamilyEdges(filters.problem);
+  return SPINE_SIDE_BOXES[expandedSpineNode] || [];
+}
+
+const ABLATION_NOTES = {
+  'PublicPST_GNN_no_position_encoding':{
+    description:'Removes ID/position encodings from EV, charging-station, and transformer features. For EV nodes, this removes EV.id, cs.id, and tr.id; this tests whether structural position identifiers help the GNN distinguish otherwise similar nodes.',
+    paperRef:'Methods Eq. (5)-(7): position/identifier features in EV, charging-station, and transformer node features.'
+  },
+  'PublicPST_GNN_full_graph':{
+    description:'Intended full-graph ablation: keeps charger/EV-port branches even when no EV is connected by adding zero-like EV placeholder features. Note: the uploaded implementation uses cs.evs_connected[i] inside a port_n loop, so this function should be code-audited before being treated as production-stable.',
+    paperRef:'Fig. 1a (graph pruning) / Methods, "End-to-end RL GNN architecture".'
+  }
+};
+
+
+const PAPER_CODE_MAPPINGS = [
+  {
+    landmark:'Fig. 1a',
+    title:'Graph problem structure (EV / CS / TR / CPO, pruning)',
+    refs:[
+      {file:'utils/state.py', symbol:'PublicPST_GNN'},
+      {file:'utils/state.py', symbol:'V2G_ProfitMax_with_Loads_GNN'}
+    ]
+  },
+  {
+    landmark:'Fig. 1b',
+    title:'Feature extractor (node-specific MLPs → F0 embeddings)',
+    refs:[
+      {file:'TD3/TD3_ActionGNN.py', symbol:'Actor.ev_embedding / cs_embedding / tr_embedding / env_embedding'},
+      {file:'SAC/actionSAC.py', symbol:'same node-specific embedding pattern'}
+    ]
+  },
+  {
+    landmark:'Fig. 1c',
+    title:'Actor NN with L GCN layers and action mapper',
+    refs:[
+      {file:'TD3/TD3_ActionGNN.py', symbol:'Actor.forward; action_mapper scatter'},
+      {file:'SAC/actionSAC.py', symbol:'Actor.forward'}
+    ]
+  },
+  {
+    landmark:'Fig. 1d',
+    title:'Critic NN with K GCN layers + mean pooling + MLP',
+    refs:[
+      {file:'TD3/TD3_ActionGNN.py', symbol:'Critic.forward'},
+      {file:'SAC/actionSAC.py', symbol:'Critic.forward'}
+    ]
+  },
+  {
+    landmark:'Fig. 2',
+    title:'Maximum reward vs scale comparison',
+    refs:[
+      {file:'Results_Analysis/max_performance_results.py'},
+      {file:'Results_Analysis/mean_performance_comparison.py'}
+    ]
+  },
+  {
+    landmark:'Fig. 3a',
+    title:'Action comparison TD3 vs TD3 EV-GNN',
+    refs:[
+      {file:'Results_Analysis/gnn_fx_explain.py'},
+      {file:'Results_Analysis/state_action_eda.py'}
+    ]
+  },
+  {
+    landmark:'Fig. 3b',
+    title:'Action density per occupancy band',
+    refs:[
+      {file:'Results_Analysis/state_action_eda.py'}
+    ]
+  },
+  {
+    landmark:'Fig. 4',
+    title:'Out-of-distribution generalisation',
+    refs:[
+      {file:'Results_Analysis/generalization_eda.py'},
+      {file:'config_files/PublicPST_500_g1.yaml'},
+      {file:'config_files/PublicPST_500_g2.yaml'},
+      {file:'config_files/PublicPST_500_g3.yaml'}
+    ]
+  },
+  {
+    landmark:'Fig. 5',
+    title:'Multi-discrete reward comparison',
+    refs:[
+      {file:'Results_Analysis/discrete_eda.py'},
+      {file:'utils/action_wrapper.py', symbol:'ThreeStep_Action'},
+      {file:'utils/action_wrapper.py', symbol:'ThreeStep_Action_DiscreteActionSpace'},
+      {file:'utils/action_wrapper.py', symbol:'mask_fn'}
+    ]
+  },
+  {
+    landmark:'Fig. 6',
+    title:'V2G profit maximisation',
+    refs:[
+      {file:'Results_Analysis/v2g_rewards_eda.py'},
+      {file:'Results_Analysis/v2g_stats eda.py', display:'Results_Analysis/v2g_stats eda.py'},
+      {file:'config_files/V2G_ProfixMaxWithLoads_25.yaml'},
+      {file:'config_files/V2G_ProfixMaxWithLoads_100.yaml'},
+      {file:'config_files/V2G_ProfixMaxWithLoads_500.yaml'}
+    ]
+  },
+  {
+    landmark:'Table 2',
+    title:'1000 CP evaluation',
+    refs:[
+      {file:'evaluator.py'},
+      {file:'Results_Analysis/parse_evaluator_results.py'}
+    ]
+  },
+  {
+    landmark:'Eq. (3)',
+    title:'GCN propagation rule',
+    refs:[
+      {file:'TD3/TD3_ActionGNN.py', symbol:'Actor.gcn_layers (GCNConv from torch_geometric)'}
+    ]
+  },
+  {
+    landmark:'Eq. (4)',
+    title:'Mean pooling',
+    refs:[
+      {file:'TD3/TD3_ActionGNN.py', symbol:'Critic.forward (global_mean_pool)'}
+    ]
+  },
+  {
+    landmark:'Eq. (5)-(8)',
+    title:'PST node feature vectors',
+    refs:[
+      {file:'utils/state.py', symbol:'PublicPST_GNN'},
+      {external:true, display:'ev2gym.rl_agent.state.PublicPST', symbol:'external ev2gym package'}
+    ]
+  },
+  {
+    landmark:'Eq. (9)',
+    title:'Action mapping a_j = a_j * I_max',
+    refs:[
+      {external:true, display:'EV2Gym env.step()', symbol:'external scaling to charging current'},
+      {file:'utils/state.py', symbol:'action_mapper'},
+      {file:'TD3/TD3_ActionGNN.py', symbol:'Actor.forward EV-node-to-flat-vector mapping'}
+    ]
+  },
+  {
+    landmark:'Eq. (10)',
+    title:'PST reward function',
+    refs:[
+      {external:true, display:'ev2gym.rl_agent.reward.SimpleReward', symbol:'external ev2gym package'},
+      {file:'train_RL_GNN.py', symbol:'reward-function routing'}
+    ]
+  },
+  {
+    landmark:'Eq. (28)-(29)',
+    title:'V2G MIP objective and SoC constraint',
+    refs:[
+      {external:true, display:'ev2gym.baselines.mpc', symbol:'MPC baselines'},
+      {external:true, display:'ev2gym.baselines.gurobi_models', symbol:'Gurobi oracle baselines'},
+      {file:'evaluator.py', symbol:'baseline/oracle loading branches'}
+    ]
+  },
+  {
+    landmark:'Eq. (30)-(32)',
+    title:'V2G state and reward',
+    refs:[
+      {file:'utils/state.py', symbol:'V2G_ProfitMax_with_Loads_GNN'},
+      {external:true, display:'ev2gym.rl_agent.reward.ProfitMax_TrPenalty_UserIncentives', symbol:'external ev2gym package'}
+    ]
+  }
+];
+
+const PH = (path) => ({
+  path, role:'', purpose:'TODO: filled in stage 2',
+  inputs:[], outputs:[], imports:[], importedBy:[],
+  classes:[], functions:[], related:[], paperRef:''
+});
+
+const NODES = {
+  "train_RL_GNN.py": {
+    path: "train_RL_GNN.py",
+    role: "Main training entry point for EV-GNN and its baseline policy variants.",
+    purpose: "Parses CLI arguments, loads one EV2Gym YAML config, selects the reward/state function according to the config family, registers the EV2Gym environment, instantiates Classic RL, FX-GNN, or EV-GNN policy variants, attaches the matching replay buffer, runs the training loop, evaluates periodically, and saves model checkpoints plus kwargs.",
+    inputs: [
+      "--config, --policy, --seed, --max_timesteps, --start_timesteps, --eval_freq, --batch_size",
+      "--discrete_actions, --no_positional_encoding, --full_graph",
+      "YAML config under config_files/",
+      "EV2Gym environment observations and rewards"
+    ],
+    outputs: [
+      "saved_models/<experiment>/model.best",
+      "saved_models/<experiment>/model.last",
+      "saved_models/<experiment>/kwargs.yaml",
+      "wandb logs when --log_to_wandb is enabled",
+      "evaluation statistics from eval_policy"
+    ],
+    imports: [
+      "numpy",
+      "torch",
+      "gymnasium",
+      "argparse",
+      "os",
+      "wandb",
+      "yaml",
+      "random",
+      "time",
+      "tqdm.tqdm",
+      "ev2gym",
+      "ev2gym.rl_agent.reward.ProfitMax_TrPenalty_UserIncentives",
+      "ev2gym.rl_agent.reward.SimpleReward",
+      "ev2gym.rl_agent.state.V2G_profit_max",
+      "ev2gym.rl_agent.state.PublicPST",
+      "ev2gym.rl_agent.state.V2G_profit_max_loads",
+      "utils.state.PublicPST_GNN",
+      "utils.state.V2G_ProfitMax_with_Loads_GNN",
+      "utils.state.PublicPST_GNN_no_position_encoding",
+      "utils.state.PublicPST_GNN_full_graph",
+      "TD3.TD3_GNN.TD3_GNN",
+      "TD3.TD3_ActionGNN.TD3_ActionGNN",
+      "TD3.TD3.TD3",
+      "utils.replay_buffer.GNN_ReplayBuffer",
+      "utils.replay_buffer.ReplayBuffer",
+      "utils.replay_buffer.ActionGNN_ReplayBuffer",
+      "SAC.sac.SAC",
+      "SAC.actionSAC.SAC_ActionGNN",
+      "utils.action_wrapper.BinaryAction",
+      "utils.action_wrapper.ThreeStep_Action",
+      "gymnasium.Space",
+      "torch_geometric.data.Data"
+    ],
+    importedBy: [],
+    classes: [
+      "PyGDataSpace(Space)"
+    ],
+    functions: [
+      "eval_policy"
+    ],
+    related: [
+      "config_files/PublicPST.yaml",
+      "config_files/V2G_ProfixMaxWithLoads_25.yaml",
+      "utils/state.py",
+      "utils/replay_buffer.py",
+      "utils/action_wrapper.py",
+      "TD3/TD3.py",
+      "TD3/TD3_GNN.py",
+      "TD3/TD3_ActionGNN.py",
+      "SAC/sac.py",
+      "SAC/actionSAC.py"
+    ],
+    paperRef: "Methods, training and parameterisation; Fig. 1c-d"
+  },
+
+  "train_baselines.py": {
+    path: "train_baselines.py",
+    role: "StableBaselines3 baseline training script.",
+    purpose: "Trains non-GNN vector-state baselines for EV2Gym using StableBaselines3 and sb3-contrib algorithms. This file belongs to the Classic RL baseline regime: it uses EV2Gym vector observations through MlpPolicy, optionally wraps the action space for three-step or fully discrete experiments, logs to wandb, saves best models through EvalCallback, and prints post-training test statistics.",
+    inputs: [
+      "--algorithm",
+      "--device",
+      "--run_name",
+      "--group_name",
+      "--discrete_actions",
+      "--train_steps",
+      "--config_file",
+      "EV2Gym vector observation space",
+      "EV2Gym continuous or wrapped discrete action space"
+    ],
+    outputs: [
+      "./saved_models/<group_name>/<run_name>/best_model.zip",
+      "./eval_logs/<group_name>_<run_name>/",
+      "wandb run under project ev2gym_PaperExps",
+      "printed average test statistics over 96*20 steps"
+    ],
+    imports: [
+      "stable_baselines3.PPO",
+      "stable_baselines3.A2C",
+      "stable_baselines3.DDPG",
+      "stable_baselines3.SAC",
+      "stable_baselines3.TD3",
+      "stable_baselines3.DQN",
+      "stable_baselines3.common.callbacks.BaseCallback",
+      "stable_baselines3.common.callbacks.EvalCallback",
+      "sb3_contrib.TQC",
+      "sb3_contrib.TRPO",
+      "sb3_contrib.ARS",
+      "sb3_contrib.RecurrentPPO",
+      "sb3_contrib.MaskablePPO",
+      "sb3_contrib.QRDQN",
+      "sb3_contrib.common.maskable.policies.MaskableActorCriticPolicy",
+      "sb3_contrib.common.wrappers.ActionMasker",
+      "utils.action_wrapper.ThreeStep_Action_DiscreteActionSpace",
+      "utils.action_wrapper.mask_fn",
+      "utils.action_wrapper.Fully_Discrete",
+      "ev2gym.models.ev2gym_env.EV2Gym",
+      "ev2gym.rl_agent.reward.SquaredTrackingErrorReward",
+      "ev2gym.rl_agent.reward.ProfitMax_TrPenalty_UserIncentives",
+      "ev2gym.rl_agent.reward.profit_maximization",
+      "ev2gym.rl_agent.reward.SimpleReward",
+      "ev2gym.rl_agent.state.V2G_profit_max",
+      "ev2gym.rl_agent.state.PublicPST",
+      "ev2gym.rl_agent.state.V2G_profit_max_loads",
+      "gymnasium",
+      "argparse",
+      "wandb",
+      "wandb.integration.sb3.WandbCallback",
+      "os",
+      "yaml",
+      "random"
+    ],
+    importedBy: [],
+    classes: [],
+    functions: [],
+    related: [
+      "utils/action_wrapper.py",
+      "evaluator.py",
+      "config_files/PublicPST.yaml",
+      "config_files/V2G_ProfixMaxWithLoads_25.yaml"
+    ],
+    paperRef: "Results, baseline comparison against standard RL algorithms; Table 2"
+  },
+
+  "evaluator.py": {
+    path: "evaluator.py",
+    role: "Post-training benchmark evaluator.",
+    purpose: "Loads trained EV-GNN, FX-GNN, Classic RL, selected StableBaselines3/sb3-contrib checkpoints, and available heuristic/MPC/Gurobi-oracle branches into replay-controlled EV2Gym environments. It selects the normal or GNN state function depending on the algorithm, runs evaluation cycles on replay files, records metrics into data.csv, saves plot_results_dict.pkl, and optionally saves AnalysisReplayBuffer objects for state/action distribution analysis when SAVE_REPLAY_BUFFER is enabled. In the uploaded source snapshot, n_test_cycles defaults to 1, while the paper Table 2 protocol reports 100 evaluation runs.",
+    inputs: [
+      "config_file selected inside evaluator()",
+      "./replay/<scenario>/ replay pickle files, or generated replays if absent",
+      "./eval_models/<algorithm>/ model checkpoints and kwargs.yaml",
+      "EV2Gym replay-loaded environment"
+    ],
+    outputs: [
+      "./results/<evaluation_name>/data.csv",
+      "./results/<evaluation_name>/plot_results_dict.pkl",
+      "./results/<evaluation_name>/replay_buffers.pkl when SAVE_REPLAY_BUFFER is True",
+      "EV2Gym evaluator plots such as actual power vs setpoint"
+    ],
+    imports: [
+      "yaml",
+      "os",
+      "pickle",
+      "copy.deepcopy",
+      "pandas",
+      "numpy",
+      "matplotlib.pyplot",
+      "torch",
+      "datetime",
+      "time",
+      "ev2gym.models.ev2gym_env.EV2Gym",
+      "ev2gym.baselines.heuristics.RoundRobin",
+      "ev2gym.baselines.heuristics.ChargeAsLateAsPossible",
+      "ev2gym.baselines.heuristics.ChargeAsFastAsPossible",
+      "ev2gym.baselines.heuristics.ChargeAsFastAsPossibleToDesiredCapacity",
+      "ev2gym.baselines.heuristics.RoundRobin_GF_off_allowed",
+      "ev2gym.baselines.heuristics.RoundRobin_GF",
+      "ev2gym.baselines.mpc.ocmf_mpc.OCMF_V2G",
+      "ev2gym.baselines.mpc.ocmf_mpc.OCMF_G2V",
+      "ev2gym.baselines.mpc.eMPC.eMPC_V2G",
+      "ev2gym.baselines.mpc.eMPC.eMPC_G2V",
+      "ev2gym.baselines.mpc.eMPC_v2.eMPC_V2G_v2",
+      "ev2gym.baselines.mpc.V2GProfitMax.V2GProfitMaxOracle",
+      "ev2gym.baselines.mpc.V2GProfitMax.V2GProfitMaxLoadsOracle",
+      "stable_baselines3.PPO",
+      "stable_baselines3.A2C",
+      "stable_baselines3.DDPG",
+      "stable_baselines3.SAC",
+      "sb3_contrib.TQC",
+      "sb3_contrib.TRPO",
+      "sb3_contrib.ARS",
+      "sb3_contrib.RecurrentPPO",
+      "TD3.TD3_GNN.TD3_GNN",
+      "TD3.TD3_ActionGNN.TD3_ActionGNN",
+      "TD3.old_TD3_ActionGNN.TD3_ActionGNN",
+      "TD3.TD3.TD3",
+      "SAC.sac.SAC",
+      "SAC.actionSAC.SAC_ActionGNN",
+      "SAC.old_actionSAC.SAC_ActionGNN",
+      "utils.state.PublicPST_GNN",
+      "utils.state.V2G_ProfitMax_with_Loads_GNN",
+      "ev2gym.baselines.gurobi_models.tracking_error.PowerTrackingErrorrMin",
+      "ev2gym.baselines.gurobi_models.profit_max.V2GProfitMaxOracleGB",
+      "ev2gym.rl_agent.reward.SquaredTrackingErrorReward",
+      "ev2gym.rl_agent.reward.SimpleReward",
+      "ev2gym.rl_agent.reward.profit_maximization",
+      "ev2gym.rl_agent.reward.ProfitMax_TrPenalty_UserIncentives",
+      "ev2gym.rl_agent.state.V2G_profit_max",
+      "ev2gym.rl_agent.state.PublicPST",
+      "ev2gym.rl_agent.state.V2G_profit_max_loads",
+      "ev2gym.visuals.evaluator_plot.plot_total_power",
+      "ev2gym.visuals.evaluator_plot.plot_comparable_EV_SoC",
+      "ev2gym.visuals.evaluator_plot.plot_total_power_V2G",
+      "ev2gym.visuals.evaluator_plot.plot_actual_power_vs_setpoint",
+      "ev2gym.visuals.evaluator_plot.plot_comparable_EV_SoC_single",
+      "ev2gym.visuals.evaluator_plot.plot_prices",
+      "state_action_eda.AnalysisReplayBuffer",
+      "gymnasium",
+      "torch"
+    ],
+    importedBy: [],
+    classes: [],
+    functions: [
+      "evaluator"
+    ],
+    related: [
+      "train_RL_GNN.py",
+      "train_baselines.py",
+      "utils/state.py",
+      "Results_Analysis/state_action_eda.py",
+      "Results_Analysis/parse_evaluator_results.py",
+      "Results_Analysis/mean_performance_comparison.py"
+    ],
+    paperRef: "Table 2; Results, scalability and benchmark comparison"
+  },
+
+  "requirements.txt": {
+    path: "requirements.txt",
+    role: "Python dependency manifest.",
+    purpose: "Specifies the runtime packages used by the repository: ev2gym, wandb, tqdm, torch 2.2.2, icecream, StableBaselines3 with extras, and sb3-contrib. It supports both the custom EV-GNN training scripts and the StableBaselines3 baseline scripts.",
+    inputs: [
+      "pip install -r requirements.txt"
+    ],
+    outputs: [
+      "Python environment with ev2gym, torch, StableBaselines3, sb3-contrib, wandb, tqdm, and icecream"
+    ],
+    imports: [],
+    importedBy: [],
+    classes: [],
+    functions: [],
+    related: [
+      "train_RL_GNN.py",
+      "train_baselines.py",
+      "evaluator.py"
+    ],
+    paperRef: "Reproducibility support for Methods, training and evaluation setup"
+  },
+
+  "README.md": {
+    path: "README.md",
+    role: "Repository overview and citation guide.",
+    purpose: "Introduces the EV-GNN paper, links the Communications Engineering article, links trained models and results, summarises the graph modelling idea, graph simplification, node-feature processing, actor network, critic network, scalability results, multi-discrete experiments, V2G experiments, and provides the BibTeX citation.",
+    inputs: [
+      "Reader-facing repository landing page"
+    ],
+    outputs: [
+      "Conceptual overview of EV-GNN",
+      "Links to paper, trained models, results, and citation metadata"
+    ],
+    imports: [],
+    importedBy: [],
+    classes: [],
+    functions: [],
+    related: [
+      "train_RL_GNN.py",
+      "evaluator.py",
+      "TD3/TD3_ActionGNN.py",
+      "Results_Analysis/max_performance_results.py",
+      "Results_Analysis/gnn_fx_explain.py",
+      "Results_Analysis/v2g_rewards_eda.py"
+    ],
+    paperRef: "Repository summary of Orfanoudakis et al. 2025; DOI 10.1038/s44172-025-00457-8"
+  },
+
+  "config_files/PublicPST.yaml": {
+    path: "config_files/PublicPST.yaml",
+    role: "Representative Public Power Setpoint Tracking config for 25 charging stations.",
+    purpose: "Configures a PublicPST EV2Gym simulation with 15-minute steps, 112-step horizon, random weekday start at 05:00, public EV spawning, V2G disabled, 25 charging stations, 3 transformers, one port per station, no inflexible load or solar modules, and 20% power-setpoint flexibility.",
+    inputs: [
+      "Loaded by EV2Gym through train_RL_GNN.py, evaluator.py, or train_baselines.py",
+      "Used with PublicPST or PublicPST_GNN state functions"
+    ],
+    outputs: [
+      "EV2Gym simulation instance for PST experiments",
+      "Network dimensions: 25 CS, 3 transformers, 1 port per CS"
+    ],
+    imports: [],
+    importedBy: [],
+    classes: [],
+    functions: [],
+    related: [
+      "train_RL_GNN.py",
+      "evaluator.py",
+      "train_baselines.py",
+      "utils/state.py"
+    ],
+    paperRef: "Methods, Power Setpoint Tracking setting; Results, scalability experiment scales; Fig. 2"
+  },
+
+  "config_files/PublicPST_100.yaml": {
+    path: "config_files/PublicPST_100.yaml",
+    role: "PublicPST scaling config for 100 charging stations.",
+    purpose: "Configures the same PublicPST family as PublicPST.yaml but scales the network to 100 charging stations and 7 transformers with V2G disabled and 5% power-setpoint flexibility.",
+    inputs: [
+      "EV2Gym config_file path",
+      "PublicPST or PublicPST_GNN state routing"
+    ],
+    outputs: [
+      "EV2Gym PST simulation with 100 CS and 7 transformers"
+    ],
+    imports: [],
+    importedBy: [],
+    classes: [],
+    functions: [],
+    related: [
+      "config_files/PublicPST.yaml",
+      "config_files/PublicPST_500.yaml",
+      "config_files/PublicPST_1000.yaml",
+      "train_RL_GNN.py",
+      "evaluator.py"
+    ],
+    paperRef: "Results, enabling scalability in RL algorithms; Fig. 2"
+  },
+
+  "config_files/PublicPST_1000.yaml": {
+    path: "config_files/PublicPST_1000.yaml",
+    role: "PublicPST scaling config for 1000 charging stations.",
+    purpose: "Configures the largest PublicPST scale present in the repository: 1000 charging stations, 70 transformers, one port per station, V2G disabled, public scenario, 112-step horizon, and 5% power-setpoint flexibility.",
+    inputs: [
+      "EV2Gym config_file path",
+      "PublicPST or PublicPST_GNN state routing"
+    ],
+    outputs: [
+      "EV2Gym PST simulation with 1000 CS and 70 transformers"
+    ],
+    imports: [],
+    importedBy: [],
+    classes: [],
+    functions: [],
+    related: [
+      "config_files/PublicPST_100.yaml",
+      "config_files/PublicPST_500.yaml",
+      "train_RL_GNN.py",
+      "evaluator.py"
+    ],
+    paperRef: "Results, 1000 CP large-scale comparison; Table 2"
+  },
+
+  "config_files/PublicPST_100_g1.yaml": {
+    path: "config_files/PublicPST_100_g1.yaml",
+    role: "PublicPST 100-CS generalisation scenario g1.",
+    purpose: "Configures a 100-CS, 7-transformer PST scenario with V2G disabled, private scenario, simulation_days set to both, and 5% setpoint flexibility. It is one of the generalisation variants used to alter the scenario distribution while keeping the same 100-CS scale.",
+    inputs: [
+      "EV2Gym config_file path for generalisation evaluation"
+    ],
+    outputs: [
+      "EV2Gym PST generalisation simulation: 100 CS, 7 transformers, private/both-days scenario"
+    ],
+    imports: [],
+    importedBy: [],
+    classes: [],
+    functions: [],
+    related: [
+      "config_files/PublicPST_100.yaml",
+      "config_files/PublicPST_100_g2.yaml",
+      "config_files/PublicPST_100_g3.yaml",
+      "Results_Analysis/generalization_eda.py"
+    ],
+    paperRef: "Results, generalisation experiments; Fig. 4"
+  },
+
+  "config_files/PublicPST_100_g2.yaml": {
+    path: "config_files/PublicPST_100_g2.yaml",
+    role: "PublicPST 100-CS generalisation scenario g2.",
+    purpose: "Configures a 100-CS, 7-transformer PST scenario with V2G disabled, workplace EV spawning, weekdays, and 5% setpoint flexibility. It changes the EV arrival/use scenario while preserving the 100-CS network scale.",
+    inputs: [
+      "EV2Gym config_file path for generalisation evaluation"
+    ],
+    outputs: [
+      "EV2Gym PST generalisation simulation: 100 CS, 7 transformers, workplace scenario"
+    ],
+    imports: [],
+    importedBy: [],
+    classes: [],
+    functions: [],
+    related: [
+      "config_files/PublicPST_100.yaml",
+      "config_files/PublicPST_100_g1.yaml",
+      "config_files/PublicPST_100_g3.yaml",
+      "Results_Analysis/generalization_eda.py"
+    ],
+    paperRef: "Results, generalisation experiments; Fig. 4"
+  },
+
+  "config_files/PublicPST_100_g3.yaml": {
+    path: "config_files/PublicPST_100_g3.yaml",
+    role: "PublicPST 100-CS generalisation scenario g3.",
+    purpose: "Configures a 100-CS, 7-transformer PST scenario with V2G disabled, public weekday EV spawning, and 5% setpoint flexibility. It is grouped with the 100-CS generalisation configs consumed by the generalisation analysis script.",
+    inputs: [
+      "EV2Gym config_file path for generalisation evaluation"
+    ],
+    outputs: [
+      "EV2Gym PST generalisation simulation: 100 CS, 7 transformers, public weekday scenario"
+    ],
+    imports: [],
+    importedBy: [],
+    classes: [],
+    functions: [],
+    related: [
+      "config_files/PublicPST_100.yaml",
+      "config_files/PublicPST_100_g1.yaml",
+      "config_files/PublicPST_100_g2.yaml",
+      "Results_Analysis/generalization_eda.py"
+    ],
+    paperRef: "Results, generalisation experiments; Fig. 4"
+  },
+
+  "config_files/PublicPST_500.yaml": {
+    path: "config_files/PublicPST_500.yaml",
+    role: "PublicPST scaling config for 500 charging stations.",
+    purpose: "Configures a 500-CS, 35-transformer PublicPST simulation with V2G disabled, one port per station, public weekday scenario, 112-step horizon, and 5% power-setpoint flexibility.",
+    inputs: [
+      "EV2Gym config_file path",
+      "PublicPST or PublicPST_GNN state routing"
+    ],
+    outputs: [
+      "EV2Gym PST simulation with 500 CS and 35 transformers"
+    ],
+    imports: [],
+    importedBy: [],
+    classes: [],
+    functions: [],
+    related: [
+      "config_files/PublicPST_100.yaml",
+      "config_files/PublicPST_1000.yaml",
+      "config_files/PublicPST_500_g1.yaml",
+      "config_files/PublicPST_500_g2.yaml",
+      "config_files/PublicPST_500_g3.yaml",
+      "train_RL_GNN.py",
+      "evaluator.py"
+    ],
+    paperRef: "Results, enabling scalability in RL algorithms; Fig. 2"
+  },
+
+  "config_files/PublicPST_500_g1.yaml": {
+    path: "config_files/PublicPST_500_g1.yaml",
+    role: "PublicPST 500-CS generalisation scenario g1.",
+    purpose: "Configures a 500-CS, 35-transformer PST scenario with private EV spawning, simulation_days set to both, V2G disabled, and 5% setpoint flexibility.",
+    inputs: [
+      "EV2Gym config_file path for 500-CS generalisation evaluation"
+    ],
+    outputs: [
+      "EV2Gym PST generalisation simulation: 500 CS, 35 transformers, private/both-days scenario"
+    ],
+    imports: [],
+    importedBy: [],
+    classes: [],
+    functions: [],
+    related: [
+      "config_files/PublicPST_500.yaml",
+      "config_files/PublicPST_500_g2.yaml",
+      "config_files/PublicPST_500_g3.yaml",
+      "Results_Analysis/generalization_eda.py"
+    ],
+    paperRef: "Results, generalisation experiments; Fig. 4"
+  },
+
+  "config_files/PublicPST_500_g2.yaml": {
+    path: "config_files/PublicPST_500_g2.yaml",
+    role: "PublicPST 500-CS generalisation scenario g2.",
+    purpose: "Configures a 500-CS, 35-transformer PST scenario with workplace EV spawning, weekdays, V2G disabled, and 5% setpoint flexibility.",
+    inputs: [
+      "EV2Gym config_file path for 500-CS generalisation evaluation"
+    ],
+    outputs: [
+      "EV2Gym PST generalisation simulation: 500 CS, 35 transformers, workplace scenario"
+    ],
+    imports: [],
+    importedBy: [],
+    classes: [],
+    functions: [],
+    related: [
+      "config_files/PublicPST_500.yaml",
+      "config_files/PublicPST_500_g1.yaml",
+      "config_files/PublicPST_500_g3.yaml",
+      "Results_Analysis/generalization_eda.py"
+    ],
+    paperRef: "Results, generalisation experiments; Fig. 4"
+  },
+
+  "config_files/PublicPST_500_g3.yaml": {
+    path: "config_files/PublicPST_500_g3.yaml",
+    role: "PublicPST 500-CS generalisation scenario g3.",
+    purpose: "Configures a 500-CS, 35-transformer PST scenario with public weekday EV spawning, V2G disabled, and 5% setpoint flexibility.",
+    inputs: [
+      "EV2Gym config_file path for 500-CS generalisation evaluation"
+    ],
+    outputs: [
+      "EV2Gym PST generalisation simulation: 500 CS, 35 transformers, public weekday scenario"
+    ],
+    imports: [],
+    importedBy: [],
+    classes: [],
+    functions: [],
+    related: [
+      "config_files/PublicPST_500.yaml",
+      "config_files/PublicPST_500_g1.yaml",
+      "config_files/PublicPST_500_g2.yaml",
+      "Results_Analysis/generalization_eda.py"
+    ],
+    paperRef: "Results, generalisation experiments; Fig. 4"
+  },
+
+  "config_files/PublicPST_GNN_example.yaml": {
+    path: "config_files/PublicPST_GNN_example.yaml",
+    role: "Small PublicPST graph-example config.",
+    purpose: "Configures a compact PublicPST example with 5 charging stations, 2 transformers, 2 ports per station, V2G disabled, 112-step horizon, and 5% setpoint flexibility. Its small network size makes it suitable for local graph-state inspection rather than large-scale benchmarking.",
+    inputs: [
+      "EV2Gym config_file path",
+      "PublicPST_GNN state construction"
+    ],
+    outputs: [
+      "Small EV2Gym PST graph instance: 5 CS, 2 transformers, 2 ports per CS"
+    ],
+    imports: [],
+    importedBy: [],
+    classes: [],
+    functions: [],
+    related: [
+      "utils/state.py",
+      "train_RL_GNN.py",
+      "config_files/PublicPST.yaml"
+    ],
+    paperRef: "Methods, graph construction example; Fig. 1a"
+  },
+
+  "config_files/V2G_ProfixMaxWithLoads_25.yaml": {
+    path: "config_files/V2G_ProfixMaxWithLoads_25.yaml",
+    role: "Representative V2G profit-maximisation-with-loads config for 25 charging stations.",
+    purpose: "Configures the V2G profit maximisation setting with inflexible loads and solar enabled: 15-minute steps, 96-step horizon, fixed weekday start at 00:00, private EV spawning, V2G enabled, 25 charging stations, 3 transformers, one port per station, and 50% power-setpoint flexibility.",
+    inputs: [
+      "Loaded by EV2Gym through train_RL_GNN.py or evaluator.py",
+      "Used with V2G_profit_max_loads or V2G_ProfitMax_with_Loads_GNN"
+    ],
+    outputs: [
+      "EV2Gym V2G profit-maximisation simulation with loads/PV",
+      "Network dimensions: 25 CS, 3 transformers, 1 port per CS"
+    ],
+    imports: [],
+    importedBy: [],
+    classes: [],
+    functions: [],
+    related: [
+      "config_files/V2G_ProfixMaxWithLoads_100.yaml",
+      "config_files/V2G_ProfixMaxWithLoads_500.yaml",
+      "utils/state.py",
+      "Results_Analysis/v2g_rewards_eda.py",
+      "Results_Analysis/v2g_stats eda.py"
+    ],
+    paperRef: "Results, V2G profit maximisation with loads and PV; Fig. 6"
+  },
+
+  "config_files/V2G_ProfixMaxWithLoads_100.yaml": {
+    path: "config_files/V2G_ProfixMaxWithLoads_100.yaml",
+    role: "V2G profit-maximisation-with-loads config for 100 charging stations.",
+    purpose: "Configures the V2G profit maximisation setting at 100 charging stations and 7 transformers, with V2G enabled, private scenario, inflexible loads enabled, solar enabled, 96-step horizon, and 50% power-setpoint flexibility.",
+    inputs: [
+      "EV2Gym config_file path",
+      "V2G_profit_max_loads or V2G_ProfitMax_with_Loads_GNN state routing"
+    ],
+    outputs: [
+      "EV2Gym V2G simulation with 100 CS and 7 transformers"
+    ],
+    imports: [],
+    importedBy: [],
+    classes: [],
+    functions: [],
+    related: [
+      "config_files/V2G_ProfixMaxWithLoads_25.yaml",
+      "config_files/V2G_ProfixMaxWithLoads_500.yaml",
+      "train_RL_GNN.py",
+      "evaluator.py"
+    ],
+    paperRef: "Results, V2G profit maximisation experiments; Fig. 6"
+  },
+
+  "config_files/V2G_ProfixMaxWithLoads_500.yaml": {
+    path: "config_files/V2G_ProfixMaxWithLoads_500.yaml",
+    role: "V2G profit-maximisation-with-loads config for 500 charging stations.",
+    purpose: "Configures the larger V2G profit maximisation setting at 500 charging stations and 35 transformers, with V2G enabled, private scenario, inflexible loads enabled, solar enabled, 96-step horizon, and 50% power-setpoint flexibility.",
+    inputs: [
+      "EV2Gym config_file path",
+      "V2G_profit_max_loads or V2G_ProfitMax_with_Loads_GNN state routing"
+    ],
+    outputs: [
+      "EV2Gym V2G simulation with 500 CS and 35 transformers"
+    ],
+    imports: [],
+    importedBy: [],
+    classes: [],
+    functions: [],
+    related: [
+      "config_files/V2G_ProfixMaxWithLoads_25.yaml",
+      "config_files/V2G_ProfixMaxWithLoads_100.yaml",
+      "Results_Analysis/v2g_rewards_eda.py",
+      "Results_Analysis/v2g_stats eda.py"
+    ],
+    paperRef: "Results, V2G profit maximisation experiments; Fig. 6"
+  },
+
+  "utils/state.py": {
+    path: "utils/state.py",
+    role: "EV2Gym-to-PyTorch-Geometric graph-state constructor.",
+    purpose: "Converts an EV2Gym environment into the heterogeneous graph representation consumed by FX-GNN and EV-GNN policies. It builds EV, charging-station, transformer, and environment/CPO node feature matrices, constructs the edge_index topology, records node index partitions, and creates action_mapper so active EV-node outputs can be scattered back into EV2Gym's fixed charging-station action vector. The PublicPST variants encode PST features; the V2G function adds price/load/solar-related V2G features.",
+    inputs: [
+      "env with charging_stations, transformers, current_step, sim_date, power_setpoints, and EV connection state",
+      "Optional *args ignored by these state functions"
+    ],
+    outputs: [
+      "torch_geometric.data.Data",
+      "ev_features, cs_features, tr_features, env_features",
+      "edge_index, node index groups, node_types",
+      "action_mapper and sample_node_length"
+    ],
+    imports: [
+      "numpy",
+      "torch_geometric.data.Data",
+      "math"
+    ],
+    importedBy: [
+      "train_RL_GNN.py",
+      "evaluator.py"
+    ],
+    classes: [],
+    functions: [
+      "PublicPST_GNN",
+      "PublicPST_GNN_full_graph",
+      "PublicPST_GNN_no_position_encoding",
+      "V2G_ProfitMax_with_Loads_GNN"
+    ],
+    related: [
+      "train_RL_GNN.py",
+      "evaluator.py",
+      "utils/replay_buffer.py",
+      "TD3/TD3_GNN.py",
+      "TD3/TD3_ActionGNN.py",
+      "SAC/model.py",
+      "SAC/actionSAC.py"
+    ],
+    paperRef: "Methods Eq. (5)-(8), Eq. (30)-(31); Fig. 1a-b"
+  },
+
+  "utils/replay_buffer.py": {
+    path: "utils/replay_buffer.py",
+    role: "Replay buffer implementations for vector-state, FX-GNN, EV-GNN, and Decision Transformer-style data.",
+    purpose: "Provides separate transition stores for the three EV-GNN paper regimes. ReplayBuffer stores vector observations for Classic RL; GNN_ReplayBuffer stores PyG graph states for FX-GNN; ActionGNN_ReplayBuffer stores PyG graph states plus EV-node actions for EV-GNN; DT_ReplayBuffer stores full trajectories and returns-to-go for Decision Transformer-style batches.",
+    inputs: [
+      "state, action, next_state, reward, done",
+      "gnn_state and gnn_next_state for GNN buffers",
+      "ev_action for ActionGNN_ReplayBuffer",
+      "trajectory data for DT_ReplayBuffer"
+    ],
+    outputs: [
+      "Sampled tensors for Classic RL",
+      "PyG DataLoader batches for FX-GNN and EV-GNN",
+      "Discounted cumulative sums for DT-style returns"
+    ],
+    imports: [
+      "numpy",
+      "torch",
+      "random",
+      "torch_geometric.data.Data",
+      "torch_geometric.loader.DataLoader"
+    ],
+    importedBy: [
+      "train_RL_GNN.py"
+    ],
+    classes: [
+      "ReplayBuffer(object)",
+      "GNN_ReplayBuffer(object)",
+      "ActionGNN_ReplayBuffer(object)",
+      "DT_ReplayBuffer(object)"
+    ],
+    functions: [
+      "discount_cumsum"
+    ],
+    related: [
+      "train_RL_GNN.py",
+      "utils/state.py",
+      "TD3/TD3.py",
+      "TD3/TD3_GNN.py",
+      "TD3/TD3_ActionGNN.py",
+      "SAC/sac.py",
+      "SAC/actionSAC.py"
+    ],
+    paperRef: "Methods, training and parameterisation; supports Classic RL, FX-GNN, and EV-GNN regimes"
+  },
+
+  "utils/action_wrapper.py": {
+    path: "utils/action_wrapper.py",
+    role: "EV2Gym action-space wrapper module.",
+    purpose: "Defines ActionWrapper classes that convert policy actions into binary, three-step, or fully discrete EV2Gym-compatible actions. BinaryAction maps positive actions to 1 and otherwise to the environment minimum action; ThreeStep_Action maps continuous values to 0, min_action, or 1; ThreeStep_Action_DiscreteActionSpace exposes MultiDiscrete(3) actions; Fully_Discrete exposes a flattened Discrete action space but its action conversion is not implemented.",
+    inputs: [
+      "EV2Gym environment",
+      "Continuous Box action vector or discrete action vector"
+    ],
+    outputs: [
+      "Wrapped Gymnasium action space",
+      "Discretised action vector passed to EV2Gym env.step",
+      "Action mask from mask_fn"
+    ],
+    imports: [
+      "gymnasium",
+      "gymnasium.spaces.Box",
+      "gymnasium.spaces.MultiDiscrete",
+      "gymnasium.spaces.Discrete",
+      "numpy"
+    ],
+    importedBy: [
+      "train_RL_GNN.py",
+      "train_baselines.py"
+    ],
+    classes: [
+      "BinaryAction(gym.ActionWrapper, gym.utils.RecordConstructorArgs)",
+      "ThreeStep_Action(gym.ActionWrapper, gym.utils.RecordConstructorArgs)",
+      "ThreeStep_Action_DiscreteActionSpace(gym.ActionWrapper, gym.utils.RecordConstructorArgs)",
+      "Fully_Discrete(gym.ActionWrapper, gym.utils.RecordConstructorArgs)"
+    ],
+    functions: [
+      "mask_fn"
+    ],
+    related: [
+      "train_RL_GNN.py",
+      "train_baselines.py",
+      "Results_Analysis/discrete_eda.py"
+    ],
+    paperRef: "Results, application to multi-discrete domains; Fig. 5"
+  },
+
+  "TD3/TD3.py": {
+    path: "TD3/TD3.py",
+    role: "Classic TD3 baseline implementation.",
+    purpose: "Implements the pure MLP, vector-state TD3 baseline. Actor maps flat EV2Gym vector states to the full action vector; Critic concatenates vector state and action to estimate twin Q-values. This is the Classic RL regime and does not use graph feature extraction or action_mapper.",
+    inputs: [
+      "state_dim",
+      "action_dim",
+      "max_action",
+      "ReplayBuffer samples: state, action, next_state, reward, not_done"
+    ],
+    outputs: [
+      "Continuous action vector",
+      "Critic loss and actor loss",
+      "Actor and critic checkpoint files"
+    ],
+    imports: [
+      "copy",
+      "numpy",
+      "torch",
+      "torch.nn",
+      "torch.nn.functional",
+      "torch_geometric.nn.GCNConv",
+      "torch_geometric.nn.GlobalAttention",
+      "torch_geometric.nn.GATConv",
+      "torch_geometric.transforms"
+    ],
+    importedBy: [
+      "train_RL_GNN.py",
+      "evaluator.py",
+      "Results_Analysis/gnn_fx_explain.py"
+    ],
+    classes: [
+      "Actor(nn.Module)",
+      "Critic(nn.Module)",
+      "TD3(object)"
+    ],
+    functions: [],
+    related: [
+      "utils/replay_buffer.py",
+      "TD3/TD3_GNN.py",
+      "TD3/TD3_ActionGNN.py",
+      "SAC/sac.py"
+    ],
+    paperRef: "Classic RL baseline; Table 2; TD3 reference algorithm arXiv:1802.09477"
+  },
+
+  "TD3/TD3_GNN.py": {
+    path: "TD3/TD3_GNN.py",
+    role: "TD3 FX-GNN implementation.",
+    purpose: "Implements the FX-GNN regime: graph state is first embedded by node-type-specific linear layers and GCN layers, then globally pooled into a fixed graph-level feature vector. The TD3 actor and critic remain MLP heads over this pooled embedding, so the action output is still a flat full action vector rather than EV-node-local outputs.",
+    inputs: [
+      "PyG Data state from utils/state.py",
+      "GNN_ReplayBuffer samples",
+      "action_dim, max_action, fx_node_sizes, GNN and MLP hyperparameters"
+    ],
+    outputs: [
+      "Flat continuous action vector",
+      "Pooled graph embedding",
+      "Critic and actor losses",
+      "Actor and critic checkpoint files"
+    ],
+    imports: [
+      "copy",
+      "numpy",
+      "torch",
+      "torch.nn",
+      "torch.nn.functional",
+      "torch_geometric.nn.GCNConv",
+      "torch_geometric.nn.GATConv",
+      "torch_geometric.nn.global_mean_pool",
+      "torch_geometric.nn.global_max_pool",
+      "torch_geometric.nn.TAGConv",
+      "torch_geometric.nn.global_add_pool",
+      "torch_geometric.nn.SAGPooling",
+      "torch_geometric.nn.ASAPooling",
+      "torch_geometric.nn.GATv2Conv",
+      "torch_geometric.nn.aggr.AttentionalAggregation",
+      "torch_geometric.nn.pool.TopKPooling",
+      "torch_geometric.nn.global_mean_pool",
+      "torch_geometric.utils.to_undirected",
+      "torch_geometric.transforms"
+    ],
+    importedBy: [
+      "train_RL_GNN.py",
+      "evaluator.py",
+      "SAC/model.py",
+      "Results_Analysis/gnn_fx_explain.py"
+    ],
+    classes: [
+      "GNN_Redisual_Feature_Extractor(nn.Module)",
+      "GNN_Feature_Extractor(nn.Module)",
+      "Actor(nn.Module)",
+      "Critic(nn.Module)",
+      "TD3_GNN(object)"
+    ],
+    functions: [],
+    related: [
+      "utils/state.py",
+      "utils/replay_buffer.py",
+      "TD3/TD3.py",
+      "TD3/TD3_ActionGNN.py",
+      "SAC/model.py"
+    ],
+    paperRef: "FX-GNN regime; Methods, graph neural network feature extraction; Fig. 1b"
+  },
+
+  "TD3/TD3_ActionGNN.py": {
+    path: "TD3/TD3_ActionGNN.py",
+    role: "TD3 EV-GNN implementation with end-to-end graph actor and action_mapper.",
+    purpose: "Implements the EV-GNN regime for TD3. The actor embeds EV, charging-station, transformer, and environment nodes, applies configurable GCN layers, emits EV-node-level actions, then scatters active EV-node outputs into EV2Gym's fixed action vector through state.action_mapper. The critic injects action information into graph features and pools the graph to estimate twin Q-values.",
+    inputs: [
+      "PyG Data state from utils/state.py",
+      "ActionGNN_ReplayBuffer samples",
+      "state.action_mapper",
+      "action_dim, fx_node_sizes, actor_num_gcn_layers, critic_num_gcn_layers"
+    ],
+    outputs: [
+      "Mapped EV2Gym action vector",
+      "Raw EV-node action tensor when return_mapped_action is requested",
+      "Critic and actor losses",
+      "Actor and critic checkpoint files"
+    ],
+    imports: [
+      "copy",
+      "numpy",
+      "torch",
+      "torch.nn",
+      "torch.nn.functional",
+      "torch_geometric.nn.GCNConv",
+      "torch_geometric.nn.GATConv",
+      "torch_geometric.nn.global_mean_pool",
+      "torch_geometric.nn.global_max_pool",
+      "torch_geometric.nn.TAGConv",
+      "torch_geometric.nn.global_add_pool",
+      "torch_geometric.nn.SAGPooling",
+      "torch_geometric.nn.ASAPooling",
+      "torch_geometric.nn.aggr.AttentionalAggregation",
+      "torch_geometric.nn.pool.TopKPooling",
+      "torch_geometric.nn.global_mean_pool",
+      "torch_geometric.utils.to_undirected",
+      "torch_geometric.utils.softmax",
+      "torch_geometric.transforms"
+    ],
+    importedBy: [
+      "train_RL_GNN.py",
+      "evaluator.py"
+    ],
+    classes: [
+      "Actor(nn.Module)",
+      "Critic_GNN(nn.Module)",
+      "Critic(nn.Module)",
+      "TD3_ActionGNN(object)"
+    ],
+    functions: [],
+    related: [
+      "utils/state.py",
+      "utils/replay_buffer.py",
+      "TD3/TD3.py",
+      "TD3/TD3_GNN.py",
+      "SAC/actionSAC.py"
+    ],
+    paperRef: "EV-GNN regime; Methods Eq. (2)-(4), Eq. (9); Fig. 1c-d"
+  },
+
+  "SAC/sac.py": {
+    path: "SAC/sac.py",
+    role: "SAC implementation for Classic RL and FX-GNN regimes.",
+    purpose: "Implements Soft Actor-Critic for both pure vector-state Classic RL and FX-GNN. With GNN_fx=False, it uses QNetwork and GaussianPolicy/DeterministicPolicy on flat observations. With GNN_fx=True, it uses GaussianPolicy_GNN_FX and QNetwork_GNN_FX, where a graph feature extractor pools PyG graph states before the SAC heads produce flat action vectors.",
+    inputs: [
+      "num_inputs",
+      "action_space",
+      "args dict",
+      "fx_node_sizes when GNN_fx=True",
+      "ReplayBuffer or GNN_ReplayBuffer samples"
+    ],
+    outputs: [
+      "Continuous action vector",
+      "Q-function losses, policy loss, entropy loss, alpha values",
+      "SAC checkpoint containing policy, critic, target critic, and optimiser states"
+    ],
+    imports: [
+      "os",
+      "numpy",
+      "torch",
+      "torch.nn.functional",
+      "torch.optim.Adam",
+      "SAC.utils.soft_update",
+      "SAC.utils.hard_update",
+      "SAC.model.GaussianPolicy",
+      "SAC.model.QNetwork",
+      "SAC.model.DeterministicPolicy",
+      "SAC.model.GaussianPolicy_GNN_FX",
+      "SAC.model.QNetwork_GNN_FX"
+    ],
+    importedBy: [
+      "train_RL_GNN.py",
+      "evaluator.py",
+      "Results_Analysis/gnn_fx_explain.py"
+    ],
+    classes: [
+      "SAC(object)"
+    ],
+    functions: [],
+    related: [
+      "SAC/model.py",
+      "SAC/utils.py",
+      "SAC/actionSAC.py",
+      "utils/replay_buffer.py",
+      "TD3/TD3_GNN.py"
+    ],
+    paperRef: "Classic SAC and SAC FX-GNN baselines; Table 2"
+  },
+
+  "SAC/actionSAC.py": {
+    path: "SAC/actionSAC.py",
+    role: "SAC EV-GNN implementation with action_mapper.",
+    purpose: "Implements the EV-GNN regime for SAC. It uses GaussianPolicy_ActionGNN to sample EV-node-level actions from graph states, maps active EV-node actions into the full EV2Gym action vector through state.action_mapper during select_action, and trains Critic_GNN with graph/action inputs.",
+    inputs: [
+      "PyG Data state from utils/state.py",
+      "ActionGNN_ReplayBuffer samples",
+      "action_space",
+      "fx_node_sizes",
+      "args dict"
+    ],
+    outputs: [
+      "Mapped EV2Gym action vector",
+      "Raw EV-node action tensor when return_mapped_action=True",
+      "Q-function losses, policy loss, entropy loss, alpha values",
+      "SAC ActionGNN checkpoint"
+    ],
+    imports: [
+      "os",
+      "numpy",
+      "torch",
+      "torch.nn.functional",
+      "torch.optim.Adam",
+      "SAC.utils.soft_update",
+      "SAC.utils.hard_update",
+      "SAC.model.GaussianPolicy_ActionGNN",
+      "SAC.model.Critic_GNN"
+    ],
+    importedBy: [
+      "train_RL_GNN.py",
+      "evaluator.py",
+      "Results_Analysis/gnn_fx_explain.py"
+    ],
+    classes: [
+      "SAC_ActionGNN(object)"
+    ],
+    functions: [],
+    related: [
+      "SAC/model.py",
+      "SAC/utils.py",
+      "SAC/sac.py",
+      "utils/state.py",
+      "utils/replay_buffer.py",
+      "TD3/TD3_ActionGNN.py"
+    ],
+    paperRef: "EV-GNN regime for SAC; Methods Fig. 1c-d; Table 2"
+  },
+
+  "SAC/model.py": {
+    path: "SAC/model.py",
+    role: "Neural-network module library for SAC variants.",
+    purpose: "Defines the policy and critic neural networks used by SAC/sac.py and SAC/actionSAC.py. It contains vector-state SAC networks, FX-GNN networks that reuse TD3_GNN.GNN_Feature_Extractor for graph pooling, and ActionGNN networks that emit EV-node-level actions and graph-conditioned critic values.",
+    inputs: [
+      "Vector states or PyG Data graph states",
+      "Actions or EV-node action tensors",
+      "action_space, hidden dimensions, feature dimensions, GNN hyperparameters"
+    ],
+    outputs: [
+      "Q-values",
+      "Gaussian policy means and log standard deviations",
+      "Sampled actions and log probabilities",
+      "EV-node action outputs for ActionGNN"
+    ],
+    imports: [
+      "torch",
+      "torch.nn",
+      "torch.nn.functional",
+      "torch.distributions.Normal",
+      "TD3.TD3_GNN.GNN_Feature_Extractor",
+      "torch_geometric.nn.GCNConv",
+      "torch_geometric.nn.global_mean_pool",
+      "torch_geometric.nn.global_add_pool",
+      "torch_geometric.nn.global_mean_pool",
+      "numpy"
+    ],
+    importedBy: [
+      "SAC/sac.py",
+      "SAC/actionSAC.py"
+    ],
+    classes: [
+      "ValueNetwork(nn.Module)",
+      "QNetwork_GNN_FX(nn.Module)",
+      "GaussianPolicy_GNN_FX(nn.Module)",
+      "QNetwork(nn.Module)",
+      "GaussianPolicy(nn.Module)",
+      "DeterministicPolicy(nn.Module)",
+      "GaussianPolicy_ActionGNN(nn.Module)",
+      "Critic_GNN(nn.Module)",
+      "Critic_ActionGNN(nn.Module)"
+    ],
+    functions: [
+      "weights_init_"
+    ],
+    related: [
+      "SAC/sac.py",
+      "SAC/actionSAC.py",
+      "SAC/utils.py",
+      "TD3/TD3_GNN.py",
+      "utils/state.py"
+    ],
+    paperRef: "SAC network definitions for Classic RL, FX-GNN, and EV-GNN regimes; Fig. 1b-d"
+  },
+
+  "SAC/utils.py": {
+    path: "SAC/utils.py",
+    role: "Utility functions for SAC probability and target-network updates.",
+    purpose: "Provides helper functions for log-Gaussian computation, numerically stable log-sum-exp, soft target-network updates, and hard target-network copies. SAC/sac.py and SAC/actionSAC.py use the target-network update functions during training.",
+    inputs: [
+      "Policy distribution tensors",
+      "Source and target torch modules",
+      "Soft update coefficient tau"
+    ],
+    outputs: [
+      "Log probability tensors",
+      "Updated target network parameters"
+    ],
+    imports: [
+      "math",
+      "torch"
+    ],
+    importedBy: [
+      "SAC/sac.py",
+      "SAC/actionSAC.py"
+    ],
+    classes: [],
+    functions: [
+      "create_log_gaussian",
+      "logsumexp",
+      "soft_update",
+      "hard_update"
+    ],
+    related: [
+      "SAC/sac.py",
+      "SAC/actionSAC.py",
+      "SAC/model.py"
+    ],
+    paperRef: "SAC training utilities supporting Table 2 SAC baselines"
+  },
+
+  "Results_Analysis/component_analysis.py": {
+    path: "Results_Analysis/component_analysis.py",
+    role: "Component and pruning comparison plotting script.",
+    purpose: "Reads raw CSV exports for with-pruning and no-pruning experiments, groups runs by algorithm prefixes, computes cumulative maximum reward curves, and saves Component_Analysis.png. In the uploaded source snapshot, the loop forces i_index = 0, so the active execution path runs the SAC comparison only; a TD3 branch exists structurally but is disabled.",
+    inputs: [
+      "./Results_Analysis/raw_data/SAC_No_Pruning_100.csv",
+      "./Results_Analysis/raw_data/TD3_No_Pruning_100.csv",
+      "./Results_Analysis/raw_data/SAC_100.csv",
+      "./Results_Analysis/raw_data/TD3_100.csv"
+    ],
+    outputs: [
+      "./Results_Analysis/Component_Analysis.png"
+    ],
+    imports: [
+      "matplotlib.pyplot",
+      "seaborn",
+      "pandas",
+      "matplotlib.ticker",
+      "numpy",
+      "mpl_toolkits.axes_grid1.inset_locator.zoomed_inset_axes",
+      "mpl_toolkits.axes_grid1.inset_locator.mark_inset"
+    ],
+    importedBy: [],
+    classes: [],
+    functions: [],
+    related: [
+      "utils/state.py",
+      "Results_Analysis/rewards_eda.py",
+      "Results_Analysis/max_performance_results.py"
+    ],
+    paperRef: "Results, component/pruning analysis associated with graph simplification and EV-GNN ablations"
+  },
+
+  "Results_Analysis/discrete_eda.py": {
+    path: "Results_Analysis/discrete_eda.py",
+    role: "Multi-discrete action optimality-gap plotting script.",
+    purpose: "Reads raw discrete-action evaluation CSVs for SB3 and TD3 discrete experiments, computes mean optimality gap and uncertainty bounds by algorithm and EV_num, normalises algorithm labels, and saves a comparative bar plot.",
+    inputs: [
+      "./Results_Analysis/raw_data/SB3_Discr_<EV_num>.csv",
+      "./Results_Analysis/raw_data/TD3_Discr_<EV_num>.csv"
+    ],
+    outputs: [
+      "./Results_Analysis/comp_opt_gap_pst.png"
+    ],
+    imports: [
+      "matplotlib.pyplot",
+      "seaborn",
+      "pandas",
+      "matplotlib.ticker",
+      "numpy"
+    ],
+    importedBy: [],
+    classes: [],
+    functions: [],
+    related: [
+      "utils/action_wrapper.py",
+      "train_baselines.py",
+      "Results_Analysis/sb3_reward_eda.py"
+    ],
+    paperRef: "Results, application to multi-discrete domains; Fig. 5"
+  },
+
+  "Results_Analysis/generalization_eda.py": {
+    path: "Results_Analysis/generalization_eda.py",
+    role: "Generalisation and scenario-distribution analysis script.",
+    purpose: "Loads evaluation result folders for baseline and g1/g2/g3 PublicPST scenarios, computes optimality gaps against PowerTrackingErrorrMin, plots algorithm-wise generalisation distributions, and optionally plots scenario distributions from saved EV profiles using Seaborn joint grids embedded into a Matplotlib figure.",
+    inputs: [
+      "./results/eval_100cs_7tr_PublicPST_100*_*/data.csv",
+      "./results/eval_500cs_35tr_PublicPST_500*_*/data.csv",
+      "./results/.../ev_profiles.pkl for scenario-distribution plots"
+    ],
+    outputs: [
+      "./Results_Analysis/generalization_eda.png",
+      "./Results_Analysis/scenario_distributions_1.png"
+    ],
+    imports: [
+      "numpy",
+      "pickle",
+      "pandas",
+      "seaborn",
+      "time",
+      "matplotlib.ticker",
+      "matplotlib.pyplot",
+      "matplotlib.lines.Line2D",
+      "matplotlib.gridspec",
+      "matplotlib.patches",
+      "ev2gym.models.ev2gym_env.EV2Gym"
+    ],
+    importedBy: [],
+    classes: [
+      "SeabornFig2Grid"
+    ],
+    functions: [
+      "plot_optimality_gap_in_generalization",
+      "plot_scenario_distributions"
+    ],
+    related: [
+      "config_files/PublicPST_100_g1.yaml",
+      "config_files/PublicPST_100_g2.yaml",
+      "config_files/PublicPST_100_g3.yaml",
+      "config_files/PublicPST_500_g1.yaml",
+      "config_files/PublicPST_500_g2.yaml",
+      "config_files/PublicPST_500_g3.yaml",
+      "evaluator.py"
+    ],
+    paperRef: "Results, generalisation experiments; Fig. 4"
+  },
+
+  "Results_Analysis/gnn_fx_explain.py": {
+    path: "Results_Analysis/gnn_fx_explain.py",
+    role: "Explainability and graph/action visualisation script.",
+    purpose: "Contains loader branches for TD3, TD3_GNN, TD3_ActionGNN, SAC, SAC_GNN, and SAC_ActionGNN together with replay-buffer data, EV2Gym replay trajectories, NetworkX graph visualisations, action-distribution plots, and SHAP-related analysis blocks. In the uploaded source snapshot, the active experiment list runs TD3_ActionGNN only; other variants are commented alternatives. Note: this script imports GNN.state, while the uploaded repository exposes the state functions under utils/state.py, so that path may require a local alias or legacy folder layout.",
+    inputs: [
+      "./eval_models/<algorithm>/kwargs.yaml and model.best",
+      "./results/.../replay_buffers.pkl",
+      "EV2Gym replay files",
+      "Optional SHAP pickle files"
+    ],
+    outputs: [
+      "Matplotlib/seaborn figures for GNN/FX-GNN explanation",
+      "NetworkX graph visualisations",
+      "SHAP decision/summary plots where enabled"
+    ],
+    imports: [
+      "yaml",
+      "os",
+      "pickle",
+      "copy.deepcopy",
+      "pandas",
+      "numpy",
+      "matplotlib.pyplot",
+      "torch",
+      "datetime",
+      "time",
+      "networkx",
+      "matplotlib.pyplot",
+      "matplotlib.image",
+      "PIL.Image",
+      "sklearn.manifold.TSNE",
+      "torch.nn.functional",
+      "seaborn",
+      "shap",
+      "ev2gym.models.ev2gym_env.EV2Gym",
+      "ev2gym.rl_agent.reward.SquaredTrackingErrorReward",
+      "ev2gym.rl_agent.reward.SimpleReward",
+      "ev2gym.rl_agent.reward.profit_maximization",
+      "ev2gym.rl_agent.reward.ProfitMax_TrPenalty_UserIncentives",
+      "ev2gym.rl_agent.state.V2G_profit_max",
+      "ev2gym.rl_agent.state.PublicPST",
+      "ev2gym.rl_agent.state.V2G_profit_max_loads",
+      "TD3.TD3_GNN.TD3_GNN",
+      "TD3.old_TD3_ActionGNN.TD3_ActionGNN",
+      "TD3.TD3.TD3",
+      "SAC.sac.SAC",
+      "SAC.actionSAC.SAC_ActionGNN",
+      "GNN.state.PublicPST_GNN",
+      "GNN.state.V2G_ProfitMax_with_Loads_GNN",
+      "state_action_eda.AnalysisReplayBuffer"
+    ],
+    importedBy: [],
+    classes: [],
+    functions: [
+      "generate_replay"
+    ],
+    related: [
+      "TD3/TD3.py",
+      "TD3/TD3_GNN.py",
+      "TD3/TD3_ActionGNN.py",
+      "SAC/sac.py",
+      "SAC/actionSAC.py",
+      "Results_Analysis/state_action_eda.py"
+    ],
+    paperRef: "Results, explainability analysis for EV-GNN; Fig. 3"
+  },
+
+  "Results_Analysis/max_performance_results.py": {
+    path: "Results_Analysis/max_performance_results.py",
+    role: "Maximum-performance reward-curve plotting script.",
+    purpose: "Reads raw SAC/TD3 reward CSV exports across 25, 100, 500, and 1000 CP scales, computes cumulative maximum performance curves across training epochs, formats algorithm labels, adds zoomed inset regions, and saves SAC_TD3_max_rewards.png for the Fig. 2-style scalability comparison.",
+    inputs: [
+      "./Results_Analysis/raw_data/*.csv reward exports"
+    ],
+    outputs: [
+      "./Results_Analysis/SAC_TD3_max_rewards.png"
+    ],
+    imports: [
+      "matplotlib.pyplot",
+      "seaborn",
+      "pandas",
+      "matplotlib.ticker",
+      "numpy",
+      "mpl_toolkits.axes_grid1.inset_locator.zoomed_inset_axes",
+      "mpl_toolkits.axes_grid1.inset_locator.mark_inset"
+    ],
+    importedBy: [],
+    classes: [],
+    functions: [],
+    related: [
+      "Results_Analysis/rewards_eda.py",
+      "Results_Analysis/sb3_reward_eda.py",
+      "Results_Analysis/mean_performance_comparison.py"
+    ],
+    paperRef: "Results, enabling scalability in RL algorithms; Fig. 2"
+  },
+
+  "Results_Analysis/mean_performance_comparison.py": {
+    path: "Results_Analysis/mean_performance_comparison.py",
+    role: "Mean reward-curve comparison plotting script.",
+    purpose: "Reads raw SAC/TD3 reward CSV exports across 25, 100, 500, and 1000 CP scales, computes mean reward trajectories, formats algorithm labels and axes, and saves SAC_TD3_mean_rewards.png. This is not the Table 2 parser; it supports Fig. 2-style scalability reward-curve analysis.",
+    inputs: [
+      "./Results_Analysis/raw_data/SAC_25.csv, TD3_25.csv, SAC_100.csv, TD3_100.csv, SAC_500.csv, TD3_500.csv, SAC_1000.csv, TD3_1000.csv"
+    ],
+    outputs: [
+      "./Results_Analysis/SAC_TD3_mean_rewards.png"
+    ],
+    imports: [
+      "matplotlib.pyplot",
+      "seaborn",
+      "pandas",
+      "matplotlib.ticker",
+      "numpy",
+      "mpl_toolkits.axes_grid1.inset_locator.zoomed_inset_axes",
+      "mpl_toolkits.axes_grid1.inset_locator.mark_inset"
+    ],
+    importedBy: [],
+    classes: [],
+    functions: [],
+    related: [
+      "evaluator.py",
+      "Results_Analysis/parse_evaluator_results.py",
+      "Results_Analysis/max_performance_results.py"
+    ],
+    paperRef: "Results, scalability reward curves; Fig. 2 supporting analysis"
+  },
+
+  "Results_Analysis/parse_evaluator_results.py": {
+    path: "Results_Analysis/parse_evaluator_results.py",
+    role: "Hard-coded 1000-CP evaluator CSV parser and LaTeX-table preparer.",
+    purpose: "Parses two hard-coded PublicPST_1000 evaluator data.csv files, concatenates the results, computes algorithm-level means and standard deviations, derives optimality-gap fields, renames and reorders algorithms, and prints a LaTeX table matching the Table 2-style reporting pipeline.",
+    inputs: [
+      "./results/eval_1000cs_70tr_PublicPST_1000_13_algos_100_exp_*/data.csv",
+      "./results/eval_1000cs_70tr_PublicPST_1000_1_algos_100_exp_*/data.csv"
+    ],
+    outputs: [
+      "Printed LaTeX table with mean and standard deviation metrics"
+    ],
+    imports: [
+      "pandas"
+    ],
+    importedBy: [],
+    classes: [],
+    functions: [],
+    related: [
+      "evaluator.py",
+      "Results_Analysis/mean_performance_comparison.py",
+      "Results_Analysis/max_performance_results.py"
+    ],
+    paperRef: "Table 2 data preparation"
+  },
+
+  "Results_Analysis/rewards_eda.py": {
+    path: "Results_Analysis/rewards_eda.py",
+    role: "Ad-hoc reward-curve EDA script.",
+    purpose: "Reads wandb-exported reward CSV files and plots reward trajectories. In the uploaded source snapshot, the active df_list reads V2G 25-EVSE reward CSVs, while PST reward alternatives are present but commented. Use max_performance_results.py and mean_performance_comparison.py for the clearer Fig. 2-style SAC/TD3 scalability reward comparisons.",
+    inputs: [
+      "./Results_Analysis/raw_data/V2G_TD3_25.csv",
+      "./Results_Analysis/raw_data/V2G_SAC_25.csv",
+      "Commented alternatives for PST SAC/TD3 CSVs"
+    ],
+    outputs: [
+      "Reward-curve figures generated by the active df_list configuration"
+    ],
+    imports: [
+      "pandas",
+      "matplotlib.pyplot",
+      "mpl_toolkits.axes_grid1.inset_locator.zoomed_inset_axes",
+      "mpl_toolkits.axes_grid1.inset_locator.mark_inset"
+    ],
+    importedBy: [],
+    classes: [],
+    functions: [],
+    related: [
+      "train_RL_GNN.py",
+      "Results_Analysis/max_performance_results.py",
+      "Results_Analysis/sb3_reward_eda.py",
+      "Results_Analysis/v2g_rewards_eda.py"
+    ],
+    paperRef: "Ad-hoc reward EDA; V2G/PST reward-curve exploration depending on active df_list"
+  },
+
+  "Results_Analysis/sb3_reward_eda.py": {
+    path: "Results_Analysis/sb3_reward_eda.py",
+    role: "StableBaselines3 optimality-gap plotting script.",
+    purpose: "Reads SB3, SAC, and TD3 raw CSV results by EV_num, computes optimality-gap mean and uncertainty bounds, maps algorithm names to display labels, overlays error bars, and saves the comparative PST optimality-gap plot.",
+    inputs: [
+      "./Results_Analysis/raw_data/sb3_<EV_num>.csv",
+      "./Results_Analysis/raw_data/SAC_<EV_num>.csv",
+      "./Results_Analysis/raw_data/TD3_<EV_num>.csv"
+    ],
+    outputs: [
+      "./Results_Analysis/comp_opt_gap_pst.png"
+    ],
+    imports: [
+      "matplotlib.pyplot",
+      "seaborn",
+      "pandas",
+      "matplotlib.ticker",
+      "numpy"
+    ],
+    importedBy: [],
+    classes: [],
+    functions: [],
+    related: [
+      "train_baselines.py",
+      "Results_Analysis/discrete_eda.py",
+      "Results_Analysis/max_performance_results.py"
+    ],
+    paperRef: "Results, baseline optimality-gap comparison; Fig. 2"
+  },
+
+  "Results_Analysis/state_action_eda.py": {
+    path: "Results_Analysis/state_action_eda.py",
+    role: "State/action replay analysis and replay-buffer utility module.",
+    purpose: "Defines AnalysisReplayBuffer, which evaluator.py can use to save simple states, GNN states, next states, actions, EV-node actions, rewards, and done flags. Also provides plotting functions for action histograms, t-SNE state-action embeddings, histograms by number of EVs, and violin plots of action distributions.",
+    inputs: [
+      "Transitions from evaluator.py when SAVE_REPLAY_BUFFER is True",
+      "./results/<evaluation_name>/replay_buffers.pkl",
+      "./Results_Analysis/violin_actions.csv"
+    ],
+    outputs: [
+      "AnalysisReplayBuffer objects",
+      "./Results_Analysis/hist_vs_ev_num.png",
+      "./Results_Analysis/violin_actions.csv",
+      "./Results_Analysis/violin_actions.png"
+    ],
+    imports: [
+      "numpy",
+      "pickle",
+      "pandas",
+      "seaborn",
+      "time",
+      "matplotlib.pyplot",
+      "matplotlib.lines.Line2D",
+      "sklearn.decomposition.PCA",
+      "sklearn.manifold.TSNE",
+      "ev2gym.models.ev2gym_env.EV2Gym"
+    ],
+    importedBy: [
+      "evaluator.py",
+      "Results_Analysis/gnn_fx_explain.py"
+    ],
+    classes: [
+      "AnalysisReplayBuffer(object)"
+    ],
+    functions: [
+      "action_hist",
+      "plot_TSNE_state_action",
+      "plot_hist_vs_ev_num",
+      "plot_violin_actions",
+      "violin_plot"
+    ],
+    related: [
+      "evaluator.py",
+      "Results_Analysis/gnn_fx_explain.py",
+      "utils/replay_buffer.py"
+    ],
+    paperRef: "Results, EV-GNN explainability and action-distribution analysis; Fig. 3"
+  },
+
+  "Results_Analysis/v2g_rewards_eda.py": {
+    path: "Results_Analysis/v2g_rewards_eda.py",
+    role: "V2G reward-curve analysis script.",
+    purpose: "Reads raw V2G SAC/TD3 reward CSV exports, concatenates repeated run columns, computes grouped mean and running maximum reward curves, normalises reward scale for plotting, and saves V2G_<evse>_rewards.png. In the uploaded source snapshot, evse is overwritten to 500, so the active configuration is V2G 500 EVSE; 25-EVSE inputs are present as commented alternatives.",
+    inputs: [
+      "./Results_Analysis/raw_data/V2G_TD3_500.csv",
+      "./Results_Analysis/raw_data/V2G_SAC_500.csv",
+      "Commented alternatives for V2G_TD3_25.csv and V2G_SAC_25.csv"
+    ],
+    outputs: [
+      "./Results_Analysis/V2G_<evse>_rewards.png"
+    ],
+    imports: [
+      "pandas",
+      "matplotlib.pyplot",
+      "seaborn",
+      "mpl_toolkits.axes_grid1.inset_locator.zoomed_inset_axes",
+      "mpl_toolkits.axes_grid1.inset_locator.mark_inset"
+    ],
+    importedBy: [],
+    classes: [],
+    functions: [],
+    related: [
+      "config_files/V2G_ProfixMaxWithLoads_25.yaml",
+      "config_files/V2G_ProfixMaxWithLoads_500.yaml",
+      "Results_Analysis/v2g_stats eda.py",
+      "SAC/sac.py",
+      "TD3/TD3.py"
+    ],
+    paperRef: "Results, V2G profit maximisation with loads and PV; Fig. 6"
+  },
+
+  "Results_Analysis/v2g_stats eda.py": {
+    path: "Results_Analysis/v2g_stats eda.py",
+    role: "V2G evaluation-statistics plotting script.",
+    purpose: "Reads V2G evaluator data.csv files, removes selected algorithms, normalises algorithm names, rescales user satisfaction and timing columns, and produces a five-panel figure with profit, overloads, user satisfaction, execution time, and related V2G metrics. The actual source filename contains a space: v2g_stats eda.py.",
+    inputs: [
+      "./results/eval_500cs_35tr_V2G_ProfixMaxWithLoads_500_9_algos_100_exp_2024_07_23_584957/data.csv",
+      "./results/eval_500cs_35tr_V2G_ProfixMaxWithLoads_500_9_algos_5_exp_2024_07_23_701565/data.csv"
+    ],
+    outputs: [
+      "./Results_Analysis/v2g_stats_eda.png"
+    ],
+    imports: [
+      "numpy",
+      "pickle",
+      "pandas",
+      "seaborn",
+      "time",
+      "matplotlib.pyplot"
+    ],
+    importedBy: [],
+    classes: [],
+    functions: [],
+    related: [
+      "evaluator.py",
+      "Results_Analysis/v2g_rewards_eda.py",
+      "config_files/V2G_ProfixMaxWithLoads_500.yaml"
+    ],
+    paperRef: "Results, V2G profit maximisation with loads and PV; Fig. 6c"
+  }
+};
+
+/* ==== MANUAL (v4: 4 sub-tabs per language) ==== */
+
+const MANUAL_SUB_TABS = ['introduction','training','evaluation','results'];
+
+const MANUAL = {
+  en: {
+    introduction: {
+      label:'introduction',
+      content:
+'<div class="pane-inner">' +
+'<h1>EV-GNN Architecture Map</h1>' +
+'<div class="subtitle">A reading companion for the EV-GNN baseline codebase (Orfanoudakis et al. 2025).</div>' +
+
+'<h2>What this is</h2>' +
+'<p>This interactive HTML map decomposes the EV-GNN baseline codebase from <a href="https://doi.org/10.1038/s44172-025-00457-8" target="_blank">Orfanoudakis et al. 2025</a> (<em>Communications Engineering</em> 4:118) into a navigable diagram. Every node, chip, and side-card is keyed to the paper\'s vocabulary so you can recognize Methods equations, Fig. 1 structures, and Table 2 metrics in the actual source files. Drop this <code>.html</code> next to the unzipped <code>EV-GNN-main/</code> folder and open it directly with a browser.</p>' +
+'<p>Source code: <a href="https://github.com/StavrosOrf/EV-GNN" target="_blank">github.com/StavrosOrf/EV-GNN</a>.</p>' +
+
+'<h2>Three-column layout</h2>' +
+'<ul>' +
+'<li><strong>Left — file tree.</strong> The full EV-GNN repository. Click a file to focus the inspector on it.</li>' +
+'<li><strong>Center — execution mind map.</strong> The diagram for the currently active main tab.</li>' +
+'<li><strong>Right — inspector.</strong> The currently focused file: its role, purpose, inputs/outputs, imports, classes, related files, and the paper section it implements.</li>' +
+'</ul>' +
+
+'<h2>Main tabs</h2>' +
+'<ul>' +
+'<li><code>[ Manual ]</code> — this page; sub-sections listed on the left.</li>' +
+'<li><code>[ Training Path ]</code> — flow from config YAML through training to evaluation; covers all six repository policy modes.</li>' +
+'<li><code>[ Evaluation Path ]</code> — flow centered on <code>evaluator.py</code>, which loads trained models, heuristics, and MPC oracles for the Table 2 comparison.</li>' +
+'<li><code>[ Results Analysis Path ]</code> — post-hoc analysis scripts grouped into four categories.</li>' +
+'</ul>' +
+
+'<h2>Zoom and recenter</h2>' +
+'<p>The map column supports horizontal and vertical scrolling. Top-right of the map header:</p>' +
+'<ul>' +
+'<li><code>[ − ]</code> / <code>[ + ]</code> — zoom out / in, from 0.5x to 2.0x.</li>' +
+'<li><code>[ 100% ]</code> — current zoom level; click to reset to 100%.</li>' +
+'<li><code>[ recenter ]</code> — scrolls back so the spine sits at horizontal center, and resets vertical scroll to top. Useful after pulling left to read all Config YAML side-cards.</li>' +
+'</ul>' +
+
+'<h2>Edge legend</h2>' +
+'<ul>' +
+'<li><span style="color:var(--accent)">Terracotta solid line</span> — runtime execution (the main top-to-bottom spine).</li>' +
+'<li><span style="color:var(--text-secondary)">Gray solid line</span> — import dependency (IMPORT side-cards).</li>' +
+'<li><span style="color:var(--accent-soft)">Sage dashed line</span> — class inheritance (INHERITS PATTERN side-card).</li>' +
+'</ul>' +
+
+'<h2>Stage roadmap</h2>' +
+'<ul>' +
+'<li><strong>Stage 1.7 (current)</strong> — adds redesigned Manual and side-card scroll fix.</li>' +
+'<li><strong>Stage 2 completed</strong> — source-code-derived detail-panel content has been filled for the repository files included in this map.</li>' +
+'<li><strong>Stage 3 ahead</strong> — <code>Paper ↔ Code</code> tab mapping figures and equations to specific files.</li>' +
+'</ul>' +
+'<div class="footer">EV-GNN Architecture Map · stage 1.7 · paper: <a href="https://doi.org/10.1038/s44172-025-00457-8" target="_blank">DOI 10.1038/s44172-025-00457-8</a> · repo: <a href="https://github.com/StavrosOrf/EV-GNN" target="_blank">github.com/StavrosOrf/EV-GNN</a></div>' +
+'</div>'
+    },
+
+    training: {
+      label:'About Training Path',
+      content:
+'<div class="pane-inner">' +
+'<h1>About Training Path</h1>' +
+'<div class="subtitle">Encodes the flow from config YAML through training to evaluation, across all six repository policy modes.</div>' +
+
+'<h2>Filter chips</h2>' +
+'<p>Three axes at the top of the map declare the scenario you are exploring. Default values reflect the canonical EV-GNN paper setup:</p>' +
+'<div class="table">problem  PublicPST  /  V2G\npolicy   TD3  /  TD3_GNN  /  TD3_ActionGNN  /  SAC  /  SAC_GNN  /  SAC_ActionGNN\naction   Continuous  /  Three-step</div>' +
+'<p>Exactly one chip lights up per axis. Active chips use terracotta.</p>' +
+
+'<h2>Variant chips on spine nodes</h2>' +
+'<p>Three spine nodes carry variant chips, each representing a concrete implementation in the codebase:</p>' +
+'<div class="table">Config YAML    PublicPST family  /  V2G family\nState function PublicPST_GNN  /  V2G_ProfitMax_with_Loads_GNN  /  [ablations]\nPolicy         TD3.py  /  TD3_GNN.py  /  TD3_ActionGNN.py\n               SAC/sac.py  /  SAC/actionSAC.py\nReplay Buffer  ReplayBuffer  /  GNN_ReplayBuffer  /  ActionGNN_ReplayBuffer</div>' +
+'<p>Filter chips and variant chips share their lit state. Clicking either updates the same axis.</p>' +
+
+'<h2>Click semantics — five targets, distinct rules</h2>' +
+'<ol>' +
+'<li><strong>Variant chip on a spine node</strong> — sets the filter axis (if the chip has a <code>match</code>) and focuses the inspector on the chip\'s file, expanding the parent spine node.</li>' +
+'<li><strong>Filter chip in the filter bar</strong> — sets the filter axis only. The inspector and the expanded spine node do not move.</li>' +
+'<li><strong>Spine body click</strong> — focuses the canonical file for that spine node (the variant chip matching the current filter, if any) and expands it.</li>' +
+'<li><strong>File tree click</strong> — focuses the inspector only. Does not change the expanded spine node.</li>' +
+'<li><strong>Side-card click</strong> — focuses the inspector on the related file. The currently expanded spine node stays expanded.</li>' +
+'</ol>' +
+
+'<h2>Side cards</h2>' +
+'<p>The expanded spine node (marked with a thick terracotta left bar) shows its related files as side-cards on the left, connected by right-angle lines that converge into a single bus.</p>' +
+'<ul>' +
+'<li><code>train_RL_GNN.py</code> — three IMPORT cards: <code>utils/state.py</code>, <code>utils/action_wrapper.py</code>, <code>utils/replay_buffer.py</code>.</li>' +
+'<li><code>Config YAML</code> — every YAML file in the currently active family (11 PublicPST or 3 V2G).</li>' +
+'<li><code>Policy</code> — one INHERITS PATTERN card: <code>TD3/TD3.py</code> (the classic TD3 implementation the GNN variants follow).</li>' +
+'<li>Other spine nodes — no side-cards; their variant chips already enumerate the variants.</li>' +
+'</ul>' +
+
+'<h2>Ablation chips on the State function node</h2>' +
+'<p>Two ablation chips appear on the <code>State function</code> spine node:</p>' +
+'<ul>' +
+'<li><code>PublicPST_GNN_no_position_encoding</code> — drops the per-node identifiers j, i, w from Eq. (5).</li>' +
+'<li><code>PublicPST_GNN_full_graph</code> — disables graph pruning, keeping zero-feature charging-station nodes (Fig. 1a).</li>' +
+'</ul>' +
+'<p>Ablation chips do not have filter matches because they are <em>functions inside</em> <code>utils/state.py</code>, not separate filter axes. Clicking one keeps the inspector on <code>utils/state.py</code> and prepends an amber banner explaining what that ablation removes, with the matching paper reference.</p>' +
+
+'<h2>The Three-step filter highlight</h2>' +
+'<p>When <code>action = Three-step</code>, the <code>utils/action_wrapper.py</code> IMPORT side-card on <code>train_RL_GNN.py</code> and its connecting line both turn terracotta — a visual reminder that this wrapper is active under the current filter.</p>' +
+'</div>'
+    },
+
+    evaluation: {
+      label:'About Evaluation Path',
+      content:
+'<div class="pane-inner">' +
+'<h1>About Evaluation Path</h1>' +
+'<div class="subtitle">The flow centered on <code>evaluator.py</code>, the meeting point of GNN-RL models, sb3 baselines, heuristics, and MPC oracles.</div>' +
+
+'<h2>Role of evaluator.py</h2>' +
+'<p><code>evaluator.py</code> is the comparison meeting point of the whole repository. It imports repository-trained Classic RL, FX-GNN, and EV-GNN policies, selected StableBaselines3/sb3-contrib checkpoints, and available ev2gym heuristic, MPC, and Gurobi-oracle branches. The paper reports 100 evaluation runs for the Table 2 comparison, but the uploaded source snapshot controls this through <code>n_test_cycles</code> and currently sets <code>n_test_cycles = 1</code>.</p>' +
+
+'<h2>The six spine nodes</h2>' +
+'<ol>' +
+'<li><strong><code>evaluator.py</code></strong> — entry point that selects the config file (25 / 100 / 500 / 1000 CP scale or V2G) and orchestrates the comparison.</li>' +
+'<li><strong>Load trained repository RL/GNN models</strong> — TD3, TD3_GNN, TD3_ActionGNN, SAC, SAC_GNN, SAC_ActionGNN; checkpoints from <code>eval_models/</code> / <code>saved_models/</code> produced by <code>train_RL_GNN.py</code>.</li>' +
+'<li><strong>Load selected StableBaselines3 / sb3-contrib checkpoints</strong> — evaluator.py currently handles SB3-style strings such as PPO, A2C, DDPG, TQC, TRPO, ARS, and RecurrentPPO. Custom SAC and TD3 strings are loaded through the repository\'s own SAC/TD3 classes, not through SB3.</li>' +
+'<li><strong>Available heuristic, MPC, and Gurobi-oracle branches</strong> — AFAP (<code>ChargeAsFastAsPossible</code>), <code>RoundRobin</code>, <code>OCMF_V2G</code> / <code>OCMF_G2V</code>, <code>eMPC_V2G</code> / <code>eMPC_G2V</code>, plus Gurobi oracles <code>V2GProfitMaxOracleGB</code> and <code>PowerTrackingErrorrMin</code>. <strong>These are imported from the external <code>ev2gym</code> package and are available branches; in the uploaded snapshot, the active algorithm list focuses on trained RL/GNN and selected SB3 strings.</strong></li>' +
+'<li><strong>Run evaluation cycles</strong> — the paper Table 2 protocol reports 100 runs, while this source snapshot controls the number through <code>n_test_cycles</code> and sets it to 1 by default.</li>' +
+'<li><strong>Save evaluation artefacts</strong> — writes <code>data.csv</code> and <code>plot_results_dict.pkl</code>; writes <code>replay_buffers.pkl</code> only when <code>SAVE_REPLAY_BUFFER</code> is enabled.</li>' +
+'</ol>' +
+
+'<h2>How this connects to the other tabs</h2>' +
+'<ul>' +
+'<li><strong>Upstream</strong> — consumes the <code>saved_models/</code> checkpoints produced by the Training Path (both <code>train_RL_GNN.py</code> for GNN policies and <code>train_baselines.py</code> for sb3 baselines).</li>' +
+'<li><strong>Downstream</strong> — produces <code>data.csv</code> and <code>plot_results_dict.pkl</code>, and can optionally produce <code>replay_buffers.pkl</code>; Results Analysis scripts consume these alongside raw reward CSVs and hard-coded experiment folders.</li>' +
+'</ul>' +
+'</div>'
+    },
+
+    results: {
+      label:'About Results Analysis',
+      content:
+'<div class="pane-inner">' +
+'<h1>About Results Analysis</h1>' +
+'<div class="subtitle">Twelve post-hoc scripts that consume mixed artefacts: raw reward CSVs, evaluator <code>data.csv</code>, optional replay-buffer pickles, and hard-coded experiment folders.</div>' +
+
+'<p class="disclaimer"><strong>Note:</strong> the descriptions below are source-code-derived. Some scripts contain commented alternatives, hard-coded experiment paths, or inactive branches; where relevant, the inspector distinguishes active execution from available code branches.</p>' +
+
+'<h2>Inputs and outputs</h2>' +
+'<ul>' +
+'<li><strong>Input</strong> — mixed artefacts: wandb-exported raw reward CSVs under <code>Results_Analysis/raw_data/</code>, evaluator <code>data.csv</code>, optional <code>replay_buffers.pkl</code>, and selected experiment folders under <code>results/</code>.</li>' +
+'<li><strong>Output</strong> — figures matching paper Fig. 2-6 and Table 2.</li>' +
+'</ul>' +
+
+'<h2>Performance comparison</h2>' +
+'<ul>' +
+'<li><code>max_performance_results.py</code> — maximum episode reward as a function of algorithm and scale (paper Fig. 2).</li>' +
+'<li><code>mean_performance_comparison.py</code> — mean reward curves for SAC/TD3 families across scaling experiments; supports Fig. 2-style analysis rather than Table 2 parsing.</li>' +
+'<li><code>parse_evaluator_results.py</code> — hard-coded parser for 1000 CP PublicPST evaluator CSVs; prepares Table 2-style mean/std LaTeX output.</li>' +
+'</ul>' +
+
+'<h2>Reward EDA</h2>' +
+'<ul>' +
+'<li><code>rewards_eda.py</code> — ad-hoc reward-curve EDA; the uploaded active configuration reads V2G 25-EVSE CSVs, while PST alternatives are commented.</li>' +
+'<li><code>sb3_reward_eda.py</code> — EDA on training reward curves for the StableBaselines3 baseline algorithms.</li>' +
+'<li><code>v2g_rewards_eda.py</code> — V2G reward-curve EDA; the uploaded active configuration uses the 500-EVSE V2G CSVs.</li>' +
+'</ul>' +
+
+'<h2>State / action EDA</h2>' +
+'<ul>' +
+'<li><code>state_action_eda.py</code> — defines <code>AnalysisReplayBuffer</code> (imported by <code>evaluator.py</code>); produces t-SNE, histograms, and violin plots of state and action distributions.</li>' +
+'<li><code>discrete_eda.py</code> — EDA on the multi-discrete action experiments (paper Fig. 5).</li>' +
+'<li><code>v2g_stats eda.py</code> — aggregate V2G evaluator statistics from hard-coded <code>data.csv</code> files; actual source filename contains a space.</li>' +
+'</ul>' +
+
+'<h2>GNN explainability & generalization</h2>' +
+'<ul>' +
+'<li><code>component_analysis.py</code> — component/pruning comparison; in the uploaded snapshot, the active execution path forces the SAC branch while TD3 remains a disabled structural branch.</li>' +
+'<li><code>generalization_eda.py</code> — cross-environment generalization (paper Fig. 4).</li>' +
+'<li><code>gnn_fx_explain.py</code> — explainability and graph/action visualisation; loader branches cover multiple TD3/SAC variants, but the uploaded active experiment list runs TD3_ActionGNN only.</li>' +
+'</ul>' +
+'</div>'
+    }
+  },
+
+  zh: {
+    introduction: {
+      label:'introduction',
+      content:
+'<div class="pane-inner">' +
+'<h1>EV-GNN Architecture Map</h1>' +
+'<div class="subtitle">針對 EV-GNN baseline codebase (Orfanoudakis et al. 2025) 的閱讀導覽。</div>' +
+
+'<h2>這份 map 是什麼</h2>' +
+'<p>這份互動式 HTML map 把 <a href="https://doi.org/10.1038/s44172-025-00457-8" target="_blank">Orfanoudakis et al. 2025</a> (<em>Communications Engineering</em> 4:118) 的 EV-GNN baseline codebase 拆解成可導覽的圖。每個 node、chip、side-card 都對應到 paper 術語,讓你能在原始碼裡認出 Methods 章節的 equations、Fig. 1 的結構,以及 Table 2 的 metrics。建議把這個 <code>.html</code> 放在已解壓的 <code>EV-GNN-main/</code> 旁邊,用瀏覽器直接開。</p>' +
+'<p>原始碼: <a href="https://github.com/StavrosOrf/EV-GNN" target="_blank">github.com/StavrosOrf/EV-GNN</a>。</p>' +
+
+'<h2>三欄式版面</h2>' +
+'<ul>' +
+'<li><strong>左欄 — file tree。</strong> 完整 EV-GNN repo 的檔案樹。點檔案會把該檔案聚焦到 inspector。</li>' +
+'<li><strong>中欄 — execution mind map。</strong> 當前 main tab 的流程圖。</li>' +
+'<li><strong>右欄 — inspector。</strong> 當前聚焦的檔案資訊: role、purpose、inputs/outputs、imports、classes、related files,以及它對應到 paper 的哪一段。</li>' +
+'</ul>' +
+
+'<h2>Main tabs</h2>' +
+'<ul>' +
+'<li><code>[ Manual ]</code> — 本頁;左側列出 sub-sections。</li>' +
+'<li><code>[ Training Path ]</code> — 從 config YAML 到 evaluation 的完整訓練流程,涵蓋全部 6 種 repository policy mode。</li>' +
+'<li><code>[ Evaluation Path ]</code> — 以 <code>evaluator.py</code> 為核心的流程,載入 trained models、heuristics、MPC oracles,對應 paper Table 2 比較。</li>' +
+'<li><code>[ Results Analysis Path ]</code> — 訓練之外的 post-hoc analysis script,分為 4 個 category。</li>' +
+'</ul>' +
+
+'<h2>Zoom 與 recenter</h2>' +
+'<p>中央 map 區支援水平與垂直 scrolling。Map header 右上角:</p>' +
+'<ul>' +
+'<li><code>[ − ]</code> / <code>[ + ]</code> — 縮小 / 放大,範圍 0.5x 到 2.0x。</li>' +
+'<li><code>[ 100% ]</code> — 目前 zoom level;點一下重設為 100%。</li>' +
+'<li><code>[ recenter ]</code> — 把 map 滾回 spine 的水平中央,垂直 scroll 拉回頂端。拉到左側讀完 Config YAML side-card 後,可以一鍵回到中央。</li>' +
+'</ul>' +
+
+'<h2>Edge legend</h2>' +
+'<ul>' +
+'<li><span style="color:var(--accent)">Terracotta 實線</span> — runtime execution (主要的 top-to-bottom spine)。</li>' +
+'<li><span style="color:var(--text-secondary)">Gray 實線</span> — import dependency (IMPORT side-cards)。</li>' +
+'<li><span style="color:var(--accent-soft)">Sage 虛線</span> — class inheritance (INHERITS PATTERN side-card)。</li>' +
+'</ul>' +
+
+'<h2>Stage 進度</h2>' +
+'<ul>' +
+'<li><strong>Stage 1.7 (current)</strong> — 重新設計 Manual、修正 side-card 水平 scroll。</li>' +
+'<li><strong>Stage 2 completed</strong> — 此 map 已補入 source-code-derived 的 detail-panel 內容。</li>' +
+'<li><strong>Stage 3 ahead</strong> — 新增 <code>Paper ↔ Code</code> tab,把 figures 與 equations 對應到具體檔案。</li>' +
+'</ul>' +
+'<div class="footer">EV-GNN Architecture Map · stage 1.7 · paper: <a href="https://doi.org/10.1038/s44172-025-00457-8" target="_blank">DOI 10.1038/s44172-025-00457-8</a> · repo: <a href="https://github.com/StavrosOrf/EV-GNN" target="_blank">github.com/StavrosOrf/EV-GNN</a></div>' +
+'</div>'
+    },
+
+    training: {
+      label:'About Training Path',
+      content:
+'<div class="pane-inner">' +
+'<h1>About Training Path</h1>' +
+'<div class="subtitle">編碼從 config YAML 到 evaluation 的完整訓練流程,涵蓋全部 6 種 repository policy mode。</div>' +
+
+'<h2>Filter chips</h2>' +
+'<p>Map 頂端三軸 filter 用於宣告你目前在探索的 scenario。預設值對應 paper 中 EV-GNN canonical 設定:</p>' +
+'<div class="table">problem  PublicPST  /  V2G\npolicy   TD3  /  TD3_GNN  /  TD3_ActionGNN  /  SAC  /  SAC_GNN  /  SAC_ActionGNN\naction   Continuous  /  Three-step</div>' +
+'<p>每軸永遠只有一個 chip 亮著。Active chip 用 Terracotta 強調。</p>' +
+
+'<h2>Spine node 上的 variant chips</h2>' +
+'<p>有變體的 spine node 下方掛了一排 variant chip,代表該節點 role 在程式碼中可用的具體實作:</p>' +
+'<div class="table">Config YAML    PublicPST family  /  V2G family\nState function PublicPST_GNN  /  V2G_ProfitMax_with_Loads_GNN  /  [ablations]\nPolicy         TD3.py  /  TD3_GNN.py  /  TD3_ActionGNN.py\n               SAC/sac.py  /  SAC/actionSAC.py\nReplay Buffer  ReplayBuffer  /  GNN_ReplayBuffer  /  ActionGNN_ReplayBuffer</div>' +
+'<p>Filter chip 與 variant chip 共用亮起狀態。點任一種都更新同一個 filter axis。</p>' +
+
+'<h2>Click 行為 — 5 個 click target、各自不同規則</h2>' +
+'<ol>' +
+'<li><strong>Spine node 上的 variant chip</strong> — 設定 filter axis (若該 chip 有 <code>match</code>)、把 inspector 聚焦到該 chip 的 file、並把 parent spine node 設為 expanded。</li>' +
+'<li><strong>Filter bar 上的 filter chip</strong> — 只設定 filter axis,不移動 inspector,也不改變目前 expand 的 spine node。</li>' +
+'<li><strong>Spine body click</strong> — 把 inspector 聚焦到該 spine node 的 canonical file (若有 variant chip,則優先選取符合當前 filter 的 chip 對應 file),並把該 node 設為 expanded。</li>' +
+'<li><strong>File tree click</strong> — 只聚焦 inspector,不改變目前 expand 的 spine node。</li>' +
+'<li><strong>Side-card click</strong> — 把 inspector 聚焦到 related file,目前 expand 的 spine node 維持不變。</li>' +
+'</ol>' +
+
+'<h2>Side cards</h2>' +
+'<p>目前被 expand 的 spine node (左側多一條 terracotta 縱條) 會把它的 related files 以 side-card 形式顯示在左側,透過直角線收束成一條 bus 連到 spine node。</p>' +
+'<ul>' +
+'<li><code>train_RL_GNN.py</code> — 三張 IMPORT 卡: <code>utils/state.py</code>、<code>utils/action_wrapper.py</code>、<code>utils/replay_buffer.py</code>。</li>' +
+'<li><code>Config YAML</code> — 該 family 全部 YAML (PublicPST 11 個或 V2G 3 個)。</li>' +
+'<li><code>Policy</code> — 一張 INHERITS PATTERN 卡: <code>TD3/TD3.py</code>,各 GNN 變體繼承自這個 classic 實作。</li>' +
+'<li>其他 spine node — 沒有 side-card,因為它們的 variant chip 已涵蓋所有變體。</li>' +
+'</ul>' +
+
+'<h2>State function 上的 ablation chips</h2>' +
+'<p><code>State function</code> spine node 上掛有兩個 ablation chip:</p>' +
+'<ul>' +
+'<li><code>PublicPST_GNN_no_position_encoding</code> — 移除 Eq. (5) 中每個 node 的 identifier j、i、w。</li>' +
+'<li><code>PublicPST_GNN_full_graph</code> — 停用 graph pruning,讓零特徵的 charging-station node 保留在圖中 (Fig. 1a)。</li>' +
+'</ul>' +
+'<p>Ablation chip 沒有對應的 filter,因為它們是 <code>utils/state.py</code> 內部的 <em>function</em>,不是獨立的 filter 軸。點下去 inspector 仍指向 <code>utils/state.py</code>,但會在頂端加一條 amber banner 說明該 ablation 移除了什麼,以及對應 paper 的哪一段。</p>' +
+
+'<h2>Three-step filter 的高亮</h2>' +
+'<p>當 <code>action = Three-step</code>,<code>train_RL_GNN.py</code> 上的 <code>utils/action_wrapper.py</code> IMPORT side-card 與其連線會變成 terracotta — 視覺上提示該 wrapper 在當前 filter 下被啟用。</p>' +
+'</div>'
+    },
+
+    evaluation: {
+      label:'About Evaluation Path',
+      content:
+'<div class="pane-inner">' +
+'<h1>About Evaluation Path</h1>' +
+'<div class="subtitle">以 <code>evaluator.py</code> 為核心的流程,是 GNN-RL models、sb3 baselines、heuristics、MPC oracles 的交會點。</div>' +
+
+'<h2>evaluator.py 的角色</h2>' +
+'<p><code>evaluator.py</code> 是整個 repo 的比較交會點。它載入 repository-trained Classic RL、FX-GNN、EV-GNN policies, selected StableBaselines3/sb3-contrib checkpoints,以及可用的 ev2gym heuristic、MPC、Gurobi-oracle branches。Paper 的 Table 2 protocol 報告 100 次 evaluation runs,但上傳的 source snapshot 是透過 <code>n_test_cycles</code> 控制,且目前預設為 <code>n_test_cycles = 1</code>。</p>' +
+
+'<h2>六個 spine node</h2>' +
+'<ol>' +
+'<li><strong><code>evaluator.py</code></strong> — 入口,選定 config file (25 / 100 / 500 / 1000 CP scale 或 V2G) 並串起整個比較流程。</li>' +
+'<li><strong>Load trained repository RL/GNN models</strong> — TD3、TD3_GNN、TD3_ActionGNN、SAC、SAC_GNN、SAC_ActionGNN;checkpoint 由 <code>train_RL_GNN.py</code> 產生,並由 evaluator 從 <code>eval_models/</code> / <code>saved_models/</code> 類路徑載入。</li>' +
+'<li><strong>Load selected StableBaselines3 / sb3-contrib checkpoints</strong> — evaluator.py 目前處理 PPO、A2C、DDPG、TQC、TRPO、ARS、RecurrentPPO 等 SB3-style strings。Custom SAC 與 TD3 strings 會透過 repo 自己的 SAC/TD3 classes 載入,不是走 SB3 branch。</li>' +
+'<li><strong>Available heuristic, MPC, and Gurobi-oracle branches</strong> — AFAP (<code>ChargeAsFastAsPossible</code>)、<code>RoundRobin</code>、<code>OCMF_V2G</code> / <code>OCMF_G2V</code>、<code>eMPC_V2G</code> / <code>eMPC_G2V</code>,以及 Gurobi oracles <code>V2GProfitMaxOracleGB</code> 與 <code>PowerTrackingErrorrMin</code>。<strong>這些是從外部 <code>ev2gym</code> package import 的可用 branches;在上傳 snapshot 中,active algorithm list 主要聚焦 trained RL/GNN 與 selected SB3 strings。</strong></li>' +
+'<li><strong>Run evaluation cycles</strong> — paper Table 2 protocol 報告 100 runs;但此 source snapshot 透過 <code>n_test_cycles</code> 控制,預設為 1。</li>' +
+'<li><strong>Save evaluation artefacts</strong> — 固定寫出 <code>data.csv</code> 與 <code>plot_results_dict.pkl</code>;只有在 <code>SAVE_REPLAY_BUFFER</code> 啟用時才寫出 <code>replay_buffers.pkl</code>。</li>' +
+'</ol>' +
+
+'<h2>與其他 tabs 的關係</h2>' +
+'<ul>' +
+'<li><strong>上游</strong> — 消耗 Training Path 產出的 <code>saved_models/</code> checkpoint (<code>train_RL_GNN.py</code> 產生 GNN policies、<code>train_baselines.py</code> 產生 sb3 baselines)。</li>' +
+'<li><strong>下游</strong> — 產生 <code>data.csv</code> 與 <code>plot_results_dict.pkl</code>,並可在 <code>SAVE_REPLAY_BUFFER</code> 啟用時產生 <code>replay_buffers.pkl</code>;Results Analysis scripts 還會消耗 raw reward CSVs 與 hard-coded experiment folders。</li>' +
+'</ul>' +
+'</div>'
+    },
+
+    results: {
+      label:'About Results Analysis',
+      content:
+'<div class="pane-inner">' +
+'<h1>About Results Analysis</h1>' +
+'<div class="subtitle">12 個 post-hoc scripts,消耗 mixed artefacts: raw reward CSVs、evaluator <code>data.csv</code>、optional replay-buffer pickles,以及 hard-coded experiment folders。</div>' +
+
+'<p class="disclaimer"><strong>Note:</strong> 以下描述已根據 source code 更新。部分 scripts 含有 commented alternatives、hard-coded experiment paths 或 inactive branches;必要時 inspector 會區分 active execution 與 available code branches。</p>' +
+
+'<h2>Inputs and outputs</h2>' +
+'<ul>' +
+'<li><strong>Input</strong> — mixed artefacts: <code>Results_Analysis/raw_data/</code> 下的 wandb-exported raw reward CSVs、evaluator <code>data.csv</code>、optional <code>replay_buffers.pkl</code>,以及 <code>results/</code> 下被 hard-coded 選中的 experiment folders。</li>' +
+'<li><strong>Output</strong> — 對應 paper Fig. 2-6 與 Table 2 的 figures。</li>' +
+'</ul>' +
+
+'<h2>Performance comparison</h2>' +
+'<ul>' +
+'<li><code>max_performance_results.py</code> — 各演算法在不同 scale 下的 maximum episode reward (paper Fig. 2)。</li>' +
+'<li><code>mean_performance_comparison.py</code> — SAC/TD3 families 在 scaling experiments 中的 mean reward curves;支援 Fig. 2-style analysis,不是 Table 2 parser。</li>' +
+'<li><code>parse_evaluator_results.py</code> — hard-coded 1000 CP PublicPST evaluator CSV parser;準備 Table 2-style mean/std LaTeX output。</li>' +
+'</ul>' +
+
+'<h2>Reward EDA</h2>' +
+'<ul>' +
+'<li><code>rewards_eda.py</code> — ad-hoc reward-curve EDA;上傳 snapshot 的 active configuration 讀取 V2G 25-EVSE CSVs,而 PST alternatives 目前是 commented。</li>' +
+'<li><code>sb3_reward_eda.py</code> — StableBaselines3 baseline 演算法的 training reward 曲線 EDA。</li>' +
+'<li><code>v2g_rewards_eda.py</code> — V2G reward-curve EDA;上傳 snapshot 的 active configuration 使用 500-EVSE V2G CSVs。</li>' +
+'</ul>' +
+
+'<h2>State / action EDA</h2>' +
+'<ul>' +
+'<li><code>state_action_eda.py</code> — 定義 <code>AnalysisReplayBuffer</code> (被 <code>evaluator.py</code> import);產生 state/action 分布的 t-SNE、histograms、violin plots。</li>' +
+'<li><code>discrete_eda.py</code> — multi-discrete action 實驗的 EDA (paper Fig. 5)。</li>' +
+'<li><code>v2g_stats eda.py</code> — 從 hard-coded <code>data.csv</code> files 讀取 V2G evaluator statistics;實際 source filename 包含空格。</li>' +
+'</ul>' +
+
+'<h2>GNN explainability & generalization</h2>' +
+'<ul>' +
+'<li><code>component_analysis.py</code> — component/pruning comparison;在上傳 snapshot 中,active execution path 強制走 SAC branch,TD3 branch 只存在於 disabled structural branch。</li>' +
+'<li><code>generalization_eda.py</code> — 跨環境 generalization 分析 (paper Fig. 4)。</li>' +
+'<li><code>gnn_fx_explain.py</code> — explainability 與 graph/action visualisation;loader branches 覆蓋多個 TD3/SAC variants,但上傳 snapshot 的 active experiment list 只跑 TD3_ActionGNN。</li>' +
+'</ul>' +
+'</div>'
+    }
+  }
+};
+
+/* ==== STATE ==== */
+let currentTab = 'manual';
+let selectedFile = null;
+let expandedSpineNode = 'train';
+let ablationFocus = null;
+let zoom = 1.0;
+let manualLang = 'en';
+let manualSubTab = 'introduction';
+
+/* ==== RENDER ==== */
+
+function renderTree() {
+  const container = document.getElementById('file-tree');
+  container.innerHTML = '';
+  const rows = [];
+  flattenTree(TREE, '', false, rows, '');
+  rows.forEach(r => {
+    const el = document.createElement('div');
+    el.className = 'tree-item';
+    if (r.kind === 'root')   el.classList.add('is-root');
+    if (r.kind === 'folder') el.classList.add('is-folder');
+    if (r.path && r.path === selectedFile) el.classList.add('selected');
+    el.dataset.path = r.path || '';
+    el.dataset.kind = r.kind;
+    el.textContent = r.display;
+    el.addEventListener('click', () => {
+      if (r.kind === 'folder' && r.ref) {
+        r.ref.open = !r.ref.open;
+        renderTree();
+      } else if (r.kind === 'file') {
+        selectFromTree(r.path);
+      }
+    });
+    container.appendChild(el);
+  });
+}
+
+function flattenTree(node, prefix, isLast, out, parentPath) {
+  if (node.isRoot) {
+    out.push({display:node.name+'/',kind:'root',path:''});
+    if (node.children) node.children.forEach((c,i) => flattenTree(c,'',i===node.children.length-1,out,''));
+    return;
+  }
+  const branch = isLast ? '└── ' : '├── ';
+  const myPath = parentPath ? parentPath+'/'+node.name : node.name;
+  if (node.type === 'folder') {
+    out.push({display:prefix+branch+node.name+'/',kind:'folder',path:'',ref:node});
+    if (node.open && node.children) {
+      const np = prefix + (isLast ? '    ' : '│   ');
+      node.children.forEach((c,i) => flattenTree(c,np,i===node.children.length-1,out,myPath));
+    }
+  } else {
+    out.push({display:prefix+branch+node.name,kind:'file',path:myPath});
+  }
+}
+
+function renderMindMap(recenterAfter = false) {
+  const wrap = document.getElementById('mindmap-wrap');
+  const host = document.getElementById('filter-bar-host');
+  wrap.innerHTML = '';
+  host.innerHTML = '';
+  updateMindMapTitle();
+
+  if (currentTab === 'training') {
+    renderFilterBar(host);
+    renderLinearFlow(wrap, MAPS.training);
+    requestAnimationFrame(() => renderSideEdges(wrap));
+  } else if (currentTab === 'evaluation') {
+    renderLinearFlow(wrap, MAPS.evaluation);
+  } else if (currentTab === 'results') {
+    renderResultsTree(wrap);
+  } else if (currentTab === 'paper') {
+    renderPaperCodeView(wrap);
+  }
+  syncSelectionToMap();
+  if (recenterAfter && currentTab !== 'manual') {
+    requestAnimationFrame(() => requestAnimationFrame(recenter));
+  }
+}
+
+function updateMindMapTitle() {
+  const title = document.getElementById('mindmap-title');
+  const summary = document.getElementById('filter-summary');
+  if (currentTab === 'training') {
+    title.textContent = '── execution flow: training path ──';
+    summary.innerHTML =
+      '·  <span class="pill">' + escapeHtml(filters.problem) + '</span>' +
+      ' · <span class="pill">' + escapeHtml(filters.policy) + '</span>' +
+      ' · <span class="pill">' + escapeHtml(filters.action) + '</span>';
+  } else if (currentTab === 'evaluation') {
+    title.textContent = '── execution flow: evaluation path ──';
+    summary.innerHTML = '';
+  } else if (currentTab === 'results') {
+    title.textContent = '── post-hoc analysis: results path ──';
+    summary.innerHTML = '';
+  } else if (currentTab === 'paper') {
+    title.textContent = '── paper ↔ code landmarks ──';
+    summary.innerHTML = '<span class="pill">figures</span> · <span class="pill">equations</span> · <span class="pill">tables</span>';
+  } else {
+    title.textContent = '';
+    summary.innerHTML = '';
+  }
+}
+
+function renderFilterBar(host) {
+  const bar = document.createElement('div');
+  bar.className = 'filter-bar';
+  ['problem','policy','action'].forEach(axis => {
+    const group = document.createElement('div');
+    group.className = 'filter-group';
+    const label = document.createElement('span');
+    label.className = 'filter-label';
+    label.textContent = axis + ':';
+    group.appendChild(label);
+    FILTERS[axis].forEach(opt => {
+      const btn = document.createElement('button');
+      btn.className = 'filter-chip' + (filters[axis] === opt.id ? ' active' : '');
+      btn.textContent = opt.label;
+      btn.title = axis + ' = ' + opt.label;
+      btn.addEventListener('click', () => {
+        // Filter bar chip: filter only, no navigation
+        filters[axis] = opt.id;
+        renderMindMap();
+      });
+      group.appendChild(btn);
+    });
+    bar.appendChild(group);
+  });
+  host.appendChild(bar);
+}
+
+function chipMatchesFilters(chip) {
+  if (!chip.match) return false;
+  for (const axis of Object.keys(chip.match)) {
+    const want = chip.match[axis];
+    const cur  = filters[axis];
+    if (Array.isArray(want)) {
+      if (!want.includes(cur)) return false;
+    } else {
+      if (want !== cur) return false;
+    }
+  }
+  return true;
+}
+
+function renderLinearFlow(wrap, nodes) {
+  const flow = document.createElement('div');
+  flow.className = 'flow';
+  flow.id = 'spine-flow';
+  nodes.forEach((n, idx) => {
+    flow.appendChild(createMapNode(n));
+
+    if (currentTab === 'training' && n.id === expandedSpineNode) {
+      const spacerHeight = computeSideExpansionSpacerHeight();
+      if (spacerHeight > 0) {
+        const spacer = document.createElement('div');
+        spacer.className = 'side-expansion-spacer';
+        spacer.style.height = spacerHeight + 'px';
+        spacer.innerHTML = '<div class="line"></div>';
+        flow.appendChild(spacer);
+      }
+    }
+
+    if (idx < nodes.length - 1) {
+      const conn = document.createElement('div');
+      conn.className = 'connector';
+      conn.innerHTML = '<div class="line"></div><div class="chev">▼</div>';
+      flow.appendChild(conn);
+    }
+  });
+  wrap.appendChild(flow);
+}
+
+function computeSideExpansionSpacerHeight() {
+  const sideCount = getSideBoxesForExpandedNode().length;
+  if (sideCount <= 3) return 0;
+  const estimatedBoxHeight = 42 * zoom;
+  const estimatedGap = 12 * zoom;
+  const currentNodeAllowance = 96 * zoom;
+  return Math.max(0, sideCount * (estimatedBoxHeight + estimatedGap) - currentNodeAllowance);
+}
+
+function createMapNode(n) {
+  const el = document.createElement('div');
+  el.className = 'node';
+  el.dataset.mapId = n.id || n.file;
+  el.dataset.file = n.file;
+  el.title = n.title + (n.sub ? '  —  ' + n.sub : '');
+  if (currentTab === 'training' && n.id === expandedSpineNode) {
+    el.classList.add('expanded');
+  }
+  let html = '<div class="node-title">' + escapeHtml(n.title) + '</div>';
+  if (n.sub) html += '<div class="node-sub">' + escapeHtml(n.sub) + '</div>';
+  if (n.chips && n.chips.length > 0) {
+    html += '<div class="variant-chips">';
+    n.chips.forEach((chip) => {
+      let cls = 'variant-chip';
+      if (chip.kind === 'ablation') {
+        cls += ' ablation';
+        if (ablationFocus === chip.label) cls += ' active';
+      } else if (chipMatchesFilters(chip)) {
+        cls += ' match';
+      }
+      const titleStr = chip.label + (chip.kind === 'ablation' ? ' (ablation function inside ' + chip.file + ')' : '');
+      html += '<button type="button" class="' + cls +
+              '" data-chip="1"' +
+              (chip.kind === 'ablation' ? ' data-ablation="' + escapeAttr(chip.label) + '"' : '') +
+              (chip.match ? ' data-match-axis="' + Object.keys(chip.match)[0] + '" data-match-value="' + escapeAttr(Array.isArray(chip.match[Object.keys(chip.match)[0]]) ? chip.match[Object.keys(chip.match)[0]][0] : chip.match[Object.keys(chip.match)[0]]) + '"' : '') +
+              ' data-file="' + escapeAttr(chip.file) + '"' +
+              ' title="' + escapeAttr(titleStr) + '">' +
+              escapeHtml(chip.label) + '</button>';
+    });
+    html += '</div>';
+  }
+  el.innerHTML = html;
+
+  el.addEventListener('click', (e) => {
+    const chipEl = e.target.closest('.variant-chip');
+    if (chipEl && el.contains(chipEl)) {
+      handleVariantChipClick(chipEl, n);
+    } else {
+      handleSpineBodyClick(n);
+    }
+  });
+  return el;
+}
+
+function handleVariantChipClick(chipEl, n) {
+  const isAblation = !!chipEl.dataset.ablation;
+  const file = chipEl.dataset.file;
+
+  if (isAblation) {
+    ablationFocus = chipEl.dataset.ablation;
+  } else {
+    ablationFocus = null;
+    const axis = chipEl.dataset.matchAxis;
+    if (axis) {
+      // Find chip's actual match value (handle array matches)
+      const chip = n.chips.find(c => c.label === chipEl.textContent);
+      if (chip && chip.match && chip.match[axis] !== undefined) {
+        const v = chip.match[axis];
+        filters[axis] = Array.isArray(v) ? v[0] : v;
+      }
+    }
+  }
+
+  selectedFile = file;
+  expandedSpineNode = n.id;
+  openParentFolder(file);
+  renderTree();
+  renderMindMap();
+  renderDetail();
+}
+
+function handleSpineBodyClick(n) {
+  ablationFocus = null;
+  // Choose canonical file: if node has chips, prefer the chip matching current filter
+  let target = n.file;
+  if (n.chips) {
+    const m = n.chips.find(c => chipMatchesFilters(c));
+    if (m) target = m.file;
+  }
+  selectedFile = target;
+  if (currentTab === 'training' && n.id) {
+    expandedSpineNode = n.id;
+  }
+  openParentFolder(target);
+  renderTree();
+  renderMindMap();
+  renderDetail();
+}
+
+
+function renderPaperCodeView(wrap) {
+  const view = document.createElement('div');
+  view.className = 'paper-code-view';
+
+  const intro = document.createElement('div');
+  intro.className = 'paper-intro';
+  intro.innerHTML = 'This view links Orfanoudakis et al. 2025 paper landmarks to the repository files that implement, evaluate, or visualise them. Click an internal code reference to open its inspector entry and jump back to the relevant execution tab.';
+  view.appendChild(intro);
+
+  PAPER_CODE_MAPPINGS.forEach(item => {
+    const card = document.createElement('div');
+    card.className = 'paper-card';
+
+    const left = document.createElement('div');
+    left.className = 'paper-left';
+    left.innerHTML =
+      '<div class="paper-badge">' + escapeHtml(item.landmark) + '</div>' +
+      '<div class="paper-title">' + escapeHtml(item.title) + '</div>' +
+      (item.note ? '<div class="paper-note">' + escapeHtml(item.note) + '</div>' : '');
+
+    const right = document.createElement('div');
+    right.className = 'paper-right';
+    const list = document.createElement('div');
+    list.className = 'code-ref-list';
+
+    item.refs.forEach(ref => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'code-ref' + (ref.external ? ' external' : '');
+      const display = ref.display || ref.file;
+      btn.innerHTML =
+        '<span class="code-file">' + escapeHtml(display) + '</span>' +
+        (ref.symbol ? ' <span class="code-symbol">:: ' + escapeHtml(ref.symbol) + '</span>' : '');
+      if (!ref.external && ref.file) {
+        btn.dataset.file = ref.file;
+        btn.addEventListener('click', () => jumpToCodeRef(ref.file));
+      }
+      list.appendChild(btn);
+    });
+
+    right.appendChild(list);
+    card.appendChild(left);
+    card.appendChild(right);
+    view.appendChild(card);
+  });
+
+  wrap.appendChild(view);
+}
+
+function jumpToCodeRef(file) {
+  if (!file || !NODES[file]) return;
+  ablationFocus = null;
+  selectedFile = file;
+  openParentFolder(file);
+
+  let targetTab = 'training';
+  if (file.startsWith('Results_Analysis/')) targetTab = 'results';
+  else if (file === 'evaluator.py') targetTab = 'evaluation';
+
+  currentTab = targetTab;
+  document.querySelectorAll('.tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.tab === targetTab);
+  });
+  document.getElementById('main-area').dataset.activeTab = targetTab;
+
+  renderTree();
+  renderMindMap(true);
+  renderDetail();
+}
+
+function renderResultsTree(wrap) {
+  const flow = document.createElement('div');
+  flow.className = 'flow amber';
+  flow.id = 'spine-flow';
+
+  const root = document.createElement('div');
+  root.className = 'results-root-node';
+  root.textContent = 'Results_Analysis/';
+  flow.appendChild(root);
+
+  const conn = document.createElement('div');
+  conn.className = 'connector';
+  conn.innerHTML = '<div class="line"></div><div class="chev">▼</div>';
+  flow.appendChild(conn);
+
+  MAPS.results.forEach(cat => {
+    const group = document.createElement('div');
+    group.className = 'cat-group';
+    const title = document.createElement('div');
+    title.className = 'cat-title';
+    title.textContent = '├── ' + cat.cat;
+    group.appendChild(title);
+    const items = document.createElement('div');
+    items.className = 'cat-items';
+    cat.items.forEach(it => {
+      items.appendChild(createMapNode({id:it.file,title:it.title,sub:'',file:it.file}));
+    });
+    group.appendChild(items);
+    flow.appendChild(group);
+  });
+  wrap.appendChild(flow);
+}
+
+function renderSideEdges(wrap) {
+  // Always clear first
+  wrap.querySelectorAll('.side-box').forEach(el => el.remove());
+  wrap.querySelectorAll('.edges-svg').forEach(el => el.remove());
+  if (currentTab !== 'training') return;
+
+  const edges = getSideBoxesForExpandedNode();
+  if (edges.length === 0) return;
+
+  const targetNode = wrap.querySelector('[data-map-id="' + expandedSpineNode + '"]');
+  if (!targetNode) return;
+
+  // Use offsetLeft/offsetTop (unscaled) for layout math.
+  // With padding-left:380px on .flow, targetNode.offsetLeft is now well to the
+  // right of the .mindmap-wrap origin, so cardRightX below is positive.
+  const targetX = targetNode.offsetLeft;
+  const targetTop = targetNode.offsetTop;
+  const targetHeight = targetNode.offsetHeight;
+  const targetCenterY = targetTop + targetHeight / 2;
+
+  const horizontalGap = 190 * zoom;
+  const cardGap = 12 * zoom;
+  const busX = targetX - horizontalGap / 2;
+  const cardRightX = targetX - horizontalGap;
+
+  // SVG layer
+  const svg = document.createElementNS('http://www.w3.org/2000/svg','svg');
+  svg.classList.add('edges-svg');
+  wrap.appendChild(svg);
+
+  // Create boxes first (off-screen) to measure heights
+  const boxes = [];
+  edges.forEach((edge, idx) => {
+    const filterHit = (edge.file === 'utils/action_wrapper.py' && filters.action === 'Three-step');
+    const box = document.createElement('div');
+    let cls = 'side-box';
+    if (edge.type === 'inherit') cls += ' inherit';
+    if (edge.type === 'option') cls += ' option';
+    if (filterHit) cls += ' filter-match';
+    box.className = cls;
+    box.dataset.file = edge.file;
+    box.title = edge.text + (filterHit ? '  (active: Three-step filter)' : '');
+    box.innerHTML =
+      '<span class="sb-label">' + escapeHtml(edge.label) + '</span>' +
+      escapeHtml(edge.text);
+    box.style.visibility = 'hidden';
+    box.style.top = '0px';
+    box.style.left = '0px';
+    wrap.appendChild(box);
+    boxes.push({el:box, edge, filterHit});
+  });
+
+  // Measure each box, then stack top-down starting at target's top
+  let cursorY = Math.max(8, targetTop);
+  const cardCenters = [];
+  boxes.forEach(b => {
+    const w = b.el.offsetWidth;
+    const h = b.el.offsetHeight;
+    const left = cardRightX - w;
+    b.el.style.left = left + 'px';
+    b.el.style.top = cursorY + 'px';
+    b.el.style.visibility = '';
+    b.cy = cursorY + h / 2;
+    b.right = left + w;
+    cardCenters.push(b.cy);
+    cursorY += h + cardGap;
+  });
+
+  // Click handlers (after positioning)
+  boxes.forEach(b => {
+    b.el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      ablationFocus = null;
+      selectedFile = b.edge.file;
+      openParentFolder(b.edge.file);
+      renderTree();
+      syncSelectionToMap();
+      renderDetail();
+    });
+  });
+
+  // Draw paths: per-card horizontal + shared vertical bus + single exit to target
+  const minBus = Math.min(targetCenterY, ...cardCenters);
+  const maxBus = Math.max(targetCenterY, ...cardCenters);
+
+  // Per-card horizontal stubs
+  boxes.forEach(b => {
+    const isInherit = b.edge.type === 'inherit';
+    const stroke = b.filterHit ? '#CC785C' : (isInherit ? '#6B8E7F' : '#3A3A3A');
+    const sw = b.filterHit ? 1.5 : 1;
+    const dash = isInherit ? '4 3' : 'none';
+    addPath(svg, 'M ' + b.right + ' ' + b.cy + ' H ' + busX, stroke, sw, dash);
+  });
+
+  // Vertical bus
+  // For bus type/style, use first edge's type (mixed types are rare; train has all import, policy has only inherit, config has only option)
+  const firstType = edges[0].type;
+  const busStroke = firstType === 'inherit' ? '#6B8E7F' : '#3A3A3A';
+  const busDash = firstType === 'inherit' ? '4 3' : 'none';
+  // Detect if action_wrapper hit makes the bus stronger (only relevant for train node)
+  const anyFilterHit = boxes.some(b => b.filterHit);
+  const finalBusStroke = anyFilterHit && firstType !== 'inherit' ? '#3A3A3A' : busStroke;
+  addPath(svg, 'M ' + busX + ' ' + minBus + ' V ' + maxBus, finalBusStroke, 1, busDash);
+
+  // Exit horizontal from bus to target
+  const exitStroke = firstType === 'inherit' ? '#6B8E7F' : '#3A3A3A';
+  const exitDash = firstType === 'inherit' ? '4 3' : 'none';
+  addPath(svg, 'M ' + busX + ' ' + targetCenterY + ' H ' + (targetX - 4), exitStroke, 1, exitDash);
+
+  // Single chevron at target
+  const chev = document.createElementNS('http://www.w3.org/2000/svg','text');
+  chev.setAttribute('x', targetX - 8);
+  chev.setAttribute('y', targetCenterY + 4);
+  chev.setAttribute('fill', exitStroke);
+  chev.setAttribute('font-family', 'inherit');
+  chev.setAttribute('font-size', '11');
+  chev.textContent = '›';
+  svg.appendChild(chev);
+}
+
+function addPath(svg, d, stroke, sw, dash) {
+  const path = document.createElementNS('http://www.w3.org/2000/svg','path');
+  path.setAttribute('d', d);
+  path.setAttribute('fill', 'none');
+  path.setAttribute('stroke', stroke);
+  path.setAttribute('stroke-width', sw);
+  if (dash && dash !== 'none') path.setAttribute('stroke-dasharray', dash);
+  svg.appendChild(path);
+}
+
+function renderDetail() {
+  const c = document.getElementById('detail-content');
+  c.innerHTML = '';
+  if (!selectedFile || !NODES[selectedFile]) {
+    c.innerHTML =
+      '<div class="detail-default">───────────────────────────────────────────\n' +
+      'Click a file in the tree, or a node in\n' +
+      'the map, to inspect its role in the EV-\n' +
+      'GNN baseline.\n' +
+      '───────────────────────────────────────────\n' +
+      'Tip: edges are color-coded.\n' +
+      '  <span class="accent">Terracotta  ─ runtime execution</span>\n' +
+      '  <span class="soft">Sage        ┄ class inheritance</span>\n' +
+      '  <span class="gray">Gray        ─ import dependency</span>\n' +
+      '───────────────────────────────────────────\n' +
+      'See [ Manual ] tab for the full guide.</div>';
+    return;
+  }
+  const n = NODES[selectedFile];
+  let html = '<div class="detail-title-row">';
+  html += '<div class="detail-path">' + escapeHtml(n.path) + '</div>';
+  if (n.role) html += '<div class="detail-role">' + escapeHtml(n.role) + '</div>';
+  html += '</div>';
+
+  // Ablation banner
+  if (selectedFile === 'utils/state.py' && ablationFocus && ABLATION_NOTES[ablationFocus]) {
+    const ab = ABLATION_NOTES[ablationFocus];
+    html += '<div class="ablation-banner">' +
+      '<div class="bnr-head">Focused: <span class="bnr-name">' + escapeHtml(ablationFocus) + '</span> <span class="bnr-kind">(ablation function)</span></div>' +
+      '<div class="bnr-body">' + escapeHtml(ab.description) + '</div>' +
+      '<div class="bnr-ref">' + escapeHtml(ab.paperRef) + '</div>' +
+    '</div>';
+  }
+
+  html += renderRow('Purpose',       n.purpose,    'text');
+  html += renderRow('Inputs',        n.inputs,     'list');
+  html += renderRow('Outputs',       n.outputs,    'list');
+  html += renderRow('Imports',       n.imports,    'list');
+  html += renderRow('Imported by',   n.importedBy, 'list');
+  html += renderRow('Key classes',   n.classes,    'list');
+  html += renderRow('Key functions', n.functions,  'list');
+  html += renderRow('Related files', n.related,    'links');
+  html += renderRow('Paper ref',     n.paperRef,   'paper');
+  c.innerHTML = html;
+  c.querySelectorAll('li.link').forEach(li => {
+    li.addEventListener('click', () => selectFromTree(li.dataset.file));
+  });
+}
+
+function renderRow(label, value, kind) {
+  let val = '';
+  let cls = 'val';
+  if (kind === 'text') {
+    val = value ? escapeHtml(value) : '<span class="empty">—</span>';
+  } else if (kind === 'list') {
+    if (!value || value.length === 0) val = '<span class="empty">—</span>';
+    else val = '<ul>' + value.map(v => '<li>' + escapeHtml(v) + '</li>').join('') + '</ul>';
+  } else if (kind === 'links') {
+    if (!value || value.length === 0) val = '<span class="empty">—</span>';
+    else val = '<ul>' + value.map(v =>
+      '<li class="link" data-file="' + escapeAttr(v) + '">' + escapeHtml(v) + '</li>'
+    ).join('') + '</ul>';
+  } else if (kind === 'paper') {
+    if (!value) val = '<span class="empty">—</span>';
+    else { val = escapeHtml(value); cls = 'val paper-ref'; }
+  }
+  return '<div class="detail-row"><div class="key">' + label + '</div><div class="' + cls + '">' + val + '</div></div>';
+}
+
+function renderManual() {
+  const subTabsEl = document.getElementById('manual-sub-tabs');
+  const contentEl = document.getElementById('manual-content');
+  const m = MANUAL[manualLang];
+
+  // Render the sub-tab list
+  subTabsEl.innerHTML = '';
+  const header = document.createElement('div');
+  header.className = 'manual-sub-header';
+  header.textContent = '── sections ──';
+  subTabsEl.appendChild(header);
+
+  MANUAL_SUB_TABS.forEach(key => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'manual-sub-tab' + (manualSubTab === key ? ' active' : '');
+    btn.dataset.subTab = key;
+    btn.textContent = m[key].label;
+    btn.addEventListener('click', () => {
+      manualSubTab = key;
+      renderManual();
+      // Reset content pane scroll to top
+      contentEl.scrollTop = 0;
+    });
+    subTabsEl.appendChild(btn);
+  });
+
+  // Render the content pane
+  contentEl.innerHTML = m[manualSubTab].content;
+
+  // Sync language toggle
+  document.querySelectorAll('.lang-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.lang === manualLang);
+  });
+}
+
+/* ==== INTERACTION ==== */
+
+function selectFromTree(path) {
+  if (!path || !NODES[path]) return;
+  ablationFocus = null;
+  selectedFile = path;
+  openParentFolder(path);
+  renderTree();
+  syncSelectionToMap();
+  renderDetail();
+}
+
+function openParentFolder(path) {
+  const parts = path.split('/');
+  if (parts.length < 2) return;
+  const folderName = parts[0];
+  const folder = TREE.children.find(c => c.type === 'folder' && c.name === folderName);
+  if (folder && !folder.open) folder.open = true;
+}
+
+function syncSelectionToMap() {
+  document.querySelectorAll('.node, .side-box').forEach(el => {
+    if (el.dataset.file && el.dataset.file === selectedFile) el.classList.add('selected');
+    else el.classList.remove('selected');
+  });
+}
+
+function switchTab(tab) {
+  if (tab === currentTab) return;
+  currentTab = tab;
+  document.querySelectorAll('.tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.tab === tab);
+  });
+  document.getElementById('main-area').dataset.activeTab = tab;
+  if (tab === 'manual') {
+    // Manual is intentionally text-only. Clear the shared map containers so
+    // previous Training/Evaluation/Results state cannot visually leak into it.
+    document.getElementById('mindmap-wrap').innerHTML = '';
+    document.getElementById('filter-bar-host').innerHTML = '';
+    document.getElementById('filter-summary').innerHTML = '';
+    document.getElementById('mindmap-title').textContent = '';
+    renderManual();
+  } else {
+    renderMindMap(true);
+  }
+}
+
+function applyZoom(z) {
+  z = Math.max(0.5, Math.min(2.0, Math.round(z * 10) / 10));
+  zoom = z;
+  document.documentElement.style.setProperty('--zoom', z);
+  document.getElementById('zoom-label').textContent = Math.round(z * 100) + '%';
+  if (currentTab === 'training') {
+    requestAnimationFrame(() => renderSideEdges(document.getElementById('mindmap-wrap')));
+  }
+}
+
+function recenter() {
+  const scroller = document.getElementById('map-scroll');
+  const flow = document.getElementById('spine-flow');
+  if (!scroller || !flow) return;
+  // After v4's padding-left on .flow, flow.offsetWidth/2 is no longer the
+  // spine center. Measure the first actual spine element (a .node for
+  // training/evaluation, .results-root-node for results) and center on it.
+  const firstSpine = flow.querySelector('.node, .results-root-node');
+  if (!firstSpine) {
+    scroller.scrollTo({left: 0, top: 0, behavior: 'smooth'});
+    return;
+  }
+  // firstSpine.offsetLeft is relative to .flow (.flow has position:relative,
+  // so it is the offsetParent). flow.offsetLeft is relative to .mindmap-wrap.
+  // The scroller (#map-scroll) wraps .map-content which wraps .mindmap-wrap,
+  // so combined offsets give the absolute left within the scroller content.
+  const spineLeft = firstSpine.offsetLeft + flow.offsetLeft;
+  const spineCenter = spineLeft + firstSpine.offsetWidth / 2;
+  const target = Math.max(0, spineCenter - scroller.clientWidth / 2);
+  scroller.scrollTo({left: target, top: 0, behavior: 'smooth'});
+}
+
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s).replace(/[&<>"']/g, ch => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[ch]));
+}
+function escapeAttr(s) { return escapeHtml(s); }
+
+/* ==== EVENT WIRING ==== */
+
+document.querySelectorAll('.tab').forEach(t => {
+  t.addEventListener('click', () => switchTab(t.dataset.tab));
+});
+
+document.getElementById('zoom-in').addEventListener('click', () => applyZoom(zoom + 0.1));
+document.getElementById('zoom-out').addEventListener('click', () => applyZoom(zoom - 0.1));
+document.getElementById('zoom-label').addEventListener('click', () => applyZoom(1.0));
+document.getElementById('recenter').addEventListener('click', recenter);
+
+document.querySelectorAll('.lang-btn').forEach(b => {
+  b.addEventListener('click', () => {
+    manualLang = b.dataset.lang;
+    renderManual();
+  });
+});
+
+let resizeTimer;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    if (currentTab === 'training') {
+      renderSideEdges(document.getElementById('mindmap-wrap'));
+    }
+  }, 120);
+});
+
+/* ==== INIT ==== */
+renderTree();
+if (currentTab !== 'manual') {
+  renderMindMap(true);
+}
+renderDetail();
+renderManual();
+</script>
+</body>
+</html>

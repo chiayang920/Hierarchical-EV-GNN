@@ -1,0 +1,87 @@
+# 把 hierarchical actor 的 raw outputs 轉成 EV2Gym 可以執行的 25-dimensional action vector。
+
+"""
+CPO / transformer / charger / EV outputs
+→ clipping
+→ masking empty chargers
+→ index mapping
+→ final 25-dimensional action vector
+"""
+
+
+"""
+transformer budget weights
+→ charger budget weights
+→ local EV charging ratios
+→ final_action[0:25]
+"""
+
+"""
+CPO → transformer allocation
+Transformer → charger allocation
+Charger → EV local action
+"""
+
+# EV2Gym -> 
+"""
+hierarchical actor raw outputs
+→ legal active-EV node actions
+→ 25-dimensional EV2Gym action vector
+
+
+normalise
+clip
+mask empty chargers
+map active EV actions into correct EV2Gym action slots
+"""
+   
+"""_summary_
+HierarchicalActionProjection   # main coordinator
+├── CPOTransformerBudgetProjector
+├── TransformerChargerBudgetProjector
+├── ChargerEVActionProjector
+└── EV2GymActionMappesr
+"""
+
+
+"""
+utils/hierarchical_action_projection.py
+
+Purpose:
+    Convert hierarchical actor raw outputs into:
+    1. differentiable active-EV node actions for learning
+    2. detached 25-dimensional NumPy action vector for EV2Gym execution
+    
+Dataclasses:
+    HierarchicalRawAction
+    ProjectionMetadata
+    ProjectionResult
+
+Component classes:
+    CPOTransformerBudgetProjector
+    TransformerChargerBudgetProjector
+    ChargerEVActionProjector
+    EV2GymActionMapper
+
+Main class:
+    HierarchicalActionProjection
+    
+workflow - During training
+state
+→ actor GNN encoder
+→ node embeddings
+→ hierarchical raw outputs
+→ hierarchical_action_projection.project_for_training()
+→ node_action tensor
+→ critic(state, node_action)
+→ actor loss / critic loss
+
+workflow - During environment interaction
+state
+→ actor GNN encoder
+→ hierarchical raw outputs
+→ hierarchical_action_projection.project_for_env()
+→ mapped_action numpy shape (25,)
+→ env.step(mapped_action)
+
+"""
