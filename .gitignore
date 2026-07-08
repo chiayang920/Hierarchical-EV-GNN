@@ -1,14 +1,40 @@
-# macOS
+# -----------------------------
+# OS / editor artefacts
+# -----------------------------
 .DS_Store
+.AppleDouble
+.LSOverride
 __MACOSX/
+.vscode/
+.idea/
 
-# Python
+# -----------------------------
+# Agent / local assistant metadata
+# -----------------------------
+.codex/
+.agents/
+
+# -----------------------------
+# Python cache / test cache
+# -----------------------------
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
-# Environments / secrets
+# -----------------------------
+# Jupyter
+# -----------------------------
+.ipynb_checkpoints/
+
+# -----------------------------
+# Environments / local configuration / secrets
+# -----------------------------
 .env
 .env.*
 *.pem
@@ -16,7 +42,9 @@ __pycache__/
 credentials.json
 token.json
 
+# -----------------------------
 # Experiment outputs
+# -----------------------------
 logs/
 wandb/
 saved_models/
@@ -24,11 +52,26 @@ eval_logs/
 eval_models/
 results/
 
-# Large archive / model artefacts
+# -----------------------------
+# M3 / reproducibility packages and generated archives
+# -----------------------------
+*.tar.gz
 *.zip
+*.diff
+
+# -----------------------------
+# Model / binary artefacts
+# -----------------------------
 *.pt
 *.pth
 *.ckpt
+*.pkl
+model.best_*
+model.last_*
 
-# Jupyter
-.ipynb_checkpoints/
+# -----------------------------
+# Generated plots and temporary analysis exports
+# Keep final figures in docs/ only if intentionally curated.
+# -----------------------------
+*.tmp
+*.bak
