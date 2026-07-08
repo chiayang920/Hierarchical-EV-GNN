@@ -312,21 +312,11 @@ The hierarchical actor shows strong positive evidence at 25CP and directional bu
 5. If scaling is required, run 500CP smoke/profile first, not full formal.
 ```
 
-## Baseline attribution
+## Baseline reference
 
-This repository builds on the EV-GNN baseline:
+Orfanoudakis et al. (2025). *Scalable reinforcement learning for large-scale coordination of electric vehicles using graph neural networks*. Communications Engineering, 4:118.
 
-```text
-Orfanoudakis, S., Robu, V., Salazar, E. M., Palensky, P., & Vergara, P. P. (2025).
-Scalable reinforcement learning for large-scale coordination of electric vehicles using graph neural networks.
-Communications Engineering, 4, Article 118.
-https://doi.org/10.1038/s44172-025-00457-8
-```
+DOI: https://doi.org/10.1038/s44172-025-00457-8
 
-Original repository:
+Original repository: https://github.com/StavrosOrf/EV-GNN
 
-```text
-https://github.com/StavrosOrf/EV-GNN
-```
-
-Original authorship and citation should be preserved in all academic use.
