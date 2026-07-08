@@ -300,7 +300,7 @@ def build_paired_outputs(seed_summary: pd.DataFrame) -> Tuple[pd.DataFrame, pd.D
     require(list(actiongnn.index) == list(hier.index), "ActionGNN/hierarchical seed indices do not match")
 
     paired_rows: List[dict] = []
-    for seed in base.index:
+    for seed in actiongnn.index:
         row = {"seed": int(seed)}
         for metric in METRICS:
             if metric.name in actiongnn.columns and metric.name in hier.columns:
