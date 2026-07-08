@@ -1,13 +1,13 @@
 """
 The program is designed for testing the hierarchical action projection
-module used by the 25 CP EV-GNN prototype.
+utility for TD3 EV-GNN experiments.
 
 These tests do not train TD3, do not run EV2Gym, and do not test GNN node
 embeddings. They only verify that hierarchical raw actor outputs can be
 converted into:
 
 1. differentiable active EV-node actions; and
-2. a fixed 25-dimensional EV2Gym-compatible action vector.
+2. a fixed EV2Gym-compatible action vector for a small mock configuration.
 
 arg:
 
@@ -19,7 +19,7 @@ import sys
 
 # Add the EV-GNN project root to Python's module search path.
 # This makes the test executable directly via:
-#     python tests/test_hierarchical_action_projection_25cp.py
+#     python tests/test_hierarchical_action_projection.py
 #
 # Without this, Python may only search inside EV-GNN/tests/, which means
 # project-level imports such as "utils.hierarchical_action_projection"
@@ -48,7 +48,7 @@ def build_mock_public_pst_state() -> Data:
         - 2 transformers;
         - 4 chargers;
         - 4 active EVs;
-        - a 25-dimensional EV2Gym action space;
+        - a small fixed EV2Gym action space;
         - active EVs mapped into action slots [0, 5, 9, 12].
 
     This is sufficient to test whether the projection layer can map

@@ -13,32 +13,41 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 def test_controlled_evaluator_imports():
-    module = importlib.import_module("evaluator_td3_actiongnn_controlled")
+    module = importlib.import_module("evaluate_td3_gnn")
     assert module is not None
 
 
-def test_policy_factory_supports_baseline_and_hierarchical():
-    module = importlib.import_module("evaluator_td3_actiongnn_controlled")
+def test_policy_factory_supports_actiongnn_and_hierarchical():
+    module = importlib.import_module("evaluate_td3_gnn")
 
-    baseline_policy = module.create_policy(
-        algorithm="baseline_25cp",
+    actiongnn_policy = module.create_policy(
+        algorithm="actiongnn",
         action_dim=25,
         max_action=1.0,
         device="cpu",
     )
     hierarchical_policy = module.create_policy(
-        algorithm="hierarchical_25cp",
+        algorithm="hierarchical",
         action_dim=25,
         max_action=1.0,
         device="cpu",
     )
 
-    assert baseline_policy.__class__.__name__ == "TD3_ActionGNN"
+    assert actiongnn_policy.__class__.__name__ == "TD3_ActionGNN"
     assert hierarchical_policy.__class__.__name__ == "TD3_HierarchicalActionGNN"
 
 
+def test_legacy_algorithm_aliases_normalise_to_canonical_labels():
+    module = importlib.import_module("evaluate_td3_gnn")
+
+    with pytest.warns(DeprecationWarning, match="baseline_25cp"):
+        assert module.normalise_algorithm_label("baseline_25cp") == "actiongnn"
+    with pytest.warns(DeprecationWarning, match="hierarchical_25cp"):
+        assert module.normalise_algorithm_label("hierarchical_25cp") == "hierarchical"
+
+
 def test_policy_factory_rejects_invalid_algorithm():
-    module = importlib.import_module("evaluator_td3_actiongnn_controlled")
+    module = importlib.import_module("evaluate_td3_gnn")
 
     with pytest.raises(ValueError, match="Unsupported algorithm"):
         module.create_policy(
@@ -60,7 +69,7 @@ class RecordingPolicy:
 
 
 def test_select_mapped_action_respects_deterministic_and_eval_noise():
-    module = importlib.import_module("evaluator_td3_actiongnn_controlled")
+    module = importlib.import_module("evaluate_td3_gnn")
 
     deterministic_policy = RecordingPolicy()
     deterministic_action = module.select_mapped_action(
@@ -85,7 +94,7 @@ def test_select_mapped_action_respects_deterministic_and_eval_noise():
 
 
 def test_action_diagnostics_from_mapped_actions():
-    module = importlib.import_module("evaluator_td3_actiongnn_controlled")
+    module = importlib.import_module("evaluate_td3_gnn")
     mapped_actions = [
         np.array([0.0, 1.0, 1.0], dtype=np.float32),
         np.array([0.5, 0.0, 1.0], dtype=np.float32),
@@ -102,11 +111,11 @@ def test_action_diagnostics_from_mapped_actions():
 
 
 def test_csv_rows_include_required_schema_and_scalar_stats():
-    module = importlib.import_module("evaluator_td3_actiongnn_controlled")
+    module = importlib.import_module("evaluate_td3_gnn")
 
     metadata = {
         "run_name": "contract_test",
-        "algorithm": "hierarchical_25cp",
+        "algorithm": "hierarchical",
         "config": "./config_files/PublicPST_25cp.yaml",
         "seed": 7,
         "checkpoint": "model.best",

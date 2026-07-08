@@ -51,6 +51,12 @@ saved_models/
 eval_logs/
 eval_models/
 results/
+artifacts/experiments/
+artifacts/evaluations/
+artifacts/aggregates/
+artifacts/plots/
+artifacts/packages/
+artifacts/reports/
 
 # -----------------------------
 # M3 / reproducibility packages and generated archives

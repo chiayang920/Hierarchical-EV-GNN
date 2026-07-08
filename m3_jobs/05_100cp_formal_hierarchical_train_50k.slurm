@@ -26,8 +26,8 @@ RUN_ROOT="/scratch2/fr57/cche0357/EV-GNN_runs/phase2d_100cp_formal_train"
 SAVE_DIR="${RUN_ROOT}/saved_models"
 
 CONFIG_PATH="./config_files/PublicPST_100.yaml"
-ALGORITHM="hierarchical_25cp"
-TRAIN_SCRIPT="train_RL_GNN_hierarchical_25cp.py"
+ALGORITHM="hierarchical"
+TRAIN_SCRIPT="train_td3_gnn.py"
 SEED="${SLURM_ARRAY_TASK_ID}"
 
 MAX_TIMESTEPS=50000
@@ -71,6 +71,7 @@ python -c 'import torch, torch_geometric, ev2gym; print("torch", torch.__version
 
 echo "=== Training hierarchical formal 100 CP ==="
 python "${TRAIN_SCRIPT}" \
+  --algorithm "${ALGORITHM}" \
   --config "${CONFIG_PATH}" \
   --seed "${SEED}" \
   --device "${DEVICE}" \

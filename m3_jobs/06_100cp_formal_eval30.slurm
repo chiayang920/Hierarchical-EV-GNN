@@ -38,12 +38,12 @@ BASE_EVAL_SEED=420000
 TASK_ID="${SLURM_ARRAY_TASK_ID}"
 
 if [[ "${TASK_ID}" -ge 0 && "${TASK_ID}" -le 4 ]]; then
-  ALG_SHORT="baseline"
-  ALGORITHM="baseline_25cp"
+  ALG_SHORT="actiongnn"
+  ALGORITHM="actiongnn"
   SEED="${TASK_ID}"
 elif [[ "${TASK_ID}" -ge 5 && "${TASK_ID}" -le 9 ]]; then
   ALG_SHORT="hierarchical"
-  ALGORITHM="hierarchical_25cp"
+  ALGORITHM="hierarchical"
   SEED=$((TASK_ID - 5))
 else
   echo "Invalid SLURM_ARRAY_TASK_ID=${TASK_ID}"
@@ -54,11 +54,11 @@ RUN_NAME="phase2d_formal_eval30_${ALG_SHORT}_100cp_seed${SEED}"
 MODEL_DIR="${TRAIN_MODEL_PARENT}/phase2d_formal_${ALG_SHORT}_100cp_seed${SEED}_50k"
 CHECKPOINT_PREFIX="${MODEL_DIR}/model.best"
 
-# evaluator_td3_actiongnn_controlled.py internally uses:
+# evaluate_td3_gnn.py internally uses:
 # episode_seed = args.seed + args.eval_seed_offset + episode_index
 # This offset keeps actual evaluation episode seeds as:
-# baseline/hier seed0: 420000..420029
-# baseline/hier seed1: 421000..421029
+# actiongnn/hierarchical seed0: 420000..420029
+# actiongnn/hierarchical seed1: 421000..421029
 # ...
 EVAL_SEED_OFFSET=$((BASE_EVAL_SEED + SEED * 1000 - SEED))
 
@@ -121,7 +121,7 @@ sha256sum "${CHECKPOINT_PREFIX}_actor" "${CHECKPOINT_PREFIX}_critic"
 echo "=== Controlled eval30 ==="
 rm -f "${OUTPUT_CSV}"
 
-python evaluator_td3_actiongnn_controlled.py \
+python evaluate_td3_gnn.py \
   --algorithm "${ALGORITHM}" \
   --config "${CONFIG_PATH}" \
   --seed "${SEED}" \

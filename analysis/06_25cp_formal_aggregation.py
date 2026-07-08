@@ -1,3 +1,9 @@
+"""Historical 25CP formal aggregation script.
+
+This file intentionally preserves legacy 25CP result filenames and labels so
+completed 25CP evaluations remain reproducible.
+"""
+
 from __future__ import annotations
 
 import csv

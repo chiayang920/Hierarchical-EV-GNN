@@ -38,11 +38,11 @@ DEVICE="cpu"
 TASK_ID="${SLURM_ARRAY_TASK_ID}"
 
 if [[ "${TASK_ID}" == "0" ]]; then
-  ALGORITHM="baseline_25cp"
-  TRAIN_SCRIPT="train_RL_GNN_25cp.py"
+  ALGORITHM="actiongnn"
+  TRAIN_SCRIPT="train_td3_gnn.py"
 elif [[ "${TASK_ID}" == "1" ]]; then
-  ALGORITHM="hierarchical_25cp"
-  TRAIN_SCRIPT="train_RL_GNN_hierarchical_25cp.py"
+  ALGORITHM="hierarchical"
+  TRAIN_SCRIPT="train_td3_gnn.py"
 else
   echo "Invalid SLURM_ARRAY_TASK_ID=${TASK_ID}"
   exit 2
@@ -87,6 +87,7 @@ python -c 'import torch, torch_geometric, ev2gym; print("torch", torch.__version
 
 echo "=== Training ==="
 python "${TRAIN_SCRIPT}" \
+  --algorithm "${ALGORITHM}" \
   --config "${CONFIG_PATH}" \
   --seed "${SEED}" \
   --device "${DEVICE}" \
@@ -104,7 +105,7 @@ CHECKPOINT_PATH="${SAVE_DIR}/${RUN_NAME}/model.best"
 OUTPUT_CSV="${EVAL_DIR}/${ALGORITHM}_100cp_seed${SEED}_eval${FINAL_EVAL_EPISODES}.csv"
 
 echo "=== Controlled evaluator ==="
-python evaluator_td3_actiongnn_controlled.py \
+python evaluate_td3_gnn.py \
   --algorithm "${ALGORITHM}" \
   --config "${CONFIG_PATH}" \
   --seed "${SEED}" \

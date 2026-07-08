@@ -36,12 +36,13 @@ python -c 'import torch, torch_geometric, ev2gym; print("torch", torch.__version
 python -c 'import pkg_resources; print("PKG_RESOURCES_OK")'
 python -c 'from ev2gym.models.ev2gym_env import EV2Gym; print("EV2GYM_ENV_IMPORT_OK")'
 
-echo "=== Baseline 100 CP tiny training smoke ==="
-python train_RL_GNN_25cp.py \
+echo "=== ActionGNN 100 CP tiny training smoke ==="
+python train_td3_gnn.py \
+  --algorithm actiongnn \
   --config ./config_files/PublicPST_100.yaml \
   --seed 0 \
   --device cpu \
-  --run_name phase2d_smoke_baseline_100cp_seed0 \
+  --run_name phase2d_smoke_actiongnn_100cp_seed0 \
   --max_timesteps 112 \
   --start_timesteps 16 \
   --eval_freq 112 \
@@ -52,7 +53,8 @@ python train_RL_GNN_25cp.py \
   --log_to_wandb false
 
 echo "=== Hierarchical 100 CP tiny training smoke ==="
-python train_RL_GNN_hierarchical_25cp.py \
+python train_td3_gnn.py \
+  --algorithm hierarchical \
   --config ./config_files/PublicPST_100.yaml \
   --seed 0 \
   --device cpu \
@@ -66,23 +68,23 @@ python train_RL_GNN_hierarchical_25cp.py \
   --save_dir "${SAVE_DIR}" \
   --log_to_wandb false
 
-echo "=== Controlled evaluator smoke: baseline ==="
-python evaluator_td3_actiongnn_controlled.py \
-  --algorithm baseline_25cp \
+echo "=== Controlled evaluator smoke: ActionGNN ==="
+python evaluate_td3_gnn.py \
+  --algorithm actiongnn \
   --config ./config_files/PublicPST_100.yaml \
   --seed 0 \
   --eval_episodes 1 \
-  --checkpoint "${SAVE_DIR}/phase2d_smoke_baseline_100cp_seed0/model.best" \
+  --checkpoint "${SAVE_DIR}/phase2d_smoke_actiongnn_100cp_seed0/model.best" \
   --device cpu \
-  --output_csv "${EVAL_DIR}/baseline_100cp_seed0_eval1.csv" \
-  --run_name phase2d_smoke_baseline_100cp_seed0_eval1 \
+  --output_csv "${EVAL_DIR}/actiongnn_100cp_seed0_eval1.csv" \
+  --run_name phase2d_smoke_actiongnn_100cp_seed0_eval1 \
   --max_episode_steps 112 \
   --deterministic true \
   --eval_seed_offset 400000
 
 echo "=== Controlled evaluator smoke: hierarchical ==="
-python evaluator_td3_actiongnn_controlled.py \
-  --algorithm hierarchical_25cp \
+python evaluate_td3_gnn.py \
+  --algorithm hierarchical \
   --config ./config_files/PublicPST_100.yaml \
   --seed 0 \
   --eval_episodes 1 \

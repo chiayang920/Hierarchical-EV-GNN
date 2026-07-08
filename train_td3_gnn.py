@@ -1,99 +1,35 @@
 import argparse
 import csv
-import os
-import random
 import time
 from pathlib import Path
 
 import numpy as np
-import torch
 import yaml
-from gymnasium import Space
-from torch_geometric.data import Data
 from tqdm import tqdm
 
-from ev2gym.models.ev2gym_env import EV2Gym
-from ev2gym.rl_agent.reward import SimpleReward
-
-from TD3.TD3_ActionGNN_25cp import TD3_ActionGNN
-from utils.replay_buffer_25cp import ActionGNN_ReplayBuffer
-from utils.state_25cp import PublicPST_GNN
-
-
-class PyGDataSpace(Space):
-    def __init__(self):
-        super().__init__((), None)
-
-    def sample(self):
-        return Data()
-
-    def contains(self, x):
-        return isinstance(x, Data)
+from utils.ev2gym_training_utils import (
+    make_env,
+    normalise_step_result,
+    reset_env,
+    resolve_device,
+    set_global_seed,
+    str2bool,
+)
 
 
-def str2bool(value):
-    if isinstance(value, bool):
-        return value
-    value = value.lower()
-    if value in {"true", "1", "yes", "y"}:
-        return True
-    if value in {"false", "0", "no", "n"}:
-        return False
-    raise argparse.ArgumentTypeError("Boolean value expected.")
+ALGORITHM_CHOICES = ("actiongnn", "hierarchical")
 
 
-def resolve_device(device_arg):
-    if device_arg == "auto":
-        if torch.cuda.is_available():
-            return "cuda"
-        return "cpu"
-    if device_arg == "cuda" and not torch.cuda.is_available():
-        print("CUDA is not available. Falling back to CPU.")
-        return "cpu"
-    return device_arg
+def get_policy_class(algorithm):
+    if algorithm == "actiongnn":
+        from TD3.TD3_ActionGNN_Controlled import TD3_ActionGNN
 
+        return TD3_ActionGNN
+    if algorithm == "hierarchical":
+        from TD3.TD3_HierarchicalActionGNN import TD3_HierarchicalActionGNN
 
-def set_global_seed(seed):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-
-def reset_env(env, seed=None):
-    try:
-        return env.reset(seed=seed)
-    except TypeError:
-        return env.reset()
-
-
-def make_env(config_file, seed=None):
-    if seed is not None:
-        set_global_seed(seed)
-    env = EV2Gym(
-        config_file=config_file,
-        generate_rnd_game=True,
-        reward_function=SimpleReward,
-        state_function=PublicPST_GNN,
-    )
-    env.observation_space = PyGDataSpace()
-    try:
-        env.action_space.seed(seed)
-    except Exception:
-        pass
-    return env
-
-
-def normalise_step_result(step_result):
-    if len(step_result) == 5:
-        next_state, reward, terminated, truncated, stats = step_result
-        done = bool(terminated or truncated)
-        return next_state, reward, done, stats
-    if len(step_result) == 4:
-        next_state, reward, done, stats = step_result
-        return next_state, reward, bool(done), stats
-    raise RuntimeError(f"Unexpected env.step return length: {len(step_result)}")
+        return TD3_HierarchicalActionGNN
+    raise ValueError(f"Unsupported algorithm: {algorithm}")
 
 
 def evaluate_policy(policy, args, config_file, eval_episodes):
@@ -151,11 +87,16 @@ def write_log_row(log_path, row):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="25 CP TD3 EV-GNN training script.")
-    parser.add_argument("--config", default="./config_files/PublicPST_25cp.yaml")
+    parser = argparse.ArgumentParser(description="TD3 EV-GNN training. CP scale is selected by the EV2Gym config file.")
+    parser.add_argument("--algorithm", default="actiongnn", choices=sorted(ALGORITHM_CHOICES))
+    parser.add_argument(
+        "--config",
+        default="./config_files/PublicPST_25cp.yaml",
+        help="EV2Gym config file; CP scale is config-driven.",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cpu", choices=["auto", "cpu", "cuda", "mps"])
-    parser.add_argument("--run_name", default="TD3_ActionGNN_25cp_seed0")
+    parser.add_argument("--run_name", default=None)
 
     parser.add_argument("--max_timesteps", type=int, default=2_240_000)
     parser.add_argument("--eval_freq", type=int, default=33_600)
@@ -179,7 +120,7 @@ def parse_args():
     parser.add_argument("--critic_num_gcn_layers", type=int, default=3)
     parser.add_argument("--discrete_actions", type=int, default=1)
 
-    parser.add_argument("--save_dir", default="./saved_models")
+    parser.add_argument("--save_dir", default="./artifacts/experiments")
     parser.add_argument("--log_to_wandb", type=str2bool, default=False)
     return parser.parse_args()
 
@@ -193,29 +134,35 @@ def main():
     with open(config_file, "r") as file:
         config = yaml.load(file, Loader=yaml.FullLoader)
 
-    print("---------------------------------------")
-    print("25 CP TD3 EV-GNN training")
-    print(f"Config: {config_file}")
-    print(f"Seed: {args.seed}")
-    print(f"Device: {args.device}")
-    print(f"Max timesteps: {args.max_timesteps}")
-    print(f"Eval frequency: {args.eval_freq}")
-    print(f"Eval episodes: {args.eval_episodes}")
-    print("---------------------------------------")
-
     env = make_env(config_file, seed=args.seed)
     state, _ = reset_env(env, seed=args.seed)
 
     action_dim = env.action_space.shape[0]
     max_action = float(env.action_space.high[0])
     simulation_length = int(config["simulation_length"])
+    from utils.replay_buffer_actiongnn import ActionGNN_ReplayBuffer
+    from utils.state_public_pst_gnn import PublicPST_GNN
 
-    run_name = args.run_name
-    if run_name.endswith("seed0") and args.seed != 0:
-        run_name = f"TD3_ActionGNN_25cp_seed{args.seed}"
+    policy_class = get_policy_class(args.algorithm)
+
+    run_name = args.run_name or f"td3_gnn_{args.algorithm}_seed{args.seed}"
+    args.run_name = run_name
 
     save_path = Path(args.save_dir) / run_name
     save_path.mkdir(parents=True, exist_ok=True)
+
+    print("---------------------------------------")
+    print("TD3 EV-GNN training")
+    print(f"Algorithm: {args.algorithm}")
+    print(f"Config: {config_file}")
+    print(f"Detected action dimension: {action_dim}")
+    print(f"Seed: {args.seed}")
+    print(f"Device: {args.device}")
+    print(f"Max timesteps: {args.max_timesteps}")
+    print(f"Eval frequency: {args.eval_freq}")
+    print(f"Eval episodes: {args.eval_episodes}")
+    print(f"Save path: {save_path}")
+    print("---------------------------------------")
 
     kwargs = {
         "action_dim": action_dim,
@@ -243,7 +190,7 @@ def main():
     with (save_path / "run_args.yaml").open("w") as file:
         yaml.dump(vars(args), file)
 
-    policy = TD3_ActionGNN(**kwargs)
+    policy = policy_class(**kwargs)
     replay_buffer = ActionGNN_ReplayBuffer(
         action_dim=action_dim,
         max_size=args.replay_buffer_size,

@@ -5,7 +5,8 @@ Source of truth:
   /scratch2/fr57/cche0357/EV-GNN_runs/phase2d_100cp_formal_eval30/eval/*.csv
 
 This script reads:
-  - baseline_100cp_seed{0..4}_eval30.csv
+  - baseline_100cp_seed{0..4}_eval30.csv (legacy ActionGNN baseline label)
+  - actiongnn_100cp_seed{0..4}_eval30.csv
   - hierarchical_100cp_seed{0..4}_eval30.csv
 
 It writes:
@@ -87,6 +88,17 @@ KEY_PLOT_METRICS = [
     "total_transformer_overload",
 ]
 
+FILE_LABEL_TO_ALGORITHM = {
+    "baseline": "actiongnn",
+    "actiongnn": "actiongnn",
+    "hierarchical": "hierarchical",
+}
+
+DISPLAY_LABELS = {
+    "actiongnn": "ActionGNN baseline",
+    "hierarchical": "Hierarchical",
+}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Aggregate Phase 2D 100CP formal eval30 results.")
@@ -94,7 +106,7 @@ def parse_args() -> argparse.Namespace:
         "--eval_dir",
         type=Path,
         default=Path("/scratch2/fr57/cche0357/EV-GNN_runs/phase2d_100cp_formal_eval30/eval"),
-        help="Directory containing baseline_100cp_seed*_eval30.csv and hierarchical_100cp_seed*_eval30.csv.",
+        help="Directory containing actiongnn/hierarchical 100CP eval30 CSVs. Legacy baseline_100cp files are accepted as ActionGNN outputs.",
     )
     parser.add_argument(
         "--output_dir",
@@ -109,15 +121,19 @@ def parse_args() -> argparse.Namespace:
 
 
 def discover_files(eval_dir: Path) -> Dict[Tuple[str, int], Path]:
-    pattern = re.compile(r"^(baseline|hierarchical)_100cp_seed(\d+)_eval30\.csv$")
+    pattern = re.compile(r"^(baseline|actiongnn|hierarchical)_100cp_seed(\d+)_eval30\.csv$")
     files: Dict[Tuple[str, int], Path] = {}
     for path in sorted(eval_dir.glob("*_100cp_seed*_eval30.csv")):
         match = pattern.match(path.name)
         if not match:
             continue
-        alg_short = match.group(1)
+        file_label = match.group(1)
+        algorithm = FILE_LABEL_TO_ALGORITHM[file_label]
         seed = int(match.group(2))
-        files[(alg_short, seed)] = path
+        key = (algorithm, seed)
+        if key in files:
+            raise RuntimeError(f"Duplicate eval CSVs for {key}: {files[key].name} and {path.name}")
+        files[key] = path
     return files
 
 
@@ -131,7 +147,7 @@ def read_and_validate(
     expected_seeds: int,
     expected_episodes: int,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    expected_keys = {(alg, seed) for alg in ("baseline", "hierarchical") for seed in range(expected_seeds)}
+    expected_keys = {(alg, seed) for alg in ("actiongnn", "hierarchical") for seed in range(expected_seeds)}
     missing = sorted(expected_keys.difference(files.keys()))
     extra = sorted(set(files.keys()).difference(expected_keys))
     require(not missing, f"Missing eval CSVs for: {missing}")
@@ -140,7 +156,7 @@ def read_and_validate(
     episode_frames: List[pd.DataFrame] = []
     summary_frames: List[pd.DataFrame] = []
 
-    for (alg_short, seed), path in sorted(files.items()):
+    for (algorithm, seed), path in sorted(files.items()):
         df = pd.read_csv(path)
         required_cols = ["row_type", "episode_reward", "episode_seed", "episode_steps", "done"]
         for col in required_cols:
@@ -154,10 +170,17 @@ def read_and_validate(
         require(set(episode_df["episode_steps"].astype(int)) == {112}, f"{path.name}: non-112 episode_steps detected")
         require(episode_df["done"].astype(str).str.lower().isin(["true", "1"]).all(), f"{path.name}: not all episodes done=True")
 
-        episode_df.insert(0, "alg_short", alg_short)
+        if "algorithm" in episode_df.columns:
+            episode_df["legacy_algorithm_label"] = episode_df["algorithm"]
+        if "algorithm" in summary_df.columns:
+            summary_df["legacy_algorithm_label"] = summary_df["algorithm"]
+        episode_df["algorithm"] = algorithm
+        summary_df["algorithm"] = algorithm
+
+        episode_df.insert(0, "algorithm_key", algorithm)
         episode_df.insert(1, "source_seed", seed)
         episode_df.insert(2, "source_file", path.name)
-        summary_df.insert(0, "alg_short", alg_short)
+        summary_df.insert(0, "algorithm_key", algorithm)
         summary_df.insert(1, "source_seed", seed)
         summary_df.insert(2, "source_file", path.name)
 
@@ -168,15 +191,15 @@ def read_and_validate(
     summary_all = pd.concat(summary_frames, ignore_index=True)
 
     for seed in range(expected_seeds):
-        base_episode_seeds = episode_all[
-            (episode_all["alg_short"] == "baseline") & (episode_all["source_seed"] == seed)
+        actiongnn_episode_seeds = episode_all[
+            (episode_all["algorithm_key"] == "actiongnn") & (episode_all["source_seed"] == seed)
         ]["episode_seed"].astype(int).tolist()
         hier_episode_seeds = episode_all[
-            (episode_all["alg_short"] == "hierarchical") & (episode_all["source_seed"] == seed)
+            (episode_all["algorithm_key"] == "hierarchical") & (episode_all["source_seed"] == seed)
         ]["episode_seed"].astype(int).tolist()
         require(
-            base_episode_seeds == hier_episode_seeds,
-            f"Episode seed mismatch for seed {seed}: baseline {base_episode_seeds[:3]}..., hierarchical {hier_episode_seeds[:3]}...",
+            actiongnn_episode_seeds == hier_episode_seeds,
+            f"Episode seed mismatch for seed {seed}: actiongnn {actiongnn_episode_seeds[:3]}..., hierarchical {hier_episode_seeds[:3]}...",
         )
 
     return episode_all, summary_all
@@ -184,10 +207,9 @@ def read_and_validate(
 
 def build_seed_summary(episode_all: pd.DataFrame) -> pd.DataFrame:
     rows: List[dict] = []
-    for (alg_short, seed), group in episode_all.groupby(["alg_short", "source_seed"], sort=True):
+    for (algorithm, seed), group in episode_all.groupby(["algorithm_key", "source_seed"], sort=True):
         row = {
-            "alg_short": alg_short,
-            "algorithm": group["algorithm"].iloc[0] if "algorithm" in group.columns else alg_short,
+            "algorithm": algorithm,
             "seed": int(seed),
             "n_eval_episodes": int(len(group)),
             "episode_seed_min": int(group["episode_seed"].min()),
@@ -203,11 +225,11 @@ def build_seed_summary(episode_all: pd.DataFrame) -> pd.DataFrame:
         row["reward_std"] = float(pd.to_numeric(group["episode_reward"], errors="coerce").std(ddof=1))
         rows.append(row)
 
-    return pd.DataFrame(rows).sort_values(["seed", "alg_short"]).reset_index(drop=True)
+    return pd.DataFrame(rows).sort_values(["seed", "algorithm"]).reset_index(drop=True)
 
 
-def paired_statistics(values_base: np.ndarray, values_hier: np.ndarray, higher_is_better: bool | None) -> dict:
-    diff = values_hier - values_base
+def paired_statistics(values_actiongnn: np.ndarray, values_hier: np.ndarray, higher_is_better: bool | None) -> dict:
+    diff = values_hier - values_actiongnn
     n = len(diff)
     diff_mean = float(np.nanmean(diff))
     diff_std = float(np.nanstd(diff, ddof=1)) if n > 1 else float("nan")
@@ -227,11 +249,11 @@ def paired_statistics(values_base: np.ndarray, values_hier: np.ndarray, higher_i
             w_stat = 0.0
             w_p = 1.0
         else:
-            t_res = stats.ttest_rel(values_hier, values_base, nan_policy="omit")
+            t_res = stats.ttest_rel(values_hier, values_actiongnn, nan_policy="omit")
             t_stat = float(t_res.statistic)
             t_p = float(t_res.pvalue)
             try:
-                w_res = stats.wilcoxon(values_hier, values_base, zero_method="wilcox", alternative="two-sided", mode="auto")
+                w_res = stats.wilcoxon(values_hier, values_actiongnn, zero_method="wilcox", alternative="two-sided", mode="auto")
                 w_stat = float(w_res.statistic)
                 w_p = float(w_res.pvalue)
             except Exception:
@@ -242,59 +264,59 @@ def paired_statistics(values_base: np.ndarray, values_hier: np.ndarray, higher_i
 
     if higher_is_better is True:
         favourable_diff = diff_mean
-        favourable_label = "hierarchical_minus_baseline_positive_is_better"
+        favourable_label = "hierarchical_minus_actiongnn_positive_is_better"
     elif higher_is_better is False:
         favourable_diff = -diff_mean
-        favourable_label = "baseline_minus_hierarchical_positive_is_better"
+        favourable_label = "actiongnn_minus_hierarchical_positive_is_better"
     else:
         favourable_diff = float("nan")
         favourable_label = "context_dependent"
 
-    base_mean = float(np.nanmean(values_base))
+    actiongnn_mean = float(np.nanmean(values_actiongnn))
     hier_mean = float(np.nanmean(values_hier))
-    pct_change_hier_vs_base = float((hier_mean - base_mean) / abs(base_mean) * 100.0) if abs(base_mean) > 1e-12 else float("nan")
+    pct_change_hier_vs_actiongnn = float((hier_mean - actiongnn_mean) / abs(actiongnn_mean) * 100.0) if abs(actiongnn_mean) > 1e-12 else float("nan")
 
     return {
-        "baseline_mean": base_mean,
+        "actiongnn_mean": actiongnn_mean,
         "hierarchical_mean": hier_mean,
-        "diff_hier_minus_base_mean": diff_mean,
-        "diff_hier_minus_base_std": diff_std,
-        "diff_hier_minus_base_ci95_low": float(ci_low),
-        "diff_hier_minus_base_ci95_high": float(ci_high),
+        "diff_hierarchical_minus_actiongnn_mean": diff_mean,
+        "diff_hierarchical_minus_actiongnn_std": diff_std,
+        "diff_hierarchical_minus_actiongnn_ci95_low": float(ci_low),
+        "diff_hierarchical_minus_actiongnn_ci95_high": float(ci_high),
         "paired_t_stat": t_stat,
         "paired_t_p": t_p,
         "wilcoxon_stat": w_stat,
         "wilcoxon_p": w_p,
         "favourable_diff_mean": favourable_diff,
         "favourable_direction": favourable_label,
-        "pct_change_hier_vs_base": pct_change_hier_vs_base,
+        "pct_change_hierarchical_vs_actiongnn": pct_change_hier_vs_actiongnn,
         "n_paired_seeds": n,
     }
 
 
 def build_paired_outputs(seed_summary: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    base = seed_summary[seed_summary["alg_short"] == "baseline"].set_index("seed").sort_index()
-    hier = seed_summary[seed_summary["alg_short"] == "hierarchical"].set_index("seed").sort_index()
-    require(list(base.index) == list(hier.index), "Baseline/hierarchical seed indices do not match")
+    actiongnn = seed_summary[seed_summary["algorithm"] == "actiongnn"].set_index("seed").sort_index()
+    hier = seed_summary[seed_summary["algorithm"] == "hierarchical"].set_index("seed").sort_index()
+    require(list(actiongnn.index) == list(hier.index), "ActionGNN/hierarchical seed indices do not match")
 
     paired_rows: List[dict] = []
     for seed in base.index:
         row = {"seed": int(seed)}
         for metric in METRICS:
-            if metric.name in base.columns and metric.name in hier.columns:
-                row[f"baseline_{metric.name}"] = float(base.loc[seed, metric.name])
+            if metric.name in actiongnn.columns and metric.name in hier.columns:
+                row[f"actiongnn_{metric.name}"] = float(actiongnn.loc[seed, metric.name])
                 row[f"hierarchical_{metric.name}"] = float(hier.loc[seed, metric.name])
-                row[f"diff_hier_minus_base_{metric.name}"] = float(hier.loc[seed, metric.name] - base.loc[seed, metric.name])
+                row[f"diff_hierarchical_minus_actiongnn_{metric.name}"] = float(hier.loc[seed, metric.name] - actiongnn.loc[seed, metric.name])
         paired_rows.append(row)
     paired_df = pd.DataFrame(paired_rows)
 
     stat_rows: List[dict] = []
     for metric in METRICS:
-        if metric.name not in base.columns or metric.name not in hier.columns:
+        if metric.name not in actiongnn.columns or metric.name not in hier.columns:
             continue
-        values_base = pd.to_numeric(base[metric.name], errors="coerce").to_numpy(dtype=float)
+        values_actiongnn = pd.to_numeric(actiongnn[metric.name], errors="coerce").to_numpy(dtype=float)
         values_hier = pd.to_numeric(hier[metric.name], errors="coerce").to_numpy(dtype=float)
-        stat = paired_statistics(values_base, values_hier, metric.higher_is_better)
+        stat = paired_statistics(values_actiongnn, values_hier, metric.higher_is_better)
         stat_rows.append({
             "metric": metric.name,
             "source_column": metric.source_column,
@@ -318,14 +340,14 @@ def write_plots(seed_summary: pd.DataFrame, paired_df: pd.DataFrame, output_dir:
         if metric not in seed_summary.columns:
             continue
 
-        pivot = seed_summary.pivot(index="seed", columns="alg_short", values=metric).sort_index()
-        if not {"baseline", "hierarchical"}.issubset(set(pivot.columns)):
+        pivot = seed_summary.pivot(index="seed", columns="algorithm", values=metric).sort_index()
+        if not {"actiongnn", "hierarchical"}.issubset(set(pivot.columns)):
             continue
 
         fig = plt.figure(figsize=(7, 4.5))
         ax = fig.gca()
-        ax.plot(pivot.index, pivot["baseline"], marker="o", label="baseline")
-        ax.plot(pivot.index, pivot["hierarchical"], marker="o", label="hierarchical")
+        ax.plot(pivot.index, pivot["actiongnn"], marker="o", label=DISPLAY_LABELS["actiongnn"])
+        ax.plot(pivot.index, pivot["hierarchical"], marker="o", label=DISPLAY_LABELS["hierarchical"])
         ax.set_title(f"100CP eval30: {metric} by seed")
         ax.set_xlabel("Seed")
         ax.set_ylabel(metric)
@@ -335,13 +357,13 @@ def write_plots(seed_summary: pd.DataFrame, paired_df: pd.DataFrame, output_dir:
         fig.savefig(plots_dir / f"{metric}_by_seed.png", dpi=180)
         plt.close(fig)
 
-        diff_col = f"diff_hier_minus_base_{metric}"
+        diff_col = f"diff_hierarchical_minus_actiongnn_{metric}"
         if diff_col in paired_df.columns:
             fig = plt.figure(figsize=(7, 4.5))
             ax = fig.gca()
             ax.axhline(0, linewidth=1)
             ax.plot(paired_df["seed"], paired_df[diff_col], marker="o")
-            ax.set_title(f"100CP eval30: hierarchical - baseline ({metric})")
+            ax.set_title(f"100CP eval30: Hierarchical - ActionGNN baseline ({metric})")
             ax.set_xlabel("Seed")
             ax.set_ylabel(f"Δ {metric}")
             ax.grid(True, alpha=0.3)
@@ -388,9 +410,9 @@ def write_interpretation_notes(stats_df: pd.DataFrame, output_dir: Path, scenari
             continue
         r = get_row(metric)
         lines.append(
-            f"- `{metric}`: baseline mean `{r['baseline_mean']:.6g}`, hierarchical mean `{r['hierarchical_mean']:.6g}`, "
-            f"hierarchical-baseline diff `{r['diff_hier_minus_base_mean']:.6g}`, 95% CI "
-            f"[`{r['diff_hier_minus_base_ci95_low']:.6g}`, `{r['diff_hier_minus_base_ci95_high']:.6g}`], "
+            f"- `{metric}`: ActionGNN baseline mean `{r['actiongnn_mean']:.6g}`, hierarchical mean `{r['hierarchical_mean']:.6g}`, "
+            f"hierarchical-ActionGNN diff `{r['diff_hierarchical_minus_actiongnn_mean']:.6g}`, 95% CI "
+            f"[`{r['diff_hierarchical_minus_actiongnn_ci95_low']:.6g}`, `{r['diff_hierarchical_minus_actiongnn_ci95_high']:.6g}`], "
             f"paired t-test p={p_to_text(float(r['paired_t_p']))}, Wilcoxon p={p_to_text(float(r['wilcoxon_p']))}."
         )
 
@@ -407,9 +429,9 @@ def write_interpretation_notes(stats_df: pd.DataFrame, output_dir: Path, scenari
 
     if "mean_reward" in set(stats_df["metric"]):
         r = get_row("mean_reward")
-        if float(r["diff_hier_minus_base_mean"]) > 0 and np.isfinite(float(r["paired_t_p"])) and float(r["paired_t_p"]) < 0.05:
+        if float(r["diff_hierarchical_minus_actiongnn_mean"]) > 0 and np.isfinite(float(r["paired_t_p"])) and float(r["paired_t_p"]) < 0.05:
             lines.append("The hierarchical actor improves mean reward with statistically significant paired t-test evidence at p < 0.05, subject to the small n=5 seed limitation.")
-        elif float(r["diff_hier_minus_base_mean"]) > 0:
+        elif float(r["diff_hierarchical_minus_actiongnn_mean"]) > 0:
             lines.append("The hierarchical actor improves mean reward on average, but the paired evidence is not statistically robust at p < 0.05 with n=5 seeds.")
         else:
             lines.append("The hierarchical actor does not improve mean reward on average in this 100CP eval30 run.")
@@ -444,7 +466,7 @@ def main() -> None:
     prefix = args.scenario_name
 
     episode_cols_front = [
-        "alg_short",
+        "algorithm_key",
         "source_seed",
         "source_file",
         "episode_index",
@@ -479,7 +501,7 @@ def main() -> None:
     print(
         seed_summary[
             [
-                "alg_short",
+                "algorithm",
                 "seed",
                 "mean_reward",
                 "tracking_error",
@@ -494,11 +516,11 @@ def main() -> None:
     print("\n=== Aggregate statistics ===")
     show_cols = [
         "metric",
-        "baseline_mean",
+        "actiongnn_mean",
         "hierarchical_mean",
-        "diff_hier_minus_base_mean",
-        "diff_hier_minus_base_ci95_low",
-        "diff_hier_minus_base_ci95_high",
+        "diff_hierarchical_minus_actiongnn_mean",
+        "diff_hierarchical_minus_actiongnn_ci95_low",
+        "diff_hierarchical_minus_actiongnn_ci95_high",
         "paired_t_p",
         "wilcoxon_p",
     ]
