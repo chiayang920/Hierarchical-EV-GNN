@@ -299,25 +299,15 @@ Interpretation:
 The hierarchical actor introduces substantial computational overhead. The current contribution is therefore best framed as a physically aligned control-architecture contribution, not yet as a computationally optimised replacement for the baseline.
 ```
 
-## Current conclusion
+## Current interpretation and limitations
 
-The implementation is end-to-end functional and experimentally validated across 25CP and 100CP controlled-evaluation pipelines.
+The current implementation provides an end-to-end hierarchical TD3-GNN control pipeline for EV2Gym PublicPST scenarios. The actor preserves the EV2Gym action interface and the TD3 critic/replay-buffer action contract, while introducing an explicit CPO → Transformer → Charger → EV allocation structure.
 
-The current thesis-level interpretation is:
+The 25CP controlled evaluation provides favourable small-scale evidence that the hierarchical actor can improve power-setpoint tracking behaviour and reduce action saturation. The 100CP evaluation provides a more challenging intermediate-scale case study: the hierarchical actor improves mean reward and tracking-related metrics on average, and the clearest behavioural signal is a reduction in maximum-action saturation. However, the 100CP paired evidence is not statistically conclusive across five seeds, and the result should not be interpreted as definitive large-scale superiority.
 
-```text
-The hierarchical actor shows strong positive evidence at 25CP and directional but not statistically conclusive improvement at 100CP. It also consistently reduces action saturation on average, supporting the physical-allocation design rationale. However, 100CP seed-level instability and computational overhead remain key limitations.
-```
+A key limitation is computational efficiency. In the 100CP formal runs, the hierarchical actor required substantially longer training time than the controlled ActionGNN baseline and showed lower CPU utilisation on M3. This indicates that the current implementation is primarily an architectural and behavioural research prototype, not yet a computationally optimised replacement for the baseline.
 
-## Recommended next steps
-
-```text
-1. Prepare professor-facing code and result review.
-2. Profile TD3_HierarchicalActionGNN.py for runtime bottlenecks.
-3. Optimise hierarchical projection and reduce Python-side loops.
-4. Do not run 500CP formal training yet.
-5. If scaling is required, run 500CP smoke/profile first, not full formal.
-```
+Future work will focus on three directions. First, the paper will develop a clearer PublicPST case study explaining the control scenario, the reward calculation, and the interpretation of tracking, saturation, service, and overload metrics. Second, M3-based profiling will be used to identify bottlenecks in the hierarchical actor, especially actor forward passes, action composition, and Python-side control flow. Third, larger-scale evaluation will be extended to at least 500CP to provide a minimum large-scale benchmark aligned with the original EV-GNN scalability framing.
 
 ## Baseline reference
 
