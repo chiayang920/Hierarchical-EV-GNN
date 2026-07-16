@@ -15,8 +15,8 @@ from ev2gym.models.ev2gym_env import EV2Gym
 from ev2gym.rl_agent.reward import SimpleReward
 
 from TD3.TD3_HierarchicalActionGNN import TD3_HierarchicalActionGNN
-from utils.replay_buffer_25cp import ActionGNN_ReplayBuffer
-from utils.state_25cp import PublicPST_GNN
+from utils.replay_buffer_actiongnn import ActionGNN_ReplayBuffer
+from utils.state_public_pst_gnn import PublicPST_GNN
 
 
 class PyGDataSpace(Space):
@@ -63,10 +63,10 @@ def first_active_ev_state(env, seed=0):
         if done:
             break
 
-    raise AssertionError("PublicPST_25cp did not produce an active-EV graph state.")
+    raise AssertionError("PublicPST test config did not produce an active-EV graph state.")
 
 
-def make_public_pst_25cp_env(seed=0):
+def make_public_pst_test_env(seed=0):
     config_file = PROJECT_ROOT / "config_files" / "PublicPST_25cp.yaml"
     env = EV2Gym(
         config_file=str(config_file),
@@ -113,7 +113,7 @@ def test_select_action_preserves_ev2gym_and_full_node_contracts():
     torch.manual_seed(0)
     np.random.seed(0)
 
-    env = make_public_pst_25cp_env(seed=0)
+    env = make_public_pst_test_env(seed=0)
     state, reset_info = first_active_ev_state(env, seed=0)
     assert isinstance(reset_info, dict)
 
@@ -129,7 +129,7 @@ def test_select_action_preserves_ev2gym_and_full_node_contracts():
     )
 
     total_nodes = int(sum(state.sample_node_length))
-    assert mapped_action_numpy.shape == (25,)
+    assert mapped_action_numpy.shape == (env.action_space.shape[0],)
     assert mapped_action_numpy.dtype == np.float32
     assert full_node_action.shape == (total_nodes, 1)
     assert_non_ev_rows_are_zero(full_node_action, state)
@@ -202,7 +202,8 @@ def build_no_active_ev_state():
 
 
 def test_select_action_handles_no_active_ev_state():
-    policy = make_hierarchical_policy(action_dim=25, max_action=1.0)
+    action_dim = 25
+    policy = make_hierarchical_policy(action_dim=action_dim, max_action=1.0)
     state = build_no_active_ev_state()
 
     mapped_action_numpy, full_node_action = policy.select_action(
@@ -211,7 +212,7 @@ def test_select_action_handles_no_active_ev_state():
         return_mapped_action=True,
     )
 
-    assert mapped_action_numpy.shape == (25,)
+    assert mapped_action_numpy.shape == (action_dim,)
     assert mapped_action_numpy.dtype == np.float32
     assert np.allclose(mapped_action_numpy, 0.0)
     assert full_node_action.shape == (1, 1)

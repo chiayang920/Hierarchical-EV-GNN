@@ -1,3 +1,5 @@
+> Historical note from before the scale-agnostic TD3-GNN refactor. Paths and algorithm labels may use legacy 25CP-specific names.
+
 # EV Charging MARL / EV-GNN Research Scope Note for Codex
 
 ## 0. Purpose of this note
@@ -903,3 +905,4 @@ Produce comparison CSV and plots.
 ## 12. Compact one-paragraph context for future prompts
 
 This repository extends the EV-GNN baseline for large-scale EV charging coordination. The baseline represents CPO, transformer, charger, and EV nodes as a graph, then produces EV-node actions that are mapped to EV2Gym's fixed action vector. The thesis extension keeps EV2Gym, PublicPST, the graph state, and the final EV2Gym action interface fixed, but replaces the flat EV-node actor with a hierarchical CPO -> transformer -> charger -> EV action-generation path. Current implemented prototype support includes `utils/hierarchical_action_projection.py` and mock projection tests; `TD3_HierarchicalActionGNN.py` and `train_RL_GNN_hierarchical_25cp.py` are not yet implemented. First implementation target is 25 CP PublicPST with TD3_ActionGNN_25cp as the baseline.
+Historical note from before the scale-agnostic TD3-GNN refactor. Paths and algorithm labels may use legacy 25CP-specific names.

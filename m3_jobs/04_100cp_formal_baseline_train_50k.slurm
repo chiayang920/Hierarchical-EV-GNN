@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=evgnn_100cp_base50k
+#SBATCH --job-name=evgnn_100cp_action50k
 #SBATCH --partition=comp
 #SBATCH --qos=normal
 #SBATCH --array=0-4
@@ -26,8 +26,8 @@ RUN_ROOT="/scratch2/fr57/cche0357/EV-GNN_runs/phase2d_100cp_formal_train"
 SAVE_DIR="${RUN_ROOT}/saved_models"
 
 CONFIG_PATH="./config_files/PublicPST_100.yaml"
-ALGORITHM="baseline_25cp"
-TRAIN_SCRIPT="train_RL_GNN_25cp.py"
+ALGORITHM="actiongnn"
+TRAIN_SCRIPT="train_td3_gnn.py"
 SEED="${SLURM_ARRAY_TASK_ID}"
 
 MAX_TIMESTEPS=50000
@@ -38,14 +38,14 @@ BATCH_SIZE=64
 REPLAY_BUFFER_SIZE=100000
 DEVICE="cpu"
 
-RUN_NAME="phase2d_formal_baseline_100cp_seed${SEED}_50k"
+RUN_NAME="phase2d_formal_actiongnn_100cp_seed${SEED}_50k"
 MODEL_DIR="${SAVE_DIR}/${RUN_NAME}"
 
 mkdir -p "${SAVE_DIR}" "${OUT_DIR}"
 
 cd "${REPO_DIR}"
 
-echo "=== Phase 2D.2A 100 CP formal baseline training ==="
+echo "=== Phase 2D.2A 100 CP formal ActionGNN training ==="
 echo "Date: $(date)"
 echo "Host: $(hostname)"
 echo "Job ID: ${SLURM_JOB_ID}"
@@ -69,8 +69,9 @@ python -c 'import pkg_resources; print("PKG_RESOURCES_OK")'
 python -c 'from ev2gym.models.ev2gym_env import EV2Gym; print("EV2GYM_ENV_IMPORT_OK")'
 python -c 'import torch, torch_geometric, ev2gym; print("torch", torch.__version__); print("torch_cuda", torch.version.cuda); print("cuda_available", torch.cuda.is_available()); print("pyg", torch_geometric.__version__)'
 
-echo "=== Training baseline formal 100 CP ==="
+echo "=== Training ActionGNN formal 100 CP ==="
 python "${TRAIN_SCRIPT}" \
+  --algorithm "${ALGORITHM}" \
   --config "${CONFIG_PATH}" \
   --seed "${SEED}" \
   --device "${DEVICE}" \
@@ -84,7 +85,7 @@ python "${TRAIN_SCRIPT}" \
   --save_dir "${SAVE_DIR}" \
   --log_to_wandb false
 
-echo "=== Verify generated baseline artefacts ==="
+echo "=== Verify generated ActionGNN artefacts ==="
 REQUIRED_FILES=(
   "${MODEL_DIR}/config.yaml"
   "${MODEL_DIR}/kwargs.yaml"
@@ -107,10 +108,10 @@ done
 echo "=== Generated files ==="
 find "${MODEL_DIR}" -maxdepth 2 -type f | sort
 
-echo "=== Package baseline formal artefacts ==="
+echo "=== Package ActionGNN formal artefacts ==="
 tar -czf "${OUT_DIR}/phase2d_100cp_formal_train_${RUN_NAME}_${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}.tar.gz" \
   -C "${MODEL_DIR}" .
 
 ls -lh "${OUT_DIR}/phase2d_100cp_formal_train_${RUN_NAME}_${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}.tar.gz"
 
-echo "=== Phase 2D.2A baseline formal training completed ==="
+echo "=== Phase 2D.2A ActionGNN formal training completed ==="

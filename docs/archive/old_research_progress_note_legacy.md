@@ -1,3 +1,5 @@
+> Historical note from before the scale-agnostic TD3-GNN refactor. Paths and algorithm labels may use legacy 25CP-specific names.
+
 # EV Charging MARL / EV-GNN Thesis Progress Note
 
 ## 1. Current research direction
@@ -935,3 +937,4 @@ validation:
 
 - Orfanoudakis et al. (2025), *Scalable reinforcement learning for large-scale coordination of electric vehicles using graph neural networks*: https://doi.org/10.1038/s44172-025-00457-8
 - EV-GNN GitHub repository: https://github.com/StavrosOrf/EV-GNN
+Historical note from before the scale-agnostic TD3-GNN refactor. Paths and algorithm labels may use legacy 25CP-specific names.

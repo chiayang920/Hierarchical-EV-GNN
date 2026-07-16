@@ -4,7 +4,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from TD3.TD3_ActionGNN_25cp import Actor as ActionGNNActor, Critic, resolve_device
+from TD3.TD3_ActionGNN_Controlled import Actor as ActionGNNActor, Critic, resolve_device
 
 
 class Actor(ActionGNNActor):

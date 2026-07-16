@@ -55,23 +55,24 @@ flowchart TD
 ```text
 TD3/
   TD3_ActionGNN.py                    Original-style baseline ActionGNN
-  TD3_ActionGNN_25cp.py               Bounded 25CP/100CP TD3 ActionGNN baseline path
+  TD3_ActionGNN_Controlled.py         Scale-agnostic controlled ActionGNN baseline
   TD3_HierarchicalActionGNN.py        Main hierarchical actor implementation
 
 utils/
   state.py                            Original-style graph state utilities
-  state_25cp.py                       Bounded PublicPST graph state encoder
+  state_public_pst_gnn.py             Scale-agnostic PublicPST graph state encoder
   replay_buffer.py                    Original-style replay buffer
-  replay_buffer_25cp.py               Graph replay buffer used by bounded training path
-  hierarchical_action_projection.py   Standalone projection utility / tested prototype
+  replay_buffer_actiongnn.py          Graph replay buffer used by ActionGNN TD3 paths
+  hierarchical_action_projection.py   Standalone projection utility / tested prototype, not the live actor path
 
 tests/
-  test_td3_hierarchical_actiongnn_25cp_shapes.py
+  test_td3_hierarchical_actiongnn_contracts.py
   test_hierarchical_projection_batched_replay.py
-  test_hierarchical_action_projection_25cp.py
+  test_hierarchical_action_projection.py
   test_controlled_evaluator_contract.py
 
 analysis/
+  06_25cp_formal_aggregation.py       Historical 25CP aggregation utility
   07_100cp_formal_aggregation.py      Formal 100CP eval30 aggregation script
 
 m3_jobs/
@@ -83,10 +84,10 @@ m3_jobs/
   06_100cp_formal_eval30.slurm
   07_100cp_formal_aggregation.slurm
 
-evaluator_td3_actiongnn_controlled.py Controlled baseline/hierarchical evaluator
-train_RL_GNN_25cp.py                  Bounded baseline training entry point
-train_RL_GNN_hierarchical_25cp.py     Hierarchical training entry point
-phase2c_aggregate_analysis.py         25CP aggregation utility
+train_td3_gnn.py                      Unified scale-agnostic TD3-GNN training entry point
+evaluate_td3_gnn.py                   Unified scale-agnostic controlled evaluator
+evaluator_td3_actiongnn_controlled.py Deprecated evaluator compatibility wrapper
+docs/scale_agnostic_td3_gnn_refactor_note.md
 ```
 
 ## Main implementation change
@@ -100,7 +101,7 @@ graph encoding
 → transformer scores
 → charger scores
 → EV gates
-→ hierarchical action projection
+→ hierarchical action composition inside TD3_HierarchicalActionGNN
 → full_node_action
 → mapped_action_numpy
 ```
@@ -125,30 +126,36 @@ full_node_action:
   graph-node action tensor for replay buffer and TD3 critic
 ```
 
-## Training and evaluation entry points
+## Scale-agnostic training and evaluation
 
-### Baseline bounded training
+TD3-GNN algorithm code is scale-agnostic. CP scale comes from the EV2Gym config file, for example `PublicPST_25cp.yaml` or `PublicPST_100.yaml`, and `action_dim` is detected from `env.action_space.shape[0]`. Config files, run names, output paths, and experiment metadata should remain scale-explicit.
+
+Use `actiongnn` as the canonical machine-readable label for the controlled ActionGNN baseline, and `hierarchical` for the hierarchical actor. Legacy labels are accepted only where documented for migration or historical reproducibility.
+
+### ActionGNN training
 
 ```bash
-python train_RL_GNN_25cp.py \
+python train_td3_gnn.py \
+  --algorithm actiongnn \
   --config ./config_files/PublicPST_100.yaml \
   --seed 0 \
   --device cpu \
-  --run_name baseline_example \
+  --run_name actiongnn_example \
   --max_timesteps 50000 \
   --start_timesteps 1000 \
   --eval_freq 5000 \
   --eval_episodes 5 \
   --batch_size 64 \
   --replay_buffer_size 100000 \
-  --save_dir ./saved_models \
+  --save_dir ./artifacts/experiments \
   --log_to_wandb false
 ```
 
-### Hierarchical bounded training
+### Hierarchical training
 
 ```bash
-python train_RL_GNN_hierarchical_25cp.py \
+python train_td3_gnn.py \
+  --algorithm hierarchical \
   --config ./config_files/PublicPST_100.yaml \
   --seed 0 \
   --device cpu \
@@ -159,22 +166,22 @@ python train_RL_GNN_hierarchical_25cp.py \
   --eval_episodes 5 \
   --batch_size 64 \
   --replay_buffer_size 100000 \
-  --save_dir ./saved_models \
+  --save_dir ./artifacts/experiments \
   --log_to_wandb false
 ```
 
 ### Controlled evaluation
 
 ```bash
-python evaluator_td3_actiongnn_controlled.py \
-  --algorithm baseline_25cp \
+python evaluate_td3_gnn.py \
+  --algorithm actiongnn \
   --config ./config_files/PublicPST_100.yaml \
   --seed 0 \
   --eval_episodes 30 \
-  --checkpoint ./saved_models/baseline_example/model.best \
+  --checkpoint ./artifacts/experiments/actiongnn_example/model.best \
   --device cpu \
-  --output_csv ./results/baseline_100cp_seed0_eval30.csv \
-  --run_name baseline_100cp_seed0_eval30 \
+  --output_csv ./artifacts/evaluations/actiongnn_100cp_seed0_eval30.csv \
+  --run_name actiongnn_100cp_seed0_eval30 \
   --max_episode_steps 112 \
   --deterministic true \
   --eval_seed_offset 420000
@@ -205,7 +212,7 @@ Formal 25CP evaluation used:
 
 ```text
 Config: PublicPST_25cp.yaml
-Algorithms: baseline_25cp and hierarchical_25cp
+Algorithms: controlled ActionGNN baseline and hierarchical actor
 Seeds: 0–4
 Training: 50,000 timesteps
 Final evaluation: 30 controlled episodes per seed
@@ -239,7 +246,7 @@ Formal 100CP evaluation used:
 
 ```text
 Config: PublicPST_100.yaml
-Algorithms: baseline_25cp and hierarchical_25cp
+Algorithms: controlled ActionGNN baseline and hierarchical actor
 Seeds: 0–4
 Training: 50,000 timesteps
 Final evaluation: 30 controlled episodes per seed
@@ -292,25 +299,15 @@ Interpretation:
 The hierarchical actor introduces substantial computational overhead. The current contribution is therefore best framed as a physically aligned control-architecture contribution, not yet as a computationally optimised replacement for the baseline.
 ```
 
-## Current conclusion
+## Current interpretation and limitations
 
-The implementation is end-to-end functional and experimentally validated across 25CP and 100CP controlled-evaluation pipelines.
+The current implementation provides an end-to-end hierarchical TD3-GNN control pipeline for EV2Gym PublicPST scenarios. The actor preserves the EV2Gym action interface and the TD3 critic/replay-buffer action contract, while introducing an explicit CPO → Transformer → Charger → EV allocation structure.
 
-The current thesis-level interpretation is:
+The 25CP controlled evaluation provides favourable small-scale evidence that the hierarchical actor can improve power-setpoint tracking behaviour and reduce action saturation. The 100CP evaluation provides a more challenging intermediate-scale case study: the hierarchical actor improves mean reward and tracking-related metrics on average, and the clearest behavioural signal is a reduction in maximum-action saturation. However, the 100CP paired evidence is not statistically conclusive across five seeds, and the result should not be interpreted as definitive large-scale superiority.
 
-```text
-The hierarchical actor shows strong positive evidence at 25CP and directional but not statistically conclusive improvement at 100CP. It also consistently reduces action saturation on average, supporting the physical-allocation design rationale. However, 100CP seed-level instability and computational overhead remain key limitations.
-```
+A key limitation is computational efficiency. In the 100CP formal runs, the hierarchical actor required substantially longer training time than the controlled ActionGNN baseline and showed lower CPU utilisation on M3. This indicates that the current implementation is primarily an architectural and behavioural research prototype, not yet a computationally optimised replacement for the baseline.
 
-## Recommended next steps
-
-```text
-1. Prepare professor-facing code and result review.
-2. Profile TD3_HierarchicalActionGNN.py for runtime bottlenecks.
-3. Optimise hierarchical projection and reduce Python-side loops.
-4. Do not run 500CP formal training yet.
-5. If scaling is required, run 500CP smoke/profile first, not full formal.
-```
+Future work will focus on three directions. First, the paper will develop a clearer PublicPST case study explaining the control scenario, the reward calculation, and the interpretation of tracking, saturation, service, and overload metrics. Second, M3-based profiling will be used to identify bottlenecks in the hierarchical actor, especially actor forward passes, action composition, and Python-side control flow. Third, larger-scale evaluation will be extended to at least 500CP to provide a minimum large-scale benchmark aligned with the original EV-GNN scalability framing.
 
 ## Baseline reference
 
@@ -319,4 +316,3 @@ Orfanoudakis et al. (2025). *Scalable reinforcement learning for large-scale coo
 DOI: https://doi.org/10.1038/s44172-025-00457-8
 
 Original repository: https://github.com/StavrosOrf/EV-GNN
-
