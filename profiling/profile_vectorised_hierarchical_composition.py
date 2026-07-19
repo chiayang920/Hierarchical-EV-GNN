@@ -50,6 +50,20 @@ FORWARD_ATOL = 1e-6
 FORWARD_RTOL = 1e-5
 GRADIENT_ATOL = 5e-5
 GRADIENT_RTOL = 1e-4
+VALIDATION_POLICY = {
+    "forward_output_contract": {
+        "mode": "hard_fail",
+        "description": "Forward parity, output shape/dtype/device, finite values, non-EV zero rows, and action bounds are required.",
+    },
+    "sum_loss_gradient_audit": {
+        "mode": "diagnostic_only",
+        "description": "Artificial sum(actor_output) actor-gradient parity is recorded with strict tolerance pass/fail and violation counts but does not stop profiling.",
+    },
+    "critic_coupled_gradient_audit": {
+        "mode": "hard_fail",
+        "description": "Critic-coupled TD3 actor-loss gradient parity is the behavioural training-relevant gradient gate.",
+    },
+}
 
 CSV_FIELDNAMES = [
     "run_name",
@@ -477,6 +491,7 @@ def build_json_summary(
         "groups": groups,
         "paired_speedups": paired_speedups,
         "numerical_equivalence_audit": numerical_equivalence_audit,
+        "validation_policy": VALIDATION_POLICY,
         "residual_bottleneck_ratios": residual_bottleneck_ratios,
         "residual_bottleneck_note": (
             "Ratios are approximate diagnostics because separately timed phases "
@@ -619,6 +634,18 @@ def gradient_difference_metrics(actual, expected) -> dict[str, float]:
     return tensor_difference_metrics(actual, expected)
 
 
+def gradient_strict_tolerance_violation_count(actual, expected) -> int:
+    import torch
+
+    close_mask = torch.isclose(
+        actual.detach(),
+        expected.detach(),
+        atol=GRADIENT_ATOL,
+        rtol=GRADIENT_RTOL,
+    )
+    return int((~close_mask).sum().detach().cpu())
+
+
 def assert_non_ev_action_rows_zero(full_node_action, state) -> None:
     import torch
 
@@ -675,7 +702,13 @@ def assert_finite_gradients(module) -> None:
         )
 
 
-def assert_actor_gradients_close(reference_actor, vectorised_actor) -> dict[str, Any]:
+def assert_actor_gradients_close(
+    reference_actor,
+    vectorised_actor,
+    *,
+    hard_fail: bool,
+    audit_mode: str,
+) -> dict[str, Any]:
     reference_parameters = dict(reference_actor.named_parameters())
     vectorised_parameters = dict(vectorised_actor.named_parameters())
     if set(reference_parameters) != set(vectorised_parameters):
@@ -684,6 +717,9 @@ def assert_actor_gradients_close(reference_actor, vectorised_actor) -> dict[str,
     maximum_relative_difference = 0.0
     parameter_with_maximum_absolute_difference = ""
     parameter_with_maximum_relative_difference = ""
+    strict_tolerance_passed = True
+    violating_parameter_names = []
+    violating_element_count_by_parameter = {}
     for parameter_name, reference_parameter in reference_parameters.items():
         vectorised_parameter = vectorised_parameters[parameter_name]
         if reference_parameter.grad is None or vectorised_parameter.grad is None:
@@ -700,16 +736,36 @@ def assert_actor_gradients_close(reference_actor, vectorised_actor) -> dict[str,
         if metrics["maximum_relative_difference"] >= maximum_relative_difference:
             maximum_relative_difference = metrics["maximum_relative_difference"]
             parameter_with_maximum_relative_difference = parameter_name
-        assert_gradient_close(
-            vectorised_parameter.grad,
-            reference_parameter.grad,
-            parameter_name,
-        )
+        try:
+            assert_gradient_close(
+                vectorised_parameter.grad,
+                reference_parameter.grad,
+                parameter_name,
+            )
+        except AssertionError:
+            strict_tolerance_passed = False
+            violating_parameter_names.append(parameter_name)
+            violating_element_count_by_parameter[parameter_name] = (
+                gradient_strict_tolerance_violation_count(
+                    vectorised_parameter.grad,
+                    reference_parameter.grad,
+                )
+            )
+            if hard_fail:
+                raise
     return {
+        "audit_mode": audit_mode,
+        "strict_tolerance": {"atol": GRADIENT_ATOL, "rtol": GRADIENT_RTOL},
+        "strict_tolerance_passed": strict_tolerance_passed,
         "maximum_absolute_gradient_difference": maximum_absolute_difference,
         "maximum_relative_gradient_difference": maximum_relative_difference,
         "parameter_with_maximum_absolute_difference": parameter_with_maximum_absolute_difference,
         "parameter_with_maximum_relative_difference": parameter_with_maximum_relative_difference,
+        "violating_parameter_names": violating_parameter_names,
+        "violating_element_count_by_parameter": violating_element_count_by_parameter,
+        "total_violating_element_count": int(
+            sum(violating_element_count_by_parameter.values())
+        ),
     }
 
 
@@ -771,6 +827,8 @@ def validate_workload(
     audit_record["sum_loss_gradient_audit"] = assert_actor_gradients_close(
         reference_actor,
         vectorised_actor,
+        hard_fail=False,
+        audit_mode="diagnostic_only",
     )
 
     critic_state = state_for_critic(state, device)
@@ -793,7 +851,12 @@ def validate_workload(
     assert_finite_gradients(reference_actor)
     assert_finite_gradients(vectorised_actor)
     audit_record["critic_coupled_gradient_audit"] = {
-        **assert_actor_gradients_close(reference_actor, vectorised_actor),
+        **assert_actor_gradients_close(
+            reference_actor,
+            vectorised_actor,
+            hard_fail=True,
+            audit_mode="hard_fail",
+        ),
         **loss_difference_audit(reference_critic_loss, vectorised_critic_loss),
     }
     return audit_record

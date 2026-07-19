@@ -1,8 +1,10 @@
 from pathlib import Path
 import copy
+import importlib
 import sys
 
 import numpy as np
+import pytest
 import torch
 from torch_geometric.data import Data
 
@@ -17,6 +19,8 @@ from TD3.TD3_HierarchicalActionGNN import Actor, Critic
 from utils.replay_buffer_actiongnn import ActionGNN_ReplayBuffer, _batch_graphs
 from utils.state_public_pst_gnn import PublicPST_GNN
 
+
+profiler = importlib.import_module("profiling.profile_vectorised_hierarchical_composition")
 
 ATOL = 1e-6
 RTOL = 1e-5
@@ -46,6 +50,59 @@ def make_critic(seed=0, feature_dim=8, hidden_dim=16, mlp_hidden_dim=32):
         num_gcn_layers=3,
         device=torch.device("cpu"),
     )
+
+
+class SumLossMismatchActor(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.tensor([1.0]))
+
+    def _full_node_output(self, state, active_ev_value):
+        total_nodes = profiler.graph_counts(state)["total_nodes"]
+        active_ev_node_indexes = torch.as_tensor(
+            state.ev_indexes,
+            dtype=torch.long,
+            device=active_ev_value.device,
+        ).reshape(-1)
+        full_node_output = active_ev_value.new_zeros((total_nodes, 1))
+        return full_node_output.index_copy(
+            0,
+            active_ev_node_indexes[:1],
+            active_ev_value.reshape(1, 1),
+        )
+
+    def _forward_reference(self, state, return_details=False):
+        return self._full_node_output(state, self.weight)
+
+    def _forward_vectorised(self, state):
+        base_output = self.weight.reshape(1, 1)
+        active_ev_value = 2.0 * base_output - base_output.detach()
+        return self._full_node_output(state, active_ev_value)
+
+
+class CriticOnlyMismatchActor(SumLossMismatchActor):
+    def _forward_vectorised(self, state):
+        base_output = self.weight.reshape(1, 1)
+        if isinstance(getattr(state, "ev_features", None), torch.Tensor):
+            active_ev_value = 2.0 * base_output - base_output.detach()
+        else:
+            active_ev_value = base_output
+        return self._full_node_output(state, active_ev_value)
+
+
+class ForwardMismatchActor(SumLossMismatchActor):
+    def _forward_vectorised(self, state):
+        return self._full_node_output(state, self.weight + 1.0)
+
+
+class ZeroActionGradientCritic(torch.nn.Module):
+    def Q1(self, state, action):
+        return (action * 0.0).sum().reshape(1)
+
+
+class LinearActionGradientCritic(torch.nn.Module):
+    def Q1(self, state, action):
+        return action.sum().reshape(1)
 
 
 def build_graph(
@@ -260,6 +317,83 @@ def test_vectorised_source_uses_grouped_softmax_for_charger_weights():
     assert "pyg_group_softmax(" in source
     assert "index=valid_charger_groups" in source
     assert "num_nodes=graph_transformer_positions.numel()" in source
+
+
+def test_profiler_sum_loss_gradient_violation_is_diagnostic_only():
+    audit_record = profiler.validate_workload(
+        actor=SumLossMismatchActor(),
+        critic=ZeroActionGradientCritic(),
+        state=build_graph(),
+        max_action=10.0,
+        device="cpu",
+        scale="unit",
+        seed=0,
+        workload_kind="unit",
+        load_level="unit",
+        batch_size=1,
+    )
+
+    sum_loss_audit = audit_record["sum_loss_gradient_audit"]
+    assert sum_loss_audit["audit_mode"] == "diagnostic_only"
+    assert sum_loss_audit["strict_tolerance_passed"] is False
+    assert sum_loss_audit["violating_parameter_names"] == ["weight"]
+    assert sum_loss_audit["violating_element_count_by_parameter"] == {"weight": 1}
+    assert sum_loss_audit["total_violating_element_count"] == 1
+
+
+def test_profiler_critic_coupled_gradient_mismatch_still_raises():
+    with pytest.raises(AssertionError, match="Gradient mismatch for weight"):
+        profiler.validate_workload(
+            actor=CriticOnlyMismatchActor(),
+            critic=LinearActionGradientCritic(),
+            state=build_graph(),
+            max_action=10.0,
+            device="cpu",
+            scale="unit",
+            seed=0,
+            workload_kind="unit",
+            load_level="unit",
+            batch_size=1,
+        )
+
+
+def test_profiler_forward_output_contract_mismatch_still_raises():
+    with pytest.raises(AssertionError):
+        profiler.validate_workload(
+            actor=ForwardMismatchActor(),
+            critic=ZeroActionGradientCritic(),
+            state=build_graph(),
+            max_action=10.0,
+            device="cpu",
+            scale="unit",
+            seed=0,
+            workload_kind="unit",
+            load_level="unit",
+            batch_size=1,
+        )
+
+
+def test_profiler_json_summary_exposes_validation_policy():
+    summary = profiler.build_json_summary(
+        records=[],
+        metadata={"run_name": "unit"},
+        numerical_equivalence_audit=[],
+    )
+
+    assert summary["validation_policy"] == {
+        "forward_output_contract": {
+            "mode": "hard_fail",
+            "description": "Forward parity, output shape/dtype/device, finite values, non-EV zero rows, and action bounds are required.",
+        },
+        "sum_loss_gradient_audit": {
+            "mode": "diagnostic_only",
+            "description": "Artificial sum(actor_output) actor-gradient parity is recorded with strict tolerance pass/fail and violation counts but does not stop profiling.",
+        },
+        "critic_coupled_gradient_audit": {
+            "mode": "hard_fail",
+            "description": "Critic-coupled TD3 actor-loss gradient parity is the behavioural training-relevant gradient gate.",
+        },
+    }
 
 
 def snapshot_parameters(module):
