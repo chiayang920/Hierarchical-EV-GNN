@@ -3,6 +3,7 @@ import copy
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch_geometric.utils import softmax as pyg_group_softmax
 
 from TD3.TD3_ActionGNN_Controlled import Actor as ActionGNNActor, Critic, resolve_device
 
@@ -78,7 +79,56 @@ class Actor(ActionGNNActor):
             "per_graph_charger_to_transformer_id": [],
         }
 
-    def _compose_full_node_action(
+    def _lookup_tensor_id_positions(self, reference_ids, query_ids):
+        query_ids = query_ids.reshape(-1).to(dtype=torch.long)
+        lookup_device = query_ids.device
+        reference_ids = reference_ids.reshape(-1).to(device=lookup_device, dtype=torch.long)
+
+        positions = torch.full(
+            (query_ids.numel(),),
+            -1,
+            dtype=torch.long,
+            device=lookup_device,
+        )
+        matched = torch.zeros(query_ids.numel(), dtype=torch.bool, device=lookup_device)
+
+        if query_ids.numel() == 0 or reference_ids.numel() == 0:
+            return positions, matched
+
+        sorted_reference_ids, sorted_to_original_positions = torch.sort(reference_ids)
+        insertion_positions = torch.searchsorted(sorted_reference_ids, query_ids)
+        in_bounds = insertion_positions < sorted_reference_ids.numel()
+        safe_insertion_positions = insertion_positions.clamp(
+            max=sorted_reference_ids.numel() - 1
+        )
+        candidate_ids = sorted_reference_ids[safe_insertion_positions]
+        matched = in_bounds & (candidate_ids == query_ids)
+        candidate_positions = sorted_to_original_positions[safe_insertion_positions].long()
+        positions = torch.where(matched, candidate_positions, positions)
+        return positions, matched
+
+    def _prepare_forward_inputs(self, state):
+        embedded_node_features, edge_index = self._prepare_features(state)
+        ev_features = self._tensor(state.ev_features, torch.float32)
+        cs_features = self._tensor(state.cs_features, torch.float32)
+        tr_features = self._tensor(state.tr_features, torch.float32)
+        active_ev_node_indexes = self._index_tensor(state.ev_indexes)
+        charger_node_indexes = self._index_tensor(state.cs_indexes)
+        transformer_node_indexes = self._index_tensor(state.tr_indexes)
+        node_embeddings = self._encode_nodes(embedded_node_features, edge_index)
+        return (
+            embedded_node_features,
+            edge_index,
+            ev_features,
+            cs_features,
+            tr_features,
+            active_ev_node_indexes,
+            charger_node_indexes,
+            transformer_node_indexes,
+            node_embeddings,
+        )
+
+    def _compose_full_node_action_reference(
         self,
         state,
         node_embeddings,
@@ -209,16 +259,210 @@ class Actor(ActionGNNActor):
 
         return full_node_action, hierarchy_details
 
-    def forward(self, state, return_details=False):
-        embedded_node_features, edge_index = self._prepare_features(state)
-        ev_features = self._tensor(state.ev_features, torch.float32)
-        cs_features = self._tensor(state.cs_features, torch.float32)
-        tr_features = self._tensor(state.tr_features, torch.float32)
-        active_ev_node_indexes = self._index_tensor(state.ev_indexes)
-        charger_node_indexes = self._index_tensor(state.cs_indexes)
-        transformer_node_indexes = self._index_tensor(state.tr_indexes)
-        node_embeddings = self._encode_nodes(embedded_node_features, edge_index)
-        full_node_action, hierarchy_details = self._compose_full_node_action(
+    def _compose_full_node_action(
+        self,
+        state,
+        node_embeddings,
+        ev_features,
+        cs_features,
+        tr_features,
+        active_ev_node_indexes,
+        charger_node_indexes,
+        transformer_node_indexes,
+    ):
+        return self._compose_full_node_action_reference(
+            state=state,
+            node_embeddings=node_embeddings,
+            ev_features=ev_features,
+            cs_features=cs_features,
+            tr_features=tr_features,
+            active_ev_node_indexes=active_ev_node_indexes,
+            charger_node_indexes=charger_node_indexes,
+            transformer_node_indexes=transformer_node_indexes,
+        )
+
+    def _compose_full_node_action_vectorised(
+        self,
+        state,
+        node_embeddings,
+        ev_features,
+        cs_features,
+        tr_features,
+        active_ev_node_indexes,
+        charger_node_indexes,
+        transformer_node_indexes,
+    ):
+        total_nodes = node_embeddings.shape[0]
+        full_node_action = torch.zeros((total_nodes, 1), dtype=torch.float32, device=self.device)
+
+        if active_ev_node_indexes.numel() == 0:
+            return full_node_action
+
+        transformer_scores = self.transformer_score_head(
+            node_embeddings[transformer_node_indexes]
+        ).reshape(-1)
+        charger_scores = self.charger_score_head(node_embeddings[charger_node_indexes]).reshape(-1)
+        ev_action_gate = torch.sigmoid(
+            self.ev_gate_head(node_embeddings[active_ev_node_indexes]).reshape(-1)
+        )
+
+        graph_node_start = 0
+        for sample_node_length in self._sample_node_lengths(state):
+            graph_node_end = graph_node_start + sample_node_length
+
+            graph_ev_mask = (
+                (active_ev_node_indexes >= graph_node_start)
+                & (active_ev_node_indexes < graph_node_end)
+            )
+            graph_charger_mask = (
+                (charger_node_indexes >= graph_node_start)
+                & (charger_node_indexes < graph_node_end)
+            )
+            graph_transformer_mask = (
+                (transformer_node_indexes >= graph_node_start)
+                & (transformer_node_indexes < graph_node_end)
+            )
+
+            graph_ev_positions = torch.nonzero(graph_ev_mask, as_tuple=False).reshape(-1)
+            graph_charger_positions = torch.nonzero(graph_charger_mask, as_tuple=False).reshape(-1)
+            graph_transformer_positions = torch.nonzero(
+                graph_transformer_mask,
+                as_tuple=False,
+            ).reshape(-1)
+
+            if (
+                graph_ev_positions.numel() == 0
+                or graph_charger_positions.numel() == 0
+                or graph_transformer_positions.numel() == 0
+            ):
+                graph_node_start = graph_node_end
+                continue
+
+            graph_transformer_ids = tr_features[graph_transformer_positions, 1].round().long()
+            graph_charger_ids = cs_features[graph_charger_positions, 3].round().long()
+            graph_ev_to_charger_id = ev_features[graph_ev_positions, 4].round().long()
+            graph_ev_to_transformer_id = ev_features[graph_ev_positions, 5].round().long()
+
+            graph_transformer_weights = torch.softmax(
+                transformer_scores[graph_transformer_positions],
+                dim=0,
+            )
+
+            ev_charger_positions, ev_charger_matched = self._lookup_tensor_id_positions(
+                graph_charger_ids,
+                graph_ev_to_charger_id,
+            )
+
+            no_transformer_id = torch.iinfo(torch.long).max
+            charger_transformer_ids = torch.full(
+                (graph_charger_positions.numel(),),
+                no_transformer_id,
+                dtype=torch.long,
+                device=self.device,
+            )
+            charger_transformer_ids = charger_transformer_ids.scatter_reduce(
+                dim=0,
+                index=ev_charger_positions[ev_charger_matched],
+                src=graph_ev_to_transformer_id[ev_charger_matched],
+                reduce="amin",
+                include_self=True,
+            )
+            graph_charger_to_transformer_id = torch.where(
+                charger_transformer_ids == no_transformer_id,
+                torch.full_like(charger_transformer_ids, -1),
+                charger_transformer_ids,
+            )
+
+            charger_transformer_positions, charger_transformer_matched = (
+                self._lookup_tensor_id_positions(
+                    graph_transformer_ids,
+                    graph_charger_to_transformer_id,
+                )
+            )
+
+            graph_charger_weights = torch.zeros(
+                graph_charger_positions.numel(),
+                dtype=torch.float32,
+                device=self.device,
+            )
+            valid_charger_positions = torch.nonzero(
+                charger_transformer_matched,
+                as_tuple=False,
+            ).reshape(-1)
+            if valid_charger_positions.numel() > 0:
+                valid_charger_scores = charger_scores[
+                    graph_charger_positions[valid_charger_positions]
+                ]
+                valid_charger_groups = charger_transformer_positions[valid_charger_positions]
+                valid_charger_weights = pyg_group_softmax(
+                    valid_charger_scores,
+                    index=valid_charger_groups,
+                    num_nodes=graph_transformer_positions.numel(),
+                )
+                graph_charger_weights = graph_charger_weights.index_copy(
+                    0,
+                    valid_charger_positions,
+                    valid_charger_weights,
+                )
+
+            ev_transformer_positions, ev_transformer_matched = self._lookup_tensor_id_positions(
+                graph_transformer_ids,
+                graph_ev_to_transformer_id,
+            )
+
+            safe_ev_transformer_positions = ev_transformer_positions.clamp_min(0)
+            safe_ev_charger_positions = ev_charger_positions.clamp_min(0)
+            ev_charger_has_transformer = (
+                charger_transformer_matched[safe_ev_charger_positions] & ev_charger_matched
+            )
+            valid_ev_mask = (
+                ev_charger_matched
+                & ev_transformer_matched
+                & ev_charger_has_transformer
+            )
+
+            graph_total_budget = torch.tensor(
+                float(graph_ev_positions.numel()),
+                dtype=torch.float32,
+                device=self.device,
+            )
+            graph_ev_transformer_weights = graph_transformer_weights[
+                safe_ev_transformer_positions
+            ]
+            graph_ev_charger_weights = graph_charger_weights[safe_ev_charger_positions]
+            graph_ev_action_values = (
+                graph_total_budget
+                * graph_ev_transformer_weights
+                * graph_ev_charger_weights
+                * ev_action_gate[graph_ev_positions]
+            )
+            graph_ev_action_values = torch.where(
+                valid_ev_mask,
+                graph_ev_action_values,
+                torch.zeros_like(graph_ev_action_values),
+            ).clamp(0.0, self.max_action)
+
+            full_node_action[active_ev_node_indexes[graph_ev_positions], 0] = (
+                graph_ev_action_values
+            )
+
+            graph_node_start = graph_node_end
+
+        return full_node_action
+
+    def _forward_reference(self, state, return_details=False):
+        (
+            _embedded_node_features,
+            _edge_index,
+            ev_features,
+            cs_features,
+            tr_features,
+            active_ev_node_indexes,
+            charger_node_indexes,
+            transformer_node_indexes,
+            node_embeddings,
+        ) = self._prepare_forward_inputs(state)
+        full_node_action, hierarchy_details = self._compose_full_node_action_reference(
             state=state,
             node_embeddings=node_embeddings,
             ev_features=ev_features,
@@ -231,6 +475,34 @@ class Actor(ActionGNNActor):
         if return_details:
             return full_node_action, hierarchy_details
         return full_node_action
+
+    def _forward_vectorised(self, state):
+        (
+            _embedded_node_features,
+            _edge_index,
+            ev_features,
+            cs_features,
+            tr_features,
+            active_ev_node_indexes,
+            charger_node_indexes,
+            transformer_node_indexes,
+            node_embeddings,
+        ) = self._prepare_forward_inputs(state)
+        return self._compose_full_node_action_vectorised(
+            state=state,
+            node_embeddings=node_embeddings,
+            ev_features=ev_features,
+            cs_features=cs_features,
+            tr_features=tr_features,
+            active_ev_node_indexes=active_ev_node_indexes,
+            charger_node_indexes=charger_node_indexes,
+            transformer_node_indexes=transformer_node_indexes,
+        )
+
+    def forward(self, state, return_details=False):
+        if return_details:
+            return self._forward_reference(state, return_details=True)
+        return self._forward_vectorised(state)
 
 
 class TD3_HierarchicalActionGNN(object):
