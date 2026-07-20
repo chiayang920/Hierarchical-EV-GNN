@@ -62,14 +62,64 @@ hierarchical training/profiling records only when the resource class, seed,
 config, and training arguments match closely enough to make the comparison
 meaningful.
 
-## Follow-Up Condition
+## Completed Runtime Evidence
 
-A 50k confirmation run is justified if the 10k pilot completes cleanly, writes
-all metadata and training artefacts, and shows a material wall-time reduction
-consistent with the PR #4 component-level improvement without introducing new
-training failures.
+PR #4 was merged into `main` at merge commit `47c8577`. The post-optimisation
+runtime pilot branch records the following M3 CPU4 evidence.
 
-Approach B is justified instead if the 10k pilot remains close to the previous
-hierarchical 100CP wall-time profile, or if the saved runtime metadata and
-training log suggest the bottleneck moved outside the optimised composition path
-and still blocks practical 100CP hierarchical training.
+### 10k Pilot
+
+- Job ID: `58406334`
+- State: `COMPLETED 0:0`
+- Node: `m3j004`
+- CPU: `4`
+- MaxRSS: `1.38G`
+- Training wall-time: `00:35:13` = `2113s`
+- Total training steps: `10000`
+- Direct 10k speed-up vs pre-opt seed0 elapsed `7110.65s`: `3.37x`
+- Direct 10k speed-up vs pre-opt five-seed mean elapsed `7585.39s`: `3.59x`
+
+### 50k Confirmation
+
+- Job ID: `58410107`
+- State: `COMPLETED 0:0`
+- Node: `m3v115`
+- CPU: `4`
+- MaxRSS: `2.42G`
+- Training wall-time: `01:58:03` = `7083s`
+- Slurm elapsed: `01:58:26` = `7106s`
+- Total training steps: `50000`
+- Final mean reward: `-1833155.701`
+- Best mean reward: `-888323.844`
+- Speed-up vs pre-opt seed0 final elapsed `40380.43s`: `5.70x`
+- Speed-up vs pre-opt five-seed mean final elapsed `41744.80s`: `5.89x`
+
+### Provenance
+
+- Source provenance:
+  `branch_perf_100cp_post_optimisation_runtime_pilot_commit_baf696d_50k_confirmation`
+- Expanded source manifest:
+  `/projects/fr57/cche0357/EV-GNN_outputs/source_manifests/postopt_100cp_runtime_pilot_baf696d_expanded_source.sha256`
+- Package:
+  `/projects/fr57/cche0357/EV-GNN_outputs/postopt_100cp_hierarchical_runtime_pilot_cpu4_seed0_50000steps_job58410107.tar.gz`
+- Package SHA256:
+  `2573498bc804cf74e644d8930ff4c5038658271bb02c6d306960cd8030beb17f`
+
+### Interpretation
+
+This is runtime evidence, not formal behavioural evidence. It supports that the
+PR #4 component-level speed-up translated into end-to-end 100CP hierarchical
+training runtime improvement.
+
+Approach A is sufficient for the current thesis engineering path. Approach B is
+not justified unless future 500CP production training becomes necessary.
+
+### Known Limitations
+
+- The post-optimisation confirmation is a single seed0 run.
+- Reward should not be compared against formal eval30 results.
+- The pre-optimisation `run_args.yaml` lacks an explicit `algorithm` field,
+  though run naming, config, and action dimension indicate hierarchical 100CP.
+- Package-internal stdout is truncated before the final post-package success
+  marker because packaging occurs before final echo lines; `runtime_final.txt`,
+  `sacct`, and terminal output confirm completion.
