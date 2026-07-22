@@ -322,8 +322,60 @@ for path in "${CONFIG_PATH}" "evaluate_td3_gnn.py"; do
   echo "OK: ${path}"
 done
 
-if ! cmp -s "${MODEL_DIR}/config.yaml" "${CONFIG_PATH}"; then
-  echo "ERROR: checkpoint config differs from ${CONFIG_PATH}: ${MODEL_DIR}/config.yaml" >&2
+echo "=== Semantic checkpoint config validation ==="
+
+if python - "${MODEL_DIR}/config.yaml" "${CONFIG_PATH}" <<'PY'
+import sys
+from pathlib import Path
+
+import yaml
+
+checkpoint_path = Path(sys.argv[1])
+evaluation_path = Path(sys.argv[2])
+
+with checkpoint_path.open("r", encoding="utf-8") as checkpoint_file:
+    checkpoint_config = yaml.safe_load(checkpoint_file)
+
+with evaluation_path.open("r", encoding="utf-8") as evaluation_file:
+    evaluation_config = yaml.safe_load(evaluation_file)
+
+if checkpoint_config == evaluation_config:
+    print("SEMANTIC_CONFIG_MATCH_OK")
+    raise SystemExit(0)
+
+if not isinstance(checkpoint_config, dict):
+    print(
+        "ERROR: checkpoint config did not parse as a YAML mapping: "
+        f"{checkpoint_path}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+if not isinstance(evaluation_config, dict):
+    print(
+        "ERROR: evaluation config did not parse as a YAML mapping: "
+        f"{evaluation_path}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+all_keys = sorted(set(checkpoint_config) | set(evaluation_config))
+
+for key in all_keys:
+    checkpoint_value = checkpoint_config.get(key, "<MISSING>")
+    evaluation_value = evaluation_config.get(key, "<MISSING>")
+
+    if checkpoint_value != evaluation_value:
+        print(f"DIFFERENT_KEY={key}", file=sys.stderr)
+        print(f"checkpoint={checkpoint_value!r}", file=sys.stderr)
+        print(f"evaluation={evaluation_value!r}", file=sys.stderr)
+
+raise SystemExit(1)
+PY
+then
+  echo "Checkpoint config is semantically equal to ${CONFIG_PATH}"
+else
+  echo "ERROR: checkpoint config is not semantically equal to ${CONFIG_PATH}: ${MODEL_DIR}/config.yaml" >&2
   exit 6
 fi
 
