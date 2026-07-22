@@ -170,7 +170,7 @@ training_log.csv
 evaluate_td3_gnn.py
 ```
 
-The checkpoint copy of `config.yaml` must be byte-identical to `./config_files/PublicPST_500.yaml` using `cmp -s`.
+The checkpoint copy of `config.yaml` and `./config_files/PublicPST_500.yaml` are parsed with `yaml.safe_load`, and the resulting Python objects must be equal. Formatting, comments, quoting, and YAML key ordering are not treated as configuration differences. Any actual key or value difference stops evaluation, with the differing keys and values printed to stderr.
 
 The script also requires `EV_GNN_SOURCE_PROVENANCE` and `EV_GNN_SOURCE_MANIFEST`. From `${REPO_DIR}`, it runs `sha256sum -c "${EV_GNN_SOURCE_MANIFEST}"` and records the output in `source_manifest_validation.txt`; any hash mismatch stops evaluation before checkpoint loading. It then copies the manifest into runtime metadata, records the manifest-file checksum, and writes the provenance value, original manifest path, checkpoint mapping, and resolved checkpoint prefix. It does not run `git pull` or any Git command on M3.
 
