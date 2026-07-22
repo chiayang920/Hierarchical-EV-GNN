@@ -172,7 +172,7 @@ evaluate_td3_gnn.py
 
 The checkpoint copy of `config.yaml` must be byte-identical to `./config_files/PublicPST_500.yaml` using `cmp -s`.
 
-The script also requires `EV_GNN_SOURCE_PROVENANCE` and `EV_GNN_SOURCE_MANIFEST`, copies the manifest into runtime metadata, records its checksum, and writes the provenance value, original manifest path, checkpoint mapping, and resolved checkpoint prefix. It does not run `git pull` or any Git command on M3.
+The script also requires `EV_GNN_SOURCE_PROVENANCE` and `EV_GNN_SOURCE_MANIFEST`. From `${REPO_DIR}`, it runs `sha256sum -c "${EV_GNN_SOURCE_MANIFEST}"` and records the output in `source_manifest_validation.txt`; any hash mismatch stops evaluation before checkpoint loading. It then copies the manifest into runtime metadata, records the manifest-file checksum, and writes the provenance value, original manifest path, checkpoint mapping, and resolved checkpoint prefix. It does not run `git pull` or any Git command on M3.
 
 ## 11. Expected CSV schema and validation rules
 
@@ -228,13 +228,15 @@ The task-local raw CSV is:
 RAW_OUTPUT_CSV="${TASK_DIR}/${ALGORITHM}_500cp_seed${SEED}_eval30.csv"
 ```
 
-After validation, it is copied to:
+After validation, it is published to:
 
 ```bash
 CANONICAL_OUTPUT_CSV="${CANONICAL_EVAL_DIR}/${ALGORITHM}_500cp_seed${SEED}_eval30.csv"
 ```
 
-Existing canonical CSVs are never silently overwritten.
+Existing canonical CSVs are never silently overwritten. Publication uses a task-unique temporary file, byte-compares it with the raw CSV, then atomically creates the canonical evidence path with a no-clobber publish step only after that comparison succeeds. If another task creates the canonical CSV first, publication fails instead of replacing it.
+
+If the task later fails during final checksum, package creation, or package verification, the `EXIT` trap removes the task-created canonical CSV and any temporary canonical CSV before packaging failure logs and metadata. Only a fully successful task may leave a canonical CSV in the formal evidence directory.
 
 The package path is:
 

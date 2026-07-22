@@ -137,6 +137,8 @@ PACKAGE_PATH="${OUT_DIR}/m3_500cp_formal_eval30_${ALGORITHM}_seed${SEED}_job${AR
 VALIDATION_SUMMARY_ENV="${METADATA_DIR}/csv_validation_summary.env"
 
 TASK_DIR_CREATED=0
+CANONICAL_CREATED=0
+CANONICAL_TEMP_PATH="${CANONICAL_OUTPUT_CSV}.tmp.${ARRAY_JOB_ID}.${TASK_ID}"
 
 failure_trap() {
   local exit_status="$?"
@@ -144,6 +146,14 @@ failure_trap() {
   set +e
   if [[ "${exit_status}" -ne 0 && "${TASK_DIR_CREATED:-0}" == "1" ]]; then
     echo "ERROR: M3 500CP formal eval30 task failed with exit status ${exit_status}" >&2
+    if [[ -e "${CANONICAL_TEMP_PATH}" ]]; then
+      rm -f "${CANONICAL_TEMP_PATH}"
+      echo "Rolled back temporary canonical CSV: ${CANONICAL_TEMP_PATH}" >&2
+    fi
+    if [[ "${CANONICAL_CREATED:-0}" == "1" ]]; then
+      rm -f "${CANONICAL_OUTPUT_CSV}"
+      echo "Rolled back canonical CSV created by this task: ${CANONICAL_OUTPUT_CSV}" >&2
+    fi
     {
       echo "iso_failure_time=$(date -Iseconds)"
       echo "exit_status=${exit_status}"
@@ -187,6 +197,14 @@ fi
 
 if [[ ! -s "${EV_GNN_SOURCE_MANIFEST}" ]]; then
   echo "ERROR: EV_GNN_SOURCE_MANIFEST is missing or empty: ${EV_GNN_SOURCE_MANIFEST}" >&2
+  exit 3
+fi
+
+MANIFEST_VALIDATION_PATH="${METADATA_DIR}/source_manifest_validation.txt"
+
+if ! sha256sum -c "${EV_GNN_SOURCE_MANIFEST}" \
+  | tee "${MANIFEST_VALIDATION_PATH}"; then
+  echo "ERROR: M3 source does not match EV_GNN_SOURCE_MANIFEST" >&2
   exit 3
 fi
 
@@ -512,7 +530,20 @@ if [[ -e "${CANONICAL_OUTPUT_CSV}" ]]; then
   exit 7
 fi
 
-cp "${RAW_OUTPUT_CSV}" "${CANONICAL_OUTPUT_CSV}"
+cp "${RAW_OUTPUT_CSV}" "${CANONICAL_TEMP_PATH}"
+
+if ! cmp -s "${RAW_OUTPUT_CSV}" "${CANONICAL_TEMP_PATH}"; then
+  echo "ERROR: temporary canonical CSV differs from raw CSV" >&2
+  exit 8
+fi
+
+if ! ln "${CANONICAL_TEMP_PATH}" "${CANONICAL_OUTPUT_CSV}"; then
+  echo "ERROR: canonical CSV appeared before publication and will not be overwritten: ${CANONICAL_OUTPUT_CSV}" >&2
+  exit 7
+fi
+CANONICAL_CREATED=1
+rm -f "${CANONICAL_TEMP_PATH}"
+
 sha256sum "${RAW_OUTPUT_CSV}" "${CANONICAL_OUTPUT_CSV}" > "${METADATA_DIR}/evaluation_csv_checksums.sha256"
 
 if ! cmp -s "${RAW_OUTPUT_CSV}" "${CANONICAL_OUTPUT_CSV}"; then
