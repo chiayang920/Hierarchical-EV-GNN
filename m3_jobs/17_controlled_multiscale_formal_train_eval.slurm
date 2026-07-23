@@ -89,7 +89,7 @@ JOB_ID="${SLURM_JOB_ID:-manual}"
 ARRAY_JOB_ID="${SLURM_ARRAY_JOB_ID:-${JOB_ID}}"
 JOB_NAME="${SLURM_JOB_NAME:-evgnn_controlled_formal_matrix}"
 RUN_NAME="controlled_multiscale_formal_${SCALE}_${ALGORITHM}_seed${SEED}"
-TASK_RUN_DIR="${RUN_ROOT}/${SCALE}/${ALGORITHM}/seed${SEED}"
+TASK_RUN_DIR="${RUN_ROOT}/job${ARRAY_JOB_ID}/${SCALE}/${ALGORITHM}/seed${SEED}"
 TRAIN_DIR="${TASK_RUN_DIR}/train"
 MODEL_DIR="${TRAIN_DIR}/${RUN_NAME}"
 EVAL_DIR="${TASK_RUN_DIR}/eval"
@@ -498,6 +498,12 @@ export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS="${THREAD_COUNT}"
 export MKL_NUM_THREADS="${THREAD_COUNT}"
 export NUMEXPR_NUM_THREADS="${THREAD_COUNT}"
+
+if [[ -e "${TASK_RUN_DIR}" && "${EV_GNN_FORMAL_ALLOW_EXISTING_TASK_DIR:-0}" != "1" ]]; then
+  echo "ERROR: TASK_RUN_DIR already exists: ${TASK_RUN_DIR}" >&2
+  echo "Set EV_GNN_FORMAL_ALLOW_EXISTING_TASK_DIR=1 to allow reusing this task directory." >&2
+  exit 3
+fi
 
 mkdir -p "${TRAIN_DIR}" "${EVAL_DIR}" "${METADATA_DIR}" "${CONFIG_COPY_DIR}" "${OUTPUT_ROOT}"
 exec > >(tee -a "${STDOUT_LOG}") 2> >(tee -a "${STDERR_LOG}" >&2)
