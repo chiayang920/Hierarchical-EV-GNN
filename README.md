@@ -277,6 +277,15 @@ Interpretation:
 At 100CP, the hierarchical actor improves reward and tracking-related metrics on average, but the paired evidence is not statistically robust across five seeds. The strongest 100CP behavioural signal is reduced action saturation, but it remains marginal rather than conventionally significant.
 ```
 
+### Current status
+
+- Hierarchical actor implemented and vectorised.
+- Controlled evaluator records scalar EV2Gym operational metrics dynamically.
+- 500CP formal eval30 complete.
+- 500CP reward/tracking superiority is statistically inconclusive.
+- 500CP hierarchical policy reduces maximum-action saturation.
+- Full multi-scale/multi-algorithm comparison remains future work.
+
 ## Computational efficiency
 
 100CP formal training resource observations:
@@ -303,11 +312,11 @@ The hierarchical actor introduces substantial computational overhead. The curren
 
 The current implementation provides an end-to-end hierarchical TD3-GNN control pipeline for EV2Gym PublicPST scenarios. The actor preserves the EV2Gym action interface and the TD3 critic/replay-buffer action contract, while introducing an explicit CPO → Transformer → Charger → EV allocation structure.
 
-The 25CP controlled evaluation provides favourable small-scale evidence that the hierarchical actor can improve power-setpoint tracking behaviour and reduce action saturation. The 100CP evaluation provides a more challenging intermediate-scale case study: the hierarchical actor improves mean reward and tracking-related metrics on average, and the clearest behavioural signal is a reduction in maximum-action saturation. However, the 100CP paired evidence is not statistically conclusive across five seeds, and the result should not be interpreted as definitive large-scale superiority.
+The 25CP controlled evaluation provides favourable small-scale evidence that the hierarchical actor can improve power-setpoint tracking behaviour and reduce action saturation. The 100CP evaluation provides a more challenging intermediate-scale case study: the hierarchical actor improves mean reward and tracking-related metrics on average, and the clearest behavioural signal is a reduction in maximum-action saturation. However, the 100CP paired evidence is not statistically conclusive across five seeds. The 500CP formal eval30 comparison extends the evidence base to a larger PublicPST setting, but reward/tracking superiority remains statistically inconclusive; the strongest 500CP signal is reduced maximum-action saturation.
 
 A key limitation is computational efficiency. In the 100CP formal runs, the hierarchical actor required substantially longer training time than the controlled ActionGNN baseline and showed lower CPU utilisation on M3. This indicates that the current implementation is primarily an architectural and behavioural research prototype, not yet a computationally optimised replacement for the baseline.
 
-Future work will focus on three directions. First, the paper will develop a clearer PublicPST case study explaining the control scenario, the reward calculation, and the interpretation of tracking, saturation, service, and overload metrics. Second, M3-based profiling will be used to identify bottlenecks in the hierarchical actor, especially actor forward passes, action composition, and Python-side control flow. Third, larger-scale evaluation will be extended to at least 500CP to provide a minimum large-scale benchmark aligned with the original EV-GNN scalability framing.
+Future work will focus on three directions. First, the paper will develop a clearer PublicPST case study explaining the control scenario, the reward calculation, and the interpretation of tracking, saturation, service, and overload metrics. Second, M3-based profiling will be used to identify remaining bottlenecks in the hierarchical actor, especially actor forward passes, action composition, and Python-side control flow. Third, multi-scale and multi-algorithm readiness will be audited before adding external baseline comparisons or larger formal runs.
 
 ## Baseline reference
 
