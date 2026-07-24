@@ -7,6 +7,7 @@ OUTPUT_ROOT=/projects/fr57/cche0357/EV-GNN_outputs
 ARRAY_SCRIPT=m3_jobs/17_controlled_multiscale_formal_train_eval.slurm
 REDUCER_SCRIPT=m3_jobs/18_controlled_multiscale_formal_reduce_bundle.slurm
 CURRENT_DIR="$(pwd -P)"
+REPO_ROOT_PHYSICAL="$(cd "${REPO_ROOT}" && pwd -P)"
 
 print_final_commands() {
   local array_job_id="$1"
@@ -26,8 +27,8 @@ print_final_commands() {
 
 if [[ "${EV_GNN_FORMAL_SUBMIT_DRY_RUN:-0}" == "1" ]]; then
   echo "dry_run=1"
-  if [[ "${CURRENT_DIR}" != "${REPO_ROOT}" ]]; then
-    echo "dry_run_note=real submission must be run from ${REPO_ROOT}; current_dir=${CURRENT_DIR}"
+  if [[ "${CURRENT_DIR}" != "${REPO_ROOT_PHYSICAL}" ]]; then
+    echo "dry_run_note=real submission must be run from ${REPO_ROOT}; physical_repo_root=${REPO_ROOT_PHYSICAL}; current_dir=${CURRENT_DIR}"
   fi
   echo "ARRAY_SUBMIT_COMMAND=sbatch --parsable ${ARRAY_SCRIPT}"
   echo "REDUCER_SUBMIT_COMMAND=sbatch --parsable --dependency=afterok:<array_jobid> --export=ALL,EV_GNN_FORMAL_ARRAY_JOB_ID=<array_jobid> ${REDUCER_SCRIPT}"
@@ -38,8 +39,8 @@ if [[ "${EV_GNN_FORMAL_SUBMIT_DRY_RUN:-0}" == "1" ]]; then
   exit 0
 fi
 
-if [[ "${CURRENT_DIR}" != "${REPO_ROOT}" ]]; then
-  echo "ERROR: submit helper must be run from ${REPO_ROOT}; current directory is ${CURRENT_DIR}" >&2
+if [[ "${CURRENT_DIR}" != "${REPO_ROOT_PHYSICAL}" ]]; then
+  echo "ERROR: submit helper must be run from ${REPO_ROOT}; physical_repo_root=${REPO_ROOT_PHYSICAL}; current directory is ${CURRENT_DIR}" >&2
   exit 2
 fi
 
