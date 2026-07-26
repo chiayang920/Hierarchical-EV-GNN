@@ -107,7 +107,8 @@ def test_active_only_denominator_excludes_inactive_slots():
     )
 
     assert summary["global"]["action_fraction_at_max_active"] == pytest.approx(0.5)
-    assert summary["global"]["active_action_count_mean"] == pytest.approx(2.0)
+    assert summary["global"]["active_slot_count_mean"] == pytest.approx(2.0)
+    assert summary["global"]["nonzero_action_count_mean_all_slots"] == pytest.approx(3.0)
     assert summary["global"]["inactive_slot_fraction_mean"] == pytest.approx(0.5)
 
 
@@ -127,6 +128,25 @@ def test_all_slot_denominator_includes_every_action_slot():
 
     assert summary["global"]["action_fraction_at_max_all_slots"] == pytest.approx(0.5)
     assert summary["global"]["action_mean_all_slots"] == pytest.approx(0.625)
+    assert summary["global"]["nonzero_action_count_mean_all_slots"] == pytest.approx(3.0)
+
+
+def test_active_slot_count_can_differ_from_all_slot_nonzero_action_count():
+    from utils.infrastructure_diagnostics import aggregate_infrastructure_actions
+
+    env = fake_env([fake_charger(0, 2, 0), fake_charger(1, 2, 1)])
+    summary = aggregate_infrastructure_actions(
+        mapped_actions_by_step=[np.array([1.0, 0.0, 0.0, 0.5], dtype=float)],
+        active_slots_by_step=[np.array([0, 1, 3], dtype=int)],
+        slot_to_charger_id=np.array([0, 0, 1, 1], dtype=int),
+        charger_to_transformer_id={0: 0, 1: 1},
+        max_action=1.0,
+        tolerance=1e-6,
+        env=env,
+    )
+
+    assert summary["global"]["active_slot_count_mean"] == pytest.approx(3.0)
+    assert summary["global"]["nonzero_action_count_mean_all_slots"] == pytest.approx(2.0)
 
 
 def test_action_fraction_at_max_uses_max_action_minus_tolerance_threshold():
@@ -157,7 +177,8 @@ def test_zero_active_slots_return_safe_values_without_crashing():
 
     assert summary["global"]["action_fraction_at_max_active"] == 0.0
     assert summary["global"]["action_mean_active"] == 0.0
-    assert summary["global"]["active_action_count_mean"] == 0.0
+    assert summary["global"]["active_slot_count_mean"] == 0.0
+    assert summary["global"]["nonzero_action_count_mean_all_slots"] == pytest.approx(2.0)
 
 
 def test_missing_env_power_and_overload_arrays_are_blank_not_zero():

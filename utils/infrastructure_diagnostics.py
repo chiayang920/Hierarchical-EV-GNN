@@ -26,7 +26,8 @@ EPISODE_DIAGNOSTIC_COLUMNS = [
     "global_action_mean_all_slots",
     "global_action_mean_active",
     "global_action_sum_active",
-    "active_action_count_mean",
+    "active_slot_count_mean",
+    "nonzero_action_count_mean_all_slots",
     "inactive_slot_fraction_mean",
     "transformer_action_hhi_mean",
     "transformer_action_gini_mean",
@@ -360,7 +361,8 @@ def build_episode_row(
         "global_action_mean_all_slots": global_summary["action_mean_all_slots"],
         "global_action_mean_active": global_summary["action_mean_active"],
         "global_action_sum_active": global_summary["action_sum_active"],
-        "active_action_count_mean": global_summary["active_action_count_mean"],
+        "active_slot_count_mean": global_summary["active_slot_count_mean"],
+        "nonzero_action_count_mean_all_slots": global_summary["nonzero_action_count_mean_all_slots"],
         "inactive_slot_fraction_mean": global_summary["inactive_slot_fraction_mean"],
         "transformer_action_hhi_mean": global_summary["transformer_action_hhi_mean"],
         "transformer_action_gini_mean": global_summary["transformer_action_gini_mean"],
@@ -534,6 +536,10 @@ def _global_action_summary(
     active_diagnostics = action_diagnostics(active_values, max_action=max_action, tolerance=tolerance)
     action_dim = int(slot_to_charger_id.size)
     active_slot_counts = [int(active_slots.size) for active_slots in active_slots_by_step]
+    nonzero_action_counts = [
+        int(np.count_nonzero(np.abs(mapped_action) > float(tolerance)))
+        for mapped_action in mapped_actions
+    ]
     inactive_slot_fractions = [
         (action_dim - active_slot_count) / action_dim
         for active_slot_count in active_slot_counts
@@ -565,7 +571,8 @@ def _global_action_summary(
         "action_mean_all_slots": all_slot_diagnostics["action_mean"],
         "action_mean_active": active_diagnostics["action_mean"],
         "action_sum_active": active_diagnostics["action_sum"],
-        "active_action_count_mean": _mean_values(active_slot_counts),
+        "active_slot_count_mean": _mean_values(active_slot_counts),
+        "nonzero_action_count_mean_all_slots": _mean_values(nonzero_action_counts),
         "inactive_slot_fraction_mean": _mean_values(inactive_slot_fractions),
         "transformer_action_hhi_mean": _mean_concentration(transformer_concentrations, "hhi"),
         "transformer_action_gini_mean": _mean_concentration(transformer_concentrations, "gini"),
