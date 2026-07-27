@@ -383,7 +383,13 @@ def normalise_member_name(name):
     return PurePosixPath(*clean_parts).as_posix()
 
 
+def is_benign_tar_root_directory(member):
+    return member.isdir() and str(member.name) in {".", "./"}
+
+
 def reject_unsafe_tar_member(member):
+    if is_benign_tar_root_directory(member):
+        return
     normalise_member_name(member.name)
     if member.issym() or member.islnk():
         raise ValidationError(f"tar links are not allowed in smoke evidence: {member.name}")
@@ -403,6 +409,8 @@ def safe_tar_members(tar):
     seen = set()
     for member in members:
         reject_unsafe_tar_member(member)
+        if is_benign_tar_root_directory(member):
+            continue
         normalised = normalise_member_name(member.name)
         if normalised in seen:
             raise ValidationError(f"duplicate normalized tar member path: {normalised}")
@@ -417,6 +425,8 @@ def safe_extract_tar(package_path, extract_dir):
     with open_tar(package_path) as tar:
         members = safe_tar_members(tar)
         for member in members:
+            if is_benign_tar_root_directory(member):
+                continue
             normalised = normalise_member_name(member.name)
             target = (root / normalised).resolve()
             if root not in [target, *target.parents]:
