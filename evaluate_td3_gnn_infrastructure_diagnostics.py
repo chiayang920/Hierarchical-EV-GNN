@@ -3,6 +3,7 @@ import csv
 from pathlib import Path
 
 import numpy as np
+import yaml
 
 from evaluate_td3_gnn import (
     ALGORITHM_CHOICES,
@@ -30,6 +31,7 @@ from utils.infrastructure_diagnostics import (
     build_transformer_rows,
     extract_active_action_slots,
     validate_active_infrastructure_mapping,
+    validate_environment_action_bounds,
 )
 
 
@@ -156,6 +158,53 @@ def write_csv(output_path, fieldnames, rows):
         writer.writerows(rows)
 
 
+def resolve_v2g_metadata(env, config_path):
+    if env is not None and hasattr(env, "v2g_enabled"):
+        v2g_value = _normalise_bool(getattr(env, "v2g_enabled"))
+        if v2g_value is not None:
+            return {
+                "v2g_enabled": v2g_value,
+                "v2g_enabled_source": "env.v2g_enabled",
+            }
+
+    config_value = _load_config_v2g_enabled(config_path)
+    if config_value is not None:
+        return {
+            "v2g_enabled": config_value,
+            "v2g_enabled_source": "config:v2g_enabled",
+        }
+
+    return {
+        "v2g_enabled": "",
+        "v2g_enabled_source": "unavailable",
+    }
+
+
+def _load_config_v2g_enabled(config_path):
+    try:
+        with Path(config_path).open("r") as config_file:
+            config = yaml.load(config_file, Loader=yaml.FullLoader)
+    except (OSError, yaml.YAMLError):
+        return None
+    if not isinstance(config, dict) or "v2g_enabled" not in config:
+        return None
+    return _normalise_bool(config["v2g_enabled"])
+
+
+def _normalise_bool(value):
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, (int, float, np.integer, np.floating)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        cleaned = value.strip().lower()
+        if cleaned in {"true", "yes", "1"}:
+            return True
+        if cleaned in {"false", "no", "0"}:
+            return False
+    return None
+
+
 def main(argv=None):
     args = parse_args(argv)
     canonical_algorithm = normalise_algorithm_label(args.algorithm)
@@ -165,7 +214,12 @@ def main(argv=None):
 
     probe_env = make_env(args.config, seed=args.seed)
     action_dim = probe_env.action_space.shape[0]
-    max_action = float(probe_env.action_space.high[0])
+    action_bounds = validate_environment_action_bounds(
+        probe_env.action_space,
+        tolerance=args.max_action_tolerance,
+    )
+    max_action = float(action_bounds["environment_action_high"])
+    v2g_metadata = resolve_v2g_metadata(probe_env, args.config)
 
     policy = create_policy(
         algorithm=canonical_algorithm,
@@ -184,6 +238,7 @@ def main(argv=None):
         "config": args.config,
         "checkpoint_prefix": str(checkpoint_prefix),
         "run_name": args.run_name,
+        **v2g_metadata,
     }
     summary_metadata = {
         "matrix_job_id": args.matrix_job_id,

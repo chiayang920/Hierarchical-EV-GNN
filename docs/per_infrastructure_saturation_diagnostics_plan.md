@@ -25,11 +25,34 @@ The canonical evaluator's historical `active_action_count_mean` is a non-zero ma
 - `active_slot_count_mean`: mean pre-step active EV slot count from `state.action_mapper`
 - `nonzero_action_count_mean_all_slots`: canonical-compatible mean all-slot non-zero mapped-action count
 - `global_action_nonzero_fraction_active`: pooled fraction of active EV decisions whose absolute mapped action is above tolerance
-- `inactive_nonzero_action_fraction_all_slots`: pooled fraction of inactive-slot action entries whose absolute mapped action is above tolerance; this should be zero for deterministic mapped actions
+- `inactive_slot_decision_count`: inactive action entries inspected across the episode
+- `inactive_nonzero_action_count`: inactive action entries whose absolute mapped action is above tolerance
+- `inactive_nonzero_action_fraction_all_slots`: inactive non-zero count divided by inactive-slot decision count; this should be zero for deterministic mapped actions when inactive slots exist, and blank when there is no inactive denominator
 
-### Concentration metrics
+### Action domain and signed commands
 
-Schema v2 treats zero-pressure allocation steps explicitly. A zero-pressure step is a step where the positive active-action pressure allocated across the relevant infrastructure level is at or below the diagnostic tolerance. Such steps are reported through `*_allocation_zero_pressure_step_fraction` and `*_allocation_valid_step_count`, but they are excluded from HHI/Gini means so lower charging intensity cannot appear as better allocation balance. If an episode has no positive-pressure steps for that allocation level, the corresponding mean HHI/Gini field is blank rather than a false zero.
+Schema v2 records environment action-space support separately from observed policy outputs. `environment_action_low`, `environment_action_high`, and `environment_action_domain_support` are derived only from the actual EV2Gym environment action bounds. They describe what the environment action space accepts, not what an actor architecture is constrained to emit.
+
+The controlled ActionGNN policy can emit signed continuous commands before they are passed to EV2Gym, including negative mapped commands even when the PublicPST environment action-space metadata is non-negative. The hierarchical actor uses a non-negative output composition before mapping active EV decisions back to the flat EV2Gym action vector. PublicPST formal configs use `v2g_enabled: False`, so negative commands are policy outputs and must not be treated as realised discharge. The current ActionGNN versus hierarchical evidence therefore combines hierarchy effects with actor output-domain effects.
+
+Schema v2 separates active decisions into:
+
+- positive charging commands: action greater than tolerance
+- zero commands: absolute action at or below tolerance
+- negative commands: action below negative tolerance
+
+It also records observed active-action min/max, positive-max saturation, negative-min saturation where the environment has negative support, positive command sums, and negative command magnitude sums. Realised `total_energy_charged` and `total_energy_discharged` remain separate environment outcomes.
+
+### Positive charging concentration metrics
+
+Schema v2 treats zero-pressure allocation steps explicitly. A zero-pressure step is a step where the positive active-action pressure allocated across the relevant infrastructure level is at or below the diagnostic tolerance. Such steps are reported through `*_allocation_zero_pressure_step_fraction` and `*_allocation_valid_step_count`, but they are excluded from positive-charge HHI/Gini means so lower charging intensity cannot appear as better allocation balance. If an episode has no positive-pressure steps for that allocation level, the corresponding mean HHI/Gini field is blank rather than a false zero.
+
+HHI/Gini fields are explicitly named as positive charging-pressure metrics:
+
+- `transformer_positive_charge_action_hhi_mean`
+- `transformer_positive_charge_action_gini_mean`
+- `charger_positive_charge_action_hhi_mean`
+- `charger_positive_charge_action_gini_mean`
 
 Per-transformer charger concentration follows the same rule and reports `charger_allocation_zero_pressure_step_fraction` plus `charger_allocation_valid_step_count` in `transformer_diagnostics.csv`.
 
@@ -66,7 +89,17 @@ Schema v2 hardens metric semantics before the full multiscale diagnostic run:
 - writes zero-pressure fractions and valid-step counts for global allocation concentration summaries
 - writes per-transformer charger zero-pressure fractions and valid-step counts
 - adds active non-zero action fractions for global, transformer, and charger diagnostics
-- adds `inactive_nonzero_action_fraction_all_slots` to validate the inactive-slot action contract
+- adds action-bound metadata from homogeneous environment action-space bounds
+- adds observed active-action min/max fields distinct from action-space bounds
+- adds active positive, zero, and negative command fractions
+- adds active positive command sums and negative command magnitude sums
+- adds positive-max and negative-min saturation metrics, with negative-min blank for non-negative environment domains
+- adds inactive-slot denominator and violation counts to validate the inactive-slot action contract
+- adds `total_energy_discharged` while keeping realised discharge separate from negative commands
+- preserves blank/unavailable scalar stats for missing, unsupported, NaN, and Inf values while keeping observed scalar zero as `0.0`
+- adds satisfaction observation counts and count-weighted transformer satisfaction aggregation
+- records `v2g_enabled` and `v2g_enabled_source` from runtime/config evidence when available
+- renames generic HHI/Gini fields to positive-charge HHI/Gini names
 - renames infrastructure action-at-max seed/episode macro fields to include `_macro_mean`
 
 ## Real-checkpoint smoke validation
@@ -123,3 +156,11 @@ If lower saturation is accompanied by lower service, lower energy delivery, or w
 3. Aggregate diagnostics to seed level.
 4. Compare hierarchical minus ActionGNN at seed level.
 5. Create a separate docs-only diagnostic results note after audit.
+
+## Future causal ablation
+
+The present diagnostic hardening does not implement or evaluate a causal ablation. A later causal test should separate hierarchy from output-domain constraints with three arms:
+
+1. Original signed flat ActionGNN.
+2. Flat non-negative ActionGNN.
+3. Hierarchical non-negative actor.

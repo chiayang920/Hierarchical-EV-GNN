@@ -21,26 +21,44 @@ EPISODE_DIAGNOSTIC_COLUMNS = [
     "episode_reward",
     "max_action",
     "max_action_tolerance",
+    "environment_action_low",
+    "environment_action_high",
+    "observed_action_min_active",
+    "observed_action_max_active",
+    "action_tolerance",
+    "environment_action_domain_support",
+    "v2g_enabled",
+    "v2g_enabled_source",
     "global_action_fraction_at_max_all_slots",
     "global_action_fraction_at_max_active",
     "global_action_nonzero_fraction_active",
+    "active_action_decision_count",
+    "global_positive_action_fraction_active",
+    "global_zero_action_fraction_active",
+    "global_negative_action_fraction_active",
+    "global_action_fraction_at_positive_max_active",
+    "global_action_fraction_at_negative_min_active",
+    "global_positive_action_sum_active",
+    "global_negative_action_magnitude_sum_active",
     "global_action_mean_all_slots",
     "global_action_mean_active",
     "global_action_sum_active",
     "active_slot_count_mean",
     "nonzero_action_count_mean_all_slots",
     "inactive_slot_fraction_mean",
+    "inactive_slot_decision_count",
+    "inactive_nonzero_action_count",
     "inactive_nonzero_action_fraction_all_slots",
     "transformer_action_fraction_at_max_active_macro_mean",
     "charger_action_fraction_at_max_active_macro_mean",
     "transformer_action_nonzero_fraction_active_macro_mean",
     "charger_action_nonzero_fraction_active_macro_mean",
-    "transformer_action_hhi_mean",
-    "transformer_action_gini_mean",
+    "transformer_positive_charge_action_hhi_mean",
+    "transformer_positive_charge_action_gini_mean",
     "transformer_allocation_zero_pressure_step_fraction",
     "transformer_allocation_valid_step_count",
-    "charger_action_hhi_mean",
-    "charger_action_gini_mean",
+    "charger_positive_charge_action_hhi_mean",
+    "charger_positive_charge_action_gini_mean",
     "charger_allocation_zero_pressure_step_fraction",
     "charger_allocation_valid_step_count",
     "total_transformer_overload",
@@ -49,6 +67,7 @@ EPISODE_DIAGNOSTIC_COLUMNS = [
     "energy_tracking_error",
     "total_ev_served",
     "total_energy_charged",
+    "total_energy_discharged",
     "average_user_satisfaction",
     "energy_user_satisfaction",
     "diagnostic_schema_version",
@@ -71,12 +90,19 @@ TRANSFORMER_DIAGNOSTIC_COLUMNS = [
     "action_max_active",
     "action_fraction_at_max_active",
     "action_nonzero_fraction_active",
+    "positive_action_fraction_active",
+    "zero_action_fraction_active",
+    "negative_action_fraction_active",
+    "action_fraction_at_positive_max_active",
+    "action_fraction_at_negative_min_active",
+    "positive_action_sum_active",
+    "negative_action_magnitude_sum_active",
     "action_sum_all_slots",
     "action_mean_all_slots",
     "action_max_all_slots",
     "action_fraction_at_max_all_slots",
-    "charger_action_hhi_mean",
-    "charger_action_gini_mean",
+    "charger_positive_charge_action_hhi_mean",
+    "charger_positive_charge_action_gini_mean",
     "charger_allocation_zero_pressure_step_fraction",
     "charger_allocation_valid_step_count",
     "overload_magnitude_sum",
@@ -86,6 +112,7 @@ TRANSFORMER_DIAGNOSTIC_COLUMNS = [
     "served_ev_count",
     "energy_charged_kwh",
     "user_satisfaction_mean",
+    "user_satisfaction_observation_count",
     "diagnostic_schema_version",
 ]
 
@@ -106,6 +133,13 @@ CHARGER_DIAGNOSTIC_COLUMNS = [
     "action_max_active",
     "action_fraction_at_max_active",
     "action_nonzero_fraction_active",
+    "positive_action_fraction_active",
+    "zero_action_fraction_active",
+    "negative_action_fraction_active",
+    "action_fraction_at_positive_max_active",
+    "action_fraction_at_negative_min_active",
+    "positive_action_sum_active",
+    "negative_action_magnitude_sum_active",
     "action_sum_all_slots",
     "action_mean_all_slots",
     "action_max_all_slots",
@@ -116,6 +150,7 @@ CHARGER_DIAGNOSTIC_COLUMNS = [
     "served_ev_count",
     "energy_charged_kwh",
     "user_satisfaction_mean",
+    "user_satisfaction_observation_count",
     "diagnostic_schema_version",
 ]
 
@@ -128,17 +163,35 @@ SEED_SUMMARY_DIAGNOSTIC_COLUMNS = [
     "global_action_fraction_at_max_active_mean",
     "global_action_fraction_at_max_all_slots_mean",
     "global_action_nonzero_fraction_active_mean",
+    "active_action_decision_count_mean",
+    "global_positive_action_fraction_active_mean",
+    "global_zero_action_fraction_active_mean",
+    "global_negative_action_fraction_active_mean",
+    "global_action_fraction_at_positive_max_active_mean",
+    "global_action_fraction_at_negative_min_active_mean",
+    "global_positive_action_sum_active_mean",
+    "global_negative_action_magnitude_sum_active_mean",
+    "observed_action_min_active_mean",
+    "observed_action_max_active_mean",
+    "environment_action_low",
+    "environment_action_high",
+    "action_tolerance",
+    "environment_action_domain_support",
+    "v2g_enabled",
+    "v2g_enabled_source",
+    "inactive_slot_decision_count_mean",
+    "inactive_nonzero_action_count_mean",
     "inactive_nonzero_action_fraction_all_slots_mean",
     "transformer_action_fraction_at_max_active_macro_mean",
     "charger_action_fraction_at_max_active_macro_mean",
     "transformer_action_nonzero_fraction_active_macro_mean",
     "charger_action_nonzero_fraction_active_macro_mean",
-    "transformer_action_hhi_mean",
-    "transformer_action_gini_mean",
+    "transformer_positive_charge_action_hhi_mean",
+    "transformer_positive_charge_action_gini_mean",
     "transformer_allocation_zero_pressure_step_fraction_mean",
     "transformer_allocation_valid_step_count_mean",
-    "charger_action_hhi_mean",
-    "charger_action_gini_mean",
+    "charger_positive_charge_action_hhi_mean",
+    "charger_positive_charge_action_gini_mean",
     "charger_allocation_zero_pressure_step_fraction_mean",
     "charger_allocation_valid_step_count_mean",
     "total_transformer_overload_mean",
@@ -147,6 +200,7 @@ SEED_SUMMARY_DIAGNOSTIC_COLUMNS = [
     "energy_tracking_error_mean",
     "total_ev_served_mean",
     "total_energy_charged_mean",
+    "total_energy_discharged_mean",
     "average_user_satisfaction_mean",
     "energy_user_satisfaction_mean",
     "diagnostic_schema_version",
@@ -218,6 +272,34 @@ def validate_active_infrastructure_mapping(state, slot_to_charger_id, charger_to
     return active_metadata
 
 
+def validate_environment_action_bounds(action_space, tolerance=1e-6):
+    if action_space is None or not hasattr(action_space, "low") or not hasattr(action_space, "high"):
+        raise ValueError("Environment action_space must expose low and high bounds.")
+
+    low_values = np.asarray(action_space.low, dtype=float).reshape(-1)
+    high_values = np.asarray(action_space.high, dtype=float).reshape(-1)
+    if low_values.size == 0 or high_values.size == 0:
+        raise ValueError("Environment action-space bounds must be non-empty.")
+    if low_values.size != high_values.size:
+        raise ValueError("Environment action-space low/high bounds must have matching sizes.")
+    if not np.all(np.isfinite(low_values)) or not np.all(np.isfinite(high_values)):
+        raise ValueError("Environment action-space bounds must be finite.")
+
+    low = float(low_values[0])
+    high = float(high_values[0])
+    tolerance = float(tolerance)
+    if not np.all(np.abs(low_values - low) <= tolerance):
+        raise ValueError("heterogeneous action-space low bounds are unsupported by diagnostic schema v2.")
+    if not np.all(np.abs(high_values - high) <= tolerance):
+        raise ValueError("heterogeneous action-space high bounds are unsupported by diagnostic schema v2.")
+
+    return {
+        "environment_action_low": low,
+        "environment_action_high": high,
+        "environment_action_domain_support": _environment_action_domain_support(low, high, tolerance),
+    }
+
+
 def action_diagnostics(action_values, max_action, tolerance=1e-6):
     values = np.asarray(action_values, dtype=float).reshape(-1)
     if values.size == 0:
@@ -238,6 +320,61 @@ def action_diagnostics(action_values, max_action, tolerance=1e-6):
         "action_max": float(np.max(values)),
         "action_fraction_at_max": float(np.mean(values >= at_max_threshold)),
         "action_nonzero_fraction": float(np.mean(np.abs(values) > float(tolerance))),
+    }
+
+
+def signed_action_diagnostics(
+    action_values,
+    environment_action_low=UNAVAILABLE,
+    environment_action_high=UNAVAILABLE,
+    tolerance=1e-6,
+):
+    values = np.asarray(action_values, dtype=float).reshape(-1)
+    tolerance = float(tolerance)
+    if values.size == 0:
+        return {
+            "active_action_decision_count": 0,
+            "observed_action_min_active": UNAVAILABLE,
+            "observed_action_max_active": UNAVAILABLE,
+            "positive_action_fraction_active": UNAVAILABLE,
+            "zero_action_fraction_active": UNAVAILABLE,
+            "negative_action_fraction_active": UNAVAILABLE,
+            "action_fraction_at_positive_max_active": UNAVAILABLE,
+            "action_fraction_at_negative_min_active": UNAVAILABLE,
+            "positive_action_sum_active": 0.0,
+            "negative_action_magnitude_sum_active": 0.0,
+        }
+
+    positive_mask = values > tolerance
+    zero_mask = np.abs(values) <= tolerance
+    negative_mask = values < -tolerance
+
+    positive_max_fraction = UNAVAILABLE
+    if _is_available_number(environment_action_high):
+        positive_max_fraction = float(
+            np.mean(values >= float(environment_action_high) - tolerance)
+        )
+
+    negative_min_fraction = UNAVAILABLE
+    if (
+        _is_available_number(environment_action_low)
+        and float(environment_action_low) < -tolerance
+    ):
+        negative_min_fraction = float(
+            np.mean(values <= float(environment_action_low) + tolerance)
+        )
+
+    return {
+        "active_action_decision_count": int(values.size),
+        "observed_action_min_active": float(np.min(values)),
+        "observed_action_max_active": float(np.max(values)),
+        "positive_action_fraction_active": float(np.mean(positive_mask)),
+        "zero_action_fraction_active": float(np.mean(zero_mask)),
+        "negative_action_fraction_active": float(np.mean(negative_mask)),
+        "action_fraction_at_positive_max_active": positive_max_fraction,
+        "action_fraction_at_negative_min_active": negative_min_fraction,
+        "positive_action_sum_active": float(np.sum(values[positive_mask])),
+        "negative_action_magnitude_sum_active": float(np.sum(np.abs(values[negative_mask]))),
     }
 
 
@@ -294,6 +431,7 @@ def aggregate_infrastructure_actions(
     transformer_ids = sorted({int(transformer_id) for transformer_id in charger_to_transformer_id.values()})
     charger_lookup = _charger_lookup(env)
     chargers_by_transformer = _chargers_by_transformer(charger_ids, charger_to_transformer_id)
+    action_bounds = _environment_action_bounds(env, max_action, tolerance)
 
     stacked_actions = (
         np.vstack(mapped_actions)
@@ -316,6 +454,7 @@ def aggregate_infrastructure_actions(
         transformer_ids=transformer_ids,
         max_action=max_action,
         tolerance=tolerance,
+        action_bounds=action_bounds,
         all_values=all_values,
         active_values=active_values,
     )
@@ -329,6 +468,7 @@ def aggregate_infrastructure_actions(
             charger_to_transformer_id=charger_to_transformer_id,
             max_action=max_action,
             tolerance=tolerance,
+            action_bounds=action_bounds,
             env=env,
             charger=charger_lookup.get(charger_id),
         )
@@ -346,6 +486,7 @@ def aggregate_infrastructure_actions(
             charger_rows=charger_rows,
             max_action=max_action,
             tolerance=tolerance,
+            action_bounds=action_bounds,
             env=env,
         )
         for transformer_id in transformer_ids
@@ -378,15 +519,41 @@ def build_episode_row(
         "episode_reward": float(episode_record["episode_reward"]),
         "max_action": float(max_action),
         "max_action_tolerance": float(tolerance),
+        "environment_action_low": global_summary.get("environment_action_low", UNAVAILABLE),
+        "environment_action_high": global_summary.get("environment_action_high", UNAVAILABLE),
+        "observed_action_min_active": global_summary["observed_action_min_active"],
+        "observed_action_max_active": global_summary["observed_action_max_active"],
+        "action_tolerance": float(tolerance),
+        "environment_action_domain_support": global_summary.get(
+            "environment_action_domain_support", UNAVAILABLE
+        ),
+        "v2g_enabled": metadata.get("v2g_enabled", UNAVAILABLE),
+        "v2g_enabled_source": metadata.get("v2g_enabled_source", UNAVAILABLE),
         "global_action_fraction_at_max_all_slots": global_summary["action_fraction_at_max_all_slots"],
         "global_action_fraction_at_max_active": global_summary["action_fraction_at_max_active"],
         "global_action_nonzero_fraction_active": global_summary["action_nonzero_fraction_active"],
+        "active_action_decision_count": global_summary["active_action_decision_count"],
+        "global_positive_action_fraction_active": global_summary["positive_action_fraction_active"],
+        "global_zero_action_fraction_active": global_summary["zero_action_fraction_active"],
+        "global_negative_action_fraction_active": global_summary["negative_action_fraction_active"],
+        "global_action_fraction_at_positive_max_active": global_summary[
+            "action_fraction_at_positive_max_active"
+        ],
+        "global_action_fraction_at_negative_min_active": global_summary[
+            "action_fraction_at_negative_min_active"
+        ],
+        "global_positive_action_sum_active": global_summary["positive_action_sum_active"],
+        "global_negative_action_magnitude_sum_active": global_summary[
+            "negative_action_magnitude_sum_active"
+        ],
         "global_action_mean_all_slots": global_summary["action_mean_all_slots"],
         "global_action_mean_active": global_summary["action_mean_active"],
         "global_action_sum_active": global_summary["action_sum_active"],
         "active_slot_count_mean": global_summary["active_slot_count_mean"],
         "nonzero_action_count_mean_all_slots": global_summary["nonzero_action_count_mean_all_slots"],
         "inactive_slot_fraction_mean": global_summary["inactive_slot_fraction_mean"],
+        "inactive_slot_decision_count": global_summary["inactive_slot_decision_count"],
+        "inactive_nonzero_action_count": global_summary["inactive_nonzero_action_count"],
         "inactive_nonzero_action_fraction_all_slots": global_summary[
             "inactive_nonzero_action_fraction_all_slots"
         ],
@@ -402,16 +569,24 @@ def build_episode_row(
         "charger_action_nonzero_fraction_active_macro_mean": _mean_infrastructure_metric(
             action_summary["chargers"], "action_nonzero_fraction_active"
         ),
-        "transformer_action_hhi_mean": global_summary["transformer_action_hhi_mean"],
-        "transformer_action_gini_mean": global_summary["transformer_action_gini_mean"],
+        "transformer_positive_charge_action_hhi_mean": global_summary[
+            "transformer_positive_charge_action_hhi_mean"
+        ],
+        "transformer_positive_charge_action_gini_mean": global_summary[
+            "transformer_positive_charge_action_gini_mean"
+        ],
         "transformer_allocation_zero_pressure_step_fraction": global_summary[
             "transformer_allocation_zero_pressure_step_fraction"
         ],
         "transformer_allocation_valid_step_count": global_summary[
             "transformer_allocation_valid_step_count"
         ],
-        "charger_action_hhi_mean": global_summary["charger_action_hhi_mean"],
-        "charger_action_gini_mean": global_summary["charger_action_gini_mean"],
+        "charger_positive_charge_action_hhi_mean": global_summary[
+            "charger_positive_charge_action_hhi_mean"
+        ],
+        "charger_positive_charge_action_gini_mean": global_summary[
+            "charger_positive_charge_action_gini_mean"
+        ],
         "charger_allocation_zero_pressure_step_fraction": global_summary[
             "charger_allocation_zero_pressure_step_fraction"
         ],
@@ -427,6 +602,7 @@ def build_episode_row(
         "energy_tracking_error",
         "total_ev_served",
         "total_energy_charged",
+        "total_energy_discharged",
         "average_user_satisfaction",
         "energy_user_satisfaction",
     ]:
@@ -451,6 +627,19 @@ def build_charger_rows(metadata, episode_index, episode_seed, action_summary):
             "action_max_active": charger_summary["action_max_active"],
             "action_fraction_at_max_active": charger_summary["action_fraction_at_max_active"],
             "action_nonzero_fraction_active": charger_summary["action_nonzero_fraction_active"],
+            "positive_action_fraction_active": charger_summary["positive_action_fraction_active"],
+            "zero_action_fraction_active": charger_summary["zero_action_fraction_active"],
+            "negative_action_fraction_active": charger_summary["negative_action_fraction_active"],
+            "action_fraction_at_positive_max_active": charger_summary[
+                "action_fraction_at_positive_max_active"
+            ],
+            "action_fraction_at_negative_min_active": charger_summary[
+                "action_fraction_at_negative_min_active"
+            ],
+            "positive_action_sum_active": charger_summary["positive_action_sum_active"],
+            "negative_action_magnitude_sum_active": charger_summary[
+                "negative_action_magnitude_sum_active"
+            ],
             "action_sum_all_slots": charger_summary["action_sum_all_slots"],
             "action_mean_all_slots": charger_summary["action_mean_all_slots"],
             "action_max_all_slots": charger_summary["action_max_all_slots"],
@@ -461,6 +650,9 @@ def build_charger_rows(metadata, episode_index, episode_seed, action_summary):
             "served_ev_count": charger_summary["served_ev_count"],
             "energy_charged_kwh": charger_summary["energy_charged_kwh"],
             "user_satisfaction_mean": charger_summary["user_satisfaction_mean"],
+            "user_satisfaction_observation_count": charger_summary[
+                "user_satisfaction_observation_count"
+            ],
             "diagnostic_schema_version": DIAGNOSTIC_SCHEMA_VERSION,
         })
     return rows
@@ -483,12 +675,29 @@ def build_transformer_rows(metadata, episode_index, episode_seed, action_summary
             "action_max_active": transformer_summary["action_max_active"],
             "action_fraction_at_max_active": transformer_summary["action_fraction_at_max_active"],
             "action_nonzero_fraction_active": transformer_summary["action_nonzero_fraction_active"],
+            "positive_action_fraction_active": transformer_summary["positive_action_fraction_active"],
+            "zero_action_fraction_active": transformer_summary["zero_action_fraction_active"],
+            "negative_action_fraction_active": transformer_summary["negative_action_fraction_active"],
+            "action_fraction_at_positive_max_active": transformer_summary[
+                "action_fraction_at_positive_max_active"
+            ],
+            "action_fraction_at_negative_min_active": transformer_summary[
+                "action_fraction_at_negative_min_active"
+            ],
+            "positive_action_sum_active": transformer_summary["positive_action_sum_active"],
+            "negative_action_magnitude_sum_active": transformer_summary[
+                "negative_action_magnitude_sum_active"
+            ],
             "action_sum_all_slots": transformer_summary["action_sum_all_slots"],
             "action_mean_all_slots": transformer_summary["action_mean_all_slots"],
             "action_max_all_slots": transformer_summary["action_max_all_slots"],
             "action_fraction_at_max_all_slots": transformer_summary["action_fraction_at_max_all_slots"],
-            "charger_action_hhi_mean": transformer_summary["charger_action_hhi_mean"],
-            "charger_action_gini_mean": transformer_summary["charger_action_gini_mean"],
+            "charger_positive_charge_action_hhi_mean": transformer_summary[
+                "charger_positive_charge_action_hhi_mean"
+            ],
+            "charger_positive_charge_action_gini_mean": transformer_summary[
+                "charger_positive_charge_action_gini_mean"
+            ],
             "charger_allocation_zero_pressure_step_fraction": transformer_summary[
                 "charger_allocation_zero_pressure_step_fraction"
             ],
@@ -502,6 +711,9 @@ def build_transformer_rows(metadata, episode_index, episode_seed, action_summary
             "served_ev_count": transformer_summary["served_ev_count"],
             "energy_charged_kwh": transformer_summary["energy_charged_kwh"],
             "user_satisfaction_mean": transformer_summary["user_satisfaction_mean"],
+            "user_satisfaction_observation_count": transformer_summary[
+                "user_satisfaction_observation_count"
+            ],
             "diagnostic_schema_version": DIAGNOSTIC_SCHEMA_VERSION,
         })
     return rows
@@ -520,8 +732,52 @@ def build_seed_summary_row(metadata, episode_rows):
         "global_action_nonzero_fraction_active_mean": _mean_existing(
             episode_rows, "global_action_nonzero_fraction_active"
         ),
+        "active_action_decision_count_mean": _mean_existing(
+            episode_rows, "active_action_decision_count"
+        ),
+        "global_positive_action_fraction_active_mean": _mean_existing(
+            episode_rows, "global_positive_action_fraction_active", default=UNAVAILABLE
+        ),
+        "global_zero_action_fraction_active_mean": _mean_existing(
+            episode_rows, "global_zero_action_fraction_active", default=UNAVAILABLE
+        ),
+        "global_negative_action_fraction_active_mean": _mean_existing(
+            episode_rows, "global_negative_action_fraction_active", default=UNAVAILABLE
+        ),
+        "global_action_fraction_at_positive_max_active_mean": _mean_existing(
+            episode_rows, "global_action_fraction_at_positive_max_active", default=UNAVAILABLE
+        ),
+        "global_action_fraction_at_negative_min_active_mean": _mean_existing(
+            episode_rows, "global_action_fraction_at_negative_min_active", default=UNAVAILABLE
+        ),
+        "global_positive_action_sum_active_mean": _mean_existing(
+            episode_rows, "global_positive_action_sum_active"
+        ),
+        "global_negative_action_magnitude_sum_active_mean": _mean_existing(
+            episode_rows, "global_negative_action_magnitude_sum_active"
+        ),
+        "observed_action_min_active_mean": _mean_existing(
+            episode_rows, "observed_action_min_active", default=UNAVAILABLE
+        ),
+        "observed_action_max_active_mean": _mean_existing(
+            episode_rows, "observed_action_max_active", default=UNAVAILABLE
+        ),
+        "environment_action_low": _first_existing(episode_rows, "environment_action_low"),
+        "environment_action_high": _first_existing(episode_rows, "environment_action_high"),
+        "action_tolerance": _first_existing(episode_rows, "action_tolerance"),
+        "environment_action_domain_support": _first_existing(
+            episode_rows, "environment_action_domain_support"
+        ),
+        "v2g_enabled": _first_existing(episode_rows, "v2g_enabled"),
+        "v2g_enabled_source": _first_existing(episode_rows, "v2g_enabled_source"),
+        "inactive_slot_decision_count_mean": _mean_existing(
+            episode_rows, "inactive_slot_decision_count"
+        ),
+        "inactive_nonzero_action_count_mean": _mean_existing(
+            episode_rows, "inactive_nonzero_action_count"
+        ),
         "inactive_nonzero_action_fraction_all_slots_mean": _mean_existing(
-            episode_rows, "inactive_nonzero_action_fraction_all_slots"
+            episode_rows, "inactive_nonzero_action_fraction_all_slots", default=UNAVAILABLE
         ),
         "transformer_action_fraction_at_max_active_macro_mean": _mean_existing(
             episode_rows, "transformer_action_fraction_at_max_active_macro_mean"
@@ -535,11 +791,11 @@ def build_seed_summary_row(metadata, episode_rows):
         "charger_action_nonzero_fraction_active_macro_mean": _mean_existing(
             episode_rows, "charger_action_nonzero_fraction_active_macro_mean"
         ),
-        "transformer_action_hhi_mean": _mean_existing(
-            episode_rows, "transformer_action_hhi_mean", default=UNAVAILABLE
+        "transformer_positive_charge_action_hhi_mean": _mean_existing(
+            episode_rows, "transformer_positive_charge_action_hhi_mean", default=UNAVAILABLE
         ),
-        "transformer_action_gini_mean": _mean_existing(
-            episode_rows, "transformer_action_gini_mean", default=UNAVAILABLE
+        "transformer_positive_charge_action_gini_mean": _mean_existing(
+            episode_rows, "transformer_positive_charge_action_gini_mean", default=UNAVAILABLE
         ),
         "transformer_allocation_zero_pressure_step_fraction_mean": _mean_existing(
             episode_rows, "transformer_allocation_zero_pressure_step_fraction"
@@ -547,11 +803,11 @@ def build_seed_summary_row(metadata, episode_rows):
         "transformer_allocation_valid_step_count_mean": _mean_existing(
             episode_rows, "transformer_allocation_valid_step_count"
         ),
-        "charger_action_hhi_mean": _mean_existing(
-            episode_rows, "charger_action_hhi_mean", default=UNAVAILABLE
+        "charger_positive_charge_action_hhi_mean": _mean_existing(
+            episode_rows, "charger_positive_charge_action_hhi_mean", default=UNAVAILABLE
         ),
-        "charger_action_gini_mean": _mean_existing(
-            episode_rows, "charger_action_gini_mean", default=UNAVAILABLE
+        "charger_positive_charge_action_gini_mean": _mean_existing(
+            episode_rows, "charger_positive_charge_action_gini_mean", default=UNAVAILABLE
         ),
         "charger_allocation_zero_pressure_step_fraction_mean": _mean_existing(
             episode_rows, "charger_allocation_zero_pressure_step_fraction"
@@ -559,14 +815,33 @@ def build_seed_summary_row(metadata, episode_rows):
         "charger_allocation_valid_step_count_mean": _mean_existing(
             episode_rows, "charger_allocation_valid_step_count"
         ),
-        "total_transformer_overload_mean": _mean_existing(episode_rows, "total_transformer_overload"),
-        "power_tracker_violation_mean": _mean_existing(episode_rows, "power_tracker_violation"),
-        "tracking_error_mean": _mean_existing(episode_rows, "tracking_error"),
-        "energy_tracking_error_mean": _mean_existing(episode_rows, "energy_tracking_error"),
-        "total_ev_served_mean": _mean_existing(episode_rows, "total_ev_served"),
-        "total_energy_charged_mean": _mean_existing(episode_rows, "total_energy_charged"),
-        "average_user_satisfaction_mean": _mean_existing(episode_rows, "average_user_satisfaction"),
-        "energy_user_satisfaction_mean": _mean_existing(episode_rows, "energy_user_satisfaction"),
+        "total_transformer_overload_mean": _mean_existing(
+            episode_rows, "total_transformer_overload", default=UNAVAILABLE
+        ),
+        "power_tracker_violation_mean": _mean_existing(
+            episode_rows, "power_tracker_violation", default=UNAVAILABLE
+        ),
+        "tracking_error_mean": _mean_existing(
+            episode_rows, "tracking_error", default=UNAVAILABLE
+        ),
+        "energy_tracking_error_mean": _mean_existing(
+            episode_rows, "energy_tracking_error", default=UNAVAILABLE
+        ),
+        "total_ev_served_mean": _mean_existing(
+            episode_rows, "total_ev_served", default=UNAVAILABLE
+        ),
+        "total_energy_charged_mean": _mean_existing(
+            episode_rows, "total_energy_charged", default=UNAVAILABLE
+        ),
+        "total_energy_discharged_mean": _mean_existing(
+            episode_rows, "total_energy_discharged", default=UNAVAILABLE
+        ),
+        "average_user_satisfaction_mean": _mean_existing(
+            episode_rows, "average_user_satisfaction", default=UNAVAILABLE
+        ),
+        "energy_user_satisfaction_mean": _mean_existing(
+            episode_rows, "energy_user_satisfaction", default=UNAVAILABLE
+        ),
         "diagnostic_schema_version": DIAGNOSTIC_SCHEMA_VERSION,
     }
 
@@ -599,6 +874,30 @@ def _chargers_by_transformer(charger_ids, charger_to_transformer_id):
     return chargers_by_transformer
 
 
+def _environment_action_bounds(env, max_action, tolerance):
+    if env is not None and hasattr(env, "action_space"):
+        return validate_environment_action_bounds(env.action_space, tolerance=tolerance)
+
+    return {
+        "environment_action_low": UNAVAILABLE,
+        "environment_action_high": UNAVAILABLE,
+        "environment_action_domain_support": UNAVAILABLE,
+    }
+
+
+def _environment_action_domain_support(low, high, tolerance):
+    low = float(low)
+    high = float(high)
+    tolerance = float(tolerance)
+    if low < -tolerance and high > tolerance:
+        return "signed"
+    if low >= -tolerance and high > tolerance:
+        return "non_negative"
+    if low < -tolerance and high <= tolerance:
+        return "non_positive"
+    return "zero_only"
+
+
 def _concatenate_or_empty(value_arrays):
     non_empty_arrays = [
         np.asarray(values, dtype=float).reshape(-1)
@@ -619,18 +918,25 @@ def _global_action_summary(
     transformer_ids,
     max_action,
     tolerance,
+    action_bounds,
     all_values,
     active_values,
 ):
     all_slot_diagnostics = action_diagnostics(all_values, max_action=max_action, tolerance=tolerance)
     active_diagnostics = action_diagnostics(active_values, max_action=max_action, tolerance=tolerance)
+    signed_diagnostics = signed_action_diagnostics(
+        active_values,
+        environment_action_low=action_bounds.get("environment_action_low", UNAVAILABLE),
+        environment_action_high=action_bounds.get("environment_action_high", max_action),
+        tolerance=tolerance,
+    )
     action_dim = int(slot_to_charger_id.size)
     active_slot_counts = [int(active_slots.size) for active_slots in active_slots_by_step]
     nonzero_action_counts = [
         int(np.count_nonzero(np.abs(mapped_action) > float(tolerance)))
         for mapped_action in mapped_actions
     ]
-    inactive_nonzero_action_fraction = _inactive_nonzero_action_fraction(
+    inactive_contract = _inactive_nonzero_action_contract(
         mapped_actions=mapped_actions,
         active_slots_by_step=active_slots_by_step,
         action_dim=action_dim,
@@ -662,26 +968,60 @@ def _global_action_summary(
         ], tolerance=tolerance))
 
     return {
+        "environment_action_low": action_bounds.get("environment_action_low", UNAVAILABLE),
+        "environment_action_high": action_bounds.get("environment_action_high", UNAVAILABLE),
+        "environment_action_domain_support": action_bounds.get(
+            "environment_action_domain_support", UNAVAILABLE
+        ),
+        "action_tolerance": float(tolerance),
+        "active_action_decision_count": signed_diagnostics["active_action_decision_count"],
+        "observed_action_min_active": signed_diagnostics["observed_action_min_active"],
+        "observed_action_max_active": signed_diagnostics["observed_action_max_active"],
         "action_fraction_at_max_all_slots": all_slot_diagnostics["action_fraction_at_max"],
         "action_fraction_at_max_active": active_diagnostics["action_fraction_at_max"],
         "action_nonzero_fraction_active": active_diagnostics["action_nonzero_fraction"],
+        "positive_action_fraction_active": signed_diagnostics["positive_action_fraction_active"],
+        "zero_action_fraction_active": signed_diagnostics["zero_action_fraction_active"],
+        "negative_action_fraction_active": signed_diagnostics["negative_action_fraction_active"],
+        "action_fraction_at_positive_max_active": signed_diagnostics[
+            "action_fraction_at_positive_max_active"
+        ],
+        "action_fraction_at_negative_min_active": signed_diagnostics[
+            "action_fraction_at_negative_min_active"
+        ],
+        "positive_action_sum_active": signed_diagnostics["positive_action_sum_active"],
+        "negative_action_magnitude_sum_active": signed_diagnostics[
+            "negative_action_magnitude_sum_active"
+        ],
         "action_mean_all_slots": all_slot_diagnostics["action_mean"],
         "action_mean_active": active_diagnostics["action_mean"],
         "action_sum_active": active_diagnostics["action_sum"],
         "active_slot_count_mean": _mean_values(active_slot_counts),
         "nonzero_action_count_mean_all_slots": _mean_values(nonzero_action_counts),
         "inactive_slot_fraction_mean": _mean_values(inactive_slot_fractions),
-        "inactive_nonzero_action_fraction_all_slots": inactive_nonzero_action_fraction,
-        "transformer_action_hhi_mean": _mean_concentration(transformer_concentrations, "hhi"),
-        "transformer_action_gini_mean": _mean_concentration(transformer_concentrations, "gini"),
+        "inactive_slot_decision_count": inactive_contract["inactive_slot_decision_count"],
+        "inactive_nonzero_action_count": inactive_contract["inactive_nonzero_action_count"],
+        "inactive_nonzero_action_fraction_all_slots": inactive_contract[
+            "inactive_nonzero_action_fraction_all_slots"
+        ],
+        "transformer_positive_charge_action_hhi_mean": _mean_concentration(
+            transformer_concentrations, "hhi"
+        ),
+        "transformer_positive_charge_action_gini_mean": _mean_concentration(
+            transformer_concentrations, "gini"
+        ),
         "transformer_allocation_zero_pressure_step_fraction": _zero_pressure_step_fraction(
             transformer_concentrations
         ),
         "transformer_allocation_valid_step_count": _valid_concentration_count(
             transformer_concentrations
         ),
-        "charger_action_hhi_mean": _mean_concentration(charger_concentrations, "hhi"),
-        "charger_action_gini_mean": _mean_concentration(charger_concentrations, "gini"),
+        "charger_positive_charge_action_hhi_mean": _mean_concentration(
+            charger_concentrations, "hhi"
+        ),
+        "charger_positive_charge_action_gini_mean": _mean_concentration(
+            charger_concentrations, "gini"
+        ),
         "charger_allocation_zero_pressure_step_fraction": _zero_pressure_step_fraction(
             charger_concentrations
         ),
@@ -697,6 +1037,7 @@ def _charger_action_summary(
     charger_to_transformer_id,
     max_action,
     tolerance,
+    action_bounds,
     env,
     charger,
 ):
@@ -718,6 +1059,13 @@ def _charger_action_summary(
         max_action=max_action,
         tolerance=tolerance,
     )
+    active_values = _concatenate_or_empty(active_values_by_step)
+    signed_diagnostics = signed_action_diagnostics(
+        active_values,
+        environment_action_low=action_bounds.get("environment_action_low", UNAVAILABLE),
+        environment_action_high=action_bounds.get("environment_action_high", max_action),
+        tolerance=tolerance,
+    )
     power_summary = _charger_power_summary(env, int(charger_id))
     service_summary = _charger_service_summary(charger)
 
@@ -731,6 +1079,19 @@ def _charger_action_summary(
         "action_max_active": active_diagnostics["action_max"],
         "action_fraction_at_max_active": active_diagnostics["action_fraction_at_max"],
         "action_nonzero_fraction_active": active_diagnostics["action_nonzero_fraction"],
+        "positive_action_fraction_active": signed_diagnostics["positive_action_fraction_active"],
+        "zero_action_fraction_active": signed_diagnostics["zero_action_fraction_active"],
+        "negative_action_fraction_active": signed_diagnostics["negative_action_fraction_active"],
+        "action_fraction_at_positive_max_active": signed_diagnostics[
+            "action_fraction_at_positive_max_active"
+        ],
+        "action_fraction_at_negative_min_active": signed_diagnostics[
+            "action_fraction_at_negative_min_active"
+        ],
+        "positive_action_sum_active": signed_diagnostics["positive_action_sum_active"],
+        "negative_action_magnitude_sum_active": signed_diagnostics[
+            "negative_action_magnitude_sum_active"
+        ],
         "action_sum_all_slots": all_diagnostics["action_sum"],
         "action_mean_all_slots": all_diagnostics["action_mean"],
         "action_max_all_slots": all_diagnostics["action_max"],
@@ -741,6 +1102,9 @@ def _charger_action_summary(
         "served_ev_count": service_summary["served_ev_count"],
         "energy_charged_kwh": service_summary["energy_charged_kwh"],
         "user_satisfaction_mean": service_summary["user_satisfaction_mean"],
+        "user_satisfaction_observation_count": service_summary[
+            "user_satisfaction_observation_count"
+        ],
     }
 
 
@@ -754,6 +1118,7 @@ def _transformer_action_summary(
     charger_rows,
     max_action,
     tolerance,
+    action_bounds,
     env,
 ):
     transformer_slot_mask = _transformer_slot_mask(
@@ -785,6 +1150,13 @@ def _transformer_action_summary(
         max_action=max_action,
         tolerance=tolerance,
     )
+    active_values = _concatenate_or_empty(active_values_by_step)
+    signed_diagnostics = signed_action_diagnostics(
+        active_values,
+        environment_action_low=action_bounds.get("environment_action_low", UNAVAILABLE),
+        environment_action_high=action_bounds.get("environment_action_high", max_action),
+        tolerance=tolerance,
+    )
     overload_summary = _transformer_overload_summary(env, int(transformer_id), tolerance)
     service_summary = _transformer_service_summary(charger_ids, charger_rows)
 
@@ -798,12 +1170,29 @@ def _transformer_action_summary(
         "action_max_active": active_diagnostics["action_max"],
         "action_fraction_at_max_active": active_diagnostics["action_fraction_at_max"],
         "action_nonzero_fraction_active": active_diagnostics["action_nonzero_fraction"],
+        "positive_action_fraction_active": signed_diagnostics["positive_action_fraction_active"],
+        "zero_action_fraction_active": signed_diagnostics["zero_action_fraction_active"],
+        "negative_action_fraction_active": signed_diagnostics["negative_action_fraction_active"],
+        "action_fraction_at_positive_max_active": signed_diagnostics[
+            "action_fraction_at_positive_max_active"
+        ],
+        "action_fraction_at_negative_min_active": signed_diagnostics[
+            "action_fraction_at_negative_min_active"
+        ],
+        "positive_action_sum_active": signed_diagnostics["positive_action_sum_active"],
+        "negative_action_magnitude_sum_active": signed_diagnostics[
+            "negative_action_magnitude_sum_active"
+        ],
         "action_sum_all_slots": all_diagnostics["action_sum"],
         "action_mean_all_slots": all_diagnostics["action_mean"],
         "action_max_all_slots": all_diagnostics["action_max"],
         "action_fraction_at_max_all_slots": all_diagnostics["action_fraction_at_max"],
-        "charger_action_hhi_mean": _mean_concentration(charger_concentrations, "hhi"),
-        "charger_action_gini_mean": _mean_concentration(charger_concentrations, "gini"),
+        "charger_positive_charge_action_hhi_mean": _mean_concentration(
+            charger_concentrations, "hhi"
+        ),
+        "charger_positive_charge_action_gini_mean": _mean_concentration(
+            charger_concentrations, "gini"
+        ),
         "charger_allocation_zero_pressure_step_fraction": _zero_pressure_step_fraction(
             charger_concentrations
         ),
@@ -815,6 +1204,9 @@ def _transformer_action_summary(
         "served_ev_count": service_summary["served_ev_count"],
         "energy_charged_kwh": service_summary["energy_charged_kwh"],
         "user_satisfaction_mean": service_summary["user_satisfaction_mean"],
+        "user_satisfaction_observation_count": service_summary[
+            "user_satisfaction_observation_count"
+        ],
     }
 
 
@@ -873,14 +1265,11 @@ def _charger_service_summary(charger):
             "served_ev_count": UNAVAILABLE,
             "energy_charged_kwh": UNAVAILABLE,
             "user_satisfaction_mean": UNAVAILABLE,
+            "user_satisfaction_observation_count": 0,
         }
 
     satisfaction_source = getattr(charger, "all_user_satisfaction", None)
-    satisfaction_values = (
-        np.asarray(satisfaction_source, dtype=float)
-        if satisfaction_source is not None
-        else np.asarray([], dtype=float)
-    )
+    satisfaction_values = _finite_satisfaction_values(satisfaction_source)
     return {
         "served_ev_count": (
             int(getattr(charger, "total_evs_served"))
@@ -895,8 +1284,9 @@ def _charger_service_summary(charger):
         "user_satisfaction_mean": (
             float(np.mean(satisfaction_values))
             if satisfaction_values.size
-            else (0.0 if satisfaction_source is not None else UNAVAILABLE)
+            else UNAVAILABLE
         ),
+        "user_satisfaction_observation_count": int(satisfaction_values.size),
     }
 
 
@@ -938,8 +1328,8 @@ def _transformer_overload_summary(env, transformer_id, tolerance):
 def _transformer_service_summary(charger_ids, charger_rows):
     served_ev_count = 0
     energy_charged_kwh = 0.0
-    satisfaction_means = []
-    satisfaction_weights = []
+    satisfaction_weighted_sum = 0.0
+    satisfaction_observation_count = 0
     served_seen = False
     energy_seen = False
 
@@ -959,23 +1349,29 @@ def _transformer_service_summary(charger_ids, charger_rows):
             energy_charged_kwh += float(energy_charged_value)
 
         satisfaction_value = charger_row.get("user_satisfaction_mean", UNAVAILABLE)
-        if served > 0 and _is_available_number(satisfaction_value):
-            satisfaction_means.append(float(satisfaction_value))
-            satisfaction_weights.append(served)
+        satisfaction_count = charger_row.get("user_satisfaction_observation_count", 0)
+        if (
+            _is_available_number(satisfaction_value)
+            and _is_available_number(satisfaction_count)
+            and int(satisfaction_count) > 0
+        ):
+            satisfaction_weighted_sum += float(satisfaction_value) * int(satisfaction_count)
+            satisfaction_observation_count += int(satisfaction_count)
 
     user_satisfaction_mean = (
-        float(np.average(satisfaction_means, weights=satisfaction_weights))
-        if satisfaction_weights
-        else (0.0 if served_seen else UNAVAILABLE)
+        float(satisfaction_weighted_sum / satisfaction_observation_count)
+        if satisfaction_observation_count
+        else UNAVAILABLE
     )
     return {
         "served_ev_count": served_ev_count if served_seen else UNAVAILABLE,
         "energy_charged_kwh": energy_charged_kwh if energy_seen else UNAVAILABLE,
         "user_satisfaction_mean": user_satisfaction_mean,
+        "user_satisfaction_observation_count": satisfaction_observation_count,
     }
 
 
-def _inactive_nonzero_action_fraction(mapped_actions, active_slots_by_step, action_dim, tolerance):
+def _inactive_nonzero_action_contract(mapped_actions, active_slots_by_step, action_dim, tolerance):
     inactive_value_count = 0
     inactive_nonzero_count = 0
     for mapped_action, active_slots in zip(mapped_actions, active_slots_by_step):
@@ -986,8 +1382,14 @@ def _inactive_nonzero_action_fraction(mapped_actions, active_slots_by_step, acti
         inactive_nonzero_count += int(np.count_nonzero(np.abs(inactive_values) > float(tolerance)))
 
     if inactive_value_count == 0:
-        return 0.0
-    return float(inactive_nonzero_count / inactive_value_count)
+        fraction = UNAVAILABLE
+    else:
+        fraction = float(inactive_nonzero_count / inactive_value_count)
+    return {
+        "inactive_slot_decision_count": inactive_value_count,
+        "inactive_nonzero_action_count": inactive_nonzero_count,
+        "inactive_nonzero_action_fraction_all_slots": fraction,
+    }
 
 
 def _valid_concentration_rows(concentration_rows):
@@ -1035,10 +1437,28 @@ def _mean_values(values):
 
 
 def _float_stat(stats, stat_key):
-    value = stats.get(stat_key, 0.0) if stats else 0.0
-    if np.isscalar(value):
-        return float(value)
-    return 0.0
+    if not stats or stat_key not in stats:
+        return UNAVAILABLE
+    value = stats[stat_key]
+    if not np.isscalar(value):
+        return UNAVAILABLE
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return UNAVAILABLE
+    if not np.isfinite(numeric_value):
+        return UNAVAILABLE
+    return numeric_value
+
+
+def _finite_satisfaction_values(satisfaction_source):
+    if satisfaction_source is None:
+        return np.asarray([], dtype=float)
+    try:
+        values = np.asarray(satisfaction_source, dtype=float).reshape(-1)
+    except (TypeError, ValueError):
+        return np.asarray([], dtype=float)
+    return values[np.isfinite(values)]
 
 
 def _is_available_number(value):
@@ -1062,3 +1482,14 @@ def _mean_existing(rows, key, default=0.0):
         if np.isfinite(numeric_value):
             values.append(numeric_value)
     return float(np.mean(values)) if values else default
+
+
+def _first_existing(rows, key, default=UNAVAILABLE):
+    for row in rows:
+        if key not in row:
+            continue
+        value = row[key]
+        if value in (UNAVAILABLE, None):
+            continue
+        return value
+    return default
