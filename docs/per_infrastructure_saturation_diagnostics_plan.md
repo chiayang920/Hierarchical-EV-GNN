@@ -33,7 +33,7 @@ The canonical evaluator's historical `active_action_count_mean` is a non-zero ma
 
 Schema v2 records environment action-space support separately from observed policy outputs. `environment_action_low`, `environment_action_high`, and `environment_action_domain_support` are derived only from the actual EV2Gym environment action bounds. They describe what the environment action space accepts, not what an actor architecture is constrained to emit.
 
-The controlled ActionGNN policy can emit signed continuous commands before they are passed to EV2Gym, including negative mapped commands even when the PublicPST environment action-space metadata is non-negative. The hierarchical actor uses a non-negative output composition before mapping active EV decisions back to the flat EV2Gym action vector. PublicPST formal configs use `v2g_enabled: False`, so negative commands are policy outputs and must not be treated as realised discharge. The current ActionGNN versus hierarchical evidence therefore combines hierarchy effects with actor output-domain effects.
+The controlled ActionGNN policy can emit signed continuous commands before they are passed to EV2Gym, including negative mapped commands even when the PublicPST environment action-space metadata is non-negative. The hierarchical actor uses a non-negative output composition before mapping active EV decisions back to the flat EV2Gym action vector. PublicPST formal configs use `v2g_enabled: False`, so negative commands are policy outputs and must not be treated as realised discharge. Schema v3 records active policy-output violations of declared environment lows/highs as diagnostic observations rather than failures, while non-finite mapped actions still fail before `env.step()`. The current ActionGNN versus hierarchical evidence therefore combines hierarchy effects with actor output-domain effects.
 
 Schema v2 separates active decisions into:
 
@@ -102,6 +102,25 @@ Schema v2 hardens metric semantics before the full multiscale diagnostic run:
 - renames generic HHI/Gini fields to positive-charge HHI/Gini names
 - renames infrastructure action-at-max seed/episode macro fields to include `_macro_mean`
 
+### Version 3
+
+Schema v3 hardens runtime integrity and aggregate service semantics before the 8-task multiscale smoke:
+
+- fails before `env.step()` when a mapped action contains NaN or Inf, has the wrong dimension, or when active slots are duplicate, negative, out of range, or non-integral
+- applies the same action-contract validation at `aggregate_infrastructure_actions()` entry, so standalone aggregation cannot silently filter invalid slots
+- enforces that positive, zero, and negative active-action fractions sum to one whenever active decisions exist
+- records active policy-output counts/fractions below declared environment lows and above declared environment highs without failing on finite bound violations
+- keeps environment-bound fields as policy-output versus declared-action-space mismatch observations, not realised charge/discharge semantics
+- adds aggregate charger satisfaction fallback from `total_user_satisfaction / total_evs_served` when individual runtime satisfaction values are unavailable
+- adds `user_satisfaction_sum`, `user_satisfaction_mean`, `user_satisfaction_observation_count`, and `user_satisfaction_source` to charger diagnostics
+- adds transformer satisfaction sum/count and `user_satisfaction_mean_served_ev_weighted` by summing charger satisfaction sums and served-EV counts
+- preserves `user_satisfaction_mean` as a compatibility alias for the transformer served-EV weighted mean, but does not label it as equal to EV2Gym episode `average_user_satisfaction`
+- records realised per-charger and per-transformer `energy_discharged_kwh` from EV2Gym charger runtime totals
+- validates served-EV count, charged-energy, and discharged-energy reconciliation between episode, charger, and transformer rows when all corresponding values are available
+- defers individual satisfaction values, quantiles, and distributional fairness to a later optional evaluator-time event collector
+
+EV2Gym episode `average_user_satisfaction` is a macro mean over served-charger means. Transformer satisfaction in schema v3 is served-EV weighted from charger aggregate sums/counts, so these fields answer different questions and must not be reconciled as identical quantities.
+
 ## Real-checkpoint smoke validation
 
 A one-episode real-checkpoint smoke validation was run for:
@@ -151,11 +170,13 @@ If lower saturation is accompanied by lower service, lower energy delivery, or w
 
 ## Next steps
 
-1. Run the full diagnostic matrix against existing checkpoints.
-2. Validate all diagnostic CSV schemas and canonical reconciliation.
-3. Aggregate diagnostics to seed level.
-4. Compare hierarchical minus ActionGNN at seed level.
-5. Create a separate docs-only diagnostic results note after audit.
+1. Run the 8-task multiscale smoke against existing checkpoints.
+2. Validate schema v3 CSVs, canonical reconciliation, aggregate service reconciliation, and guard non-triggering for valid historical checkpoints.
+3. Run the full diagnostic matrix against existing checkpoints.
+4. Validate all diagnostic CSV schemas and canonical reconciliation.
+5. Aggregate diagnostics to seed level.
+6. Compare hierarchical minus ActionGNN at seed level.
+7. Create a separate docs-only diagnostic results note after audit.
 
 ## Future causal ablation
 
