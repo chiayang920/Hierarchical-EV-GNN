@@ -2377,7 +2377,11 @@ def reduce_bundle(args):
         package_root / smoke_task_package_name(TASKS[task_id], array_job_id)
         for task_id in sorted(TASKS)
     ]
-    observed_packages = sorted(package_root.glob("m3_infrastructure_diagnostic_smoke_*.tar.gz"))
+    observed_packages = sorted(
+        package_root.glob(
+            f"m3_infrastructure_diagnostic_smoke_*_job{array_job_id}_task*.tar.gz"
+        )
+    )
     validate_expected_paths(observed_packages, expected_packages, "task packages")
 
     expected_stdout_logs = [

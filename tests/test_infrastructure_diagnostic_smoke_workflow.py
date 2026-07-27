@@ -2631,6 +2631,21 @@ def test_complete_bundle_rejects_missing_duplicate_malformed_or_contradictory_ma
     assert error_text.lower() in validation.stderr.lower()
 
 
+def test_reducer_ignores_task_packages_from_other_array_jobs(tmp_path):
+    fixture = create_reducer_fixture(tmp_path)
+    other_array_job_id = "654321"
+    create_task_package(
+        fixture["package_root"] / task_package_basename(0, other_array_job_id),
+        task_id=0,
+        array_job_id=other_array_job_id,
+        source_commit_sha=fixture["source_commit_sha"],
+    )
+
+    result = run_reducer_validator(fixture)
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_reducer_rejects_missing_package_count(tmp_path):
     fixture = create_reducer_fixture(tmp_path)
     (fixture["package_root"] / task_package_basename(7, fixture["array_job_id"])).unlink()
