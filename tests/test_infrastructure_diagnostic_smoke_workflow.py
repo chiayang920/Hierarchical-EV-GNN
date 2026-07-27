@@ -289,6 +289,8 @@ def create_diagnostics(
         "active_action_decision_count": "10",
         "active_action_below_environment_low_count": "0",
         "active_action_below_environment_low_fraction": "0.0",
+        "active_action_above_environment_high_count": "0",
+        "active_action_above_environment_high_fraction": "0.0",
         "global_positive_action_fraction_active": str(signed_sum - negative_fraction),
         "global_zero_action_fraction_active": "0.0",
         "global_negative_action_fraction_active": str(negative_fraction),
@@ -311,8 +313,13 @@ def create_diagnostics(
         "algorithm": algorithm,
         "training_seed": "0",
         "n_eval_episodes": "1",
+        "active_action_decision_count_mean": "10",
         "active_action_below_environment_low_count": "0",
         "active_action_below_environment_low_fraction": "0.0",
+        "active_action_above_environment_high_count": "0",
+        "active_action_above_environment_high_fraction": "0.0",
+        "global_positive_action_fraction_active_mean": str(signed_sum - negative_fraction),
+        "global_zero_action_fraction_active_mean": "0.0",
         "global_negative_action_fraction_active_mean": str(negative_fraction),
         "inactive_nonzero_action_count_mean": str(inactive_nonzero),
         "v2g_enabled": "False",
@@ -400,7 +407,14 @@ def canonical_episode0_csv_text(scale="25cp", algorithm="actiongnn"):
     return output.getvalue()
 
 
-def reconciliation_csv_text(failed=False):
+def reconciliation_csv_text(
+    failed=False,
+    missing_field=None,
+    duplicate_field=None,
+    extra_field=None,
+    wrong_type_field=None,
+    pass_value_override=None,
+):
     fieldnames = [
         "field",
         "comparison_type",
@@ -465,6 +479,26 @@ def reconciliation_csv_text(failed=False):
     if failed:
         rows[-1]["pass"] = "False"
         rows[-1]["absolute_difference"] = "2"
+    if missing_field:
+        rows = [row for row in rows if row["field"] != missing_field]
+    if duplicate_field:
+        duplicate = next(row for row in rows if row["field"] == duplicate_field).copy()
+        rows.append(duplicate)
+    if extra_field:
+        extra = rows[-1].copy()
+        extra["field"] = extra_field
+        rows.append(extra)
+    if wrong_type_field:
+        for row in rows:
+            if row["field"] == wrong_type_field:
+                row["comparison_type"] = "floating" if row["comparison_type"] == "exact" else "exact"
+                break
+    if pass_value_override:
+        field, pass_value = pass_value_override
+        for row in rows:
+            if row["field"] == field:
+                row["pass"] = pass_value
+                break
     output = io.StringIO()
     writer = csv.DictWriter(output, fieldnames=fieldnames)
     writer.writeheader()
@@ -477,8 +511,11 @@ def create_task_package(
     include_checkpoint=False,
     task_validation=None,
     failed_reconciliation=False,
+    reconciliation_kwargs=None,
+    source_resolution=None,
     manifest_omit=(),
     file_list_omit=(),
+    omit_members=(),
 ):
     fixture_root = path.parent / f"{path.stem}_fixture"
     diagnostic_dir = create_diagnostics(fixture_root)
@@ -500,6 +537,22 @@ def create_task_package(
         if task_validation is None
         else task_validation
     )
+    source_resolution = (
+        {
+            "source_mode": "individual_task_package",
+            "package_path": "/evidence/m3_controlled_multiscale_formal_25cp_actiongnn_seed0_job58513929_task0.tar.gz",
+            "expected_package_name": package_basename(),
+        }
+        if source_resolution is None
+        else source_resolution
+    )
+    source_package_env = (
+        f"source_mode={source_resolution.get('source_mode', '')}\n"
+        f"package_path={source_resolution.get('package_path', '')}\n"
+        f"expected_package_name={source_resolution.get('expected_package_name', '')}\n"
+    )
+    if source_resolution.get("bundle_member"):
+        source_package_env += f"bundle_member={source_resolution['bundle_member']}\n"
     members = {
         "stdout.log": "",
         "stderr.log": "",
@@ -511,10 +564,14 @@ def create_task_package(
         "canonical/canonical_episode0.csv": canonical_episode0_csv_text(),
         "config/formal_config.yaml": formal_config_text(),
         "validation/task_validation.json": json.dumps(task_validation, sort_keys=True) + "\n",
-        "validation/canonical_reconciliation.csv": reconciliation_csv_text(failed=failed_reconciliation),
+        "validation/canonical_reconciliation.csv": reconciliation_csv_text(
+            failed=failed_reconciliation,
+            **(reconciliation_kwargs or {}),
+        ),
         "runtime_metadata/source_commit_sha.txt": BASE_SHA + "\n",
         "runtime_metadata/source_formal_job.env": "formal_job_id=58513929\nformal_task_id=0\n",
-        "runtime_metadata/source_package.env": "source_mode=individual_task_package\n",
+        "runtime_metadata/source_package.env": source_package_env,
+        "runtime_metadata/source_package_resolution.json": json.dumps(source_resolution, sort_keys=True) + "\n",
         "runtime_metadata/source_package.sha256": "0" * 64 + "  package.tar.gz\n",
         "runtime_metadata/checkpoint_member_hashes.sha256": "0" * 64 + "  train/model.best_actor\n",
         "runtime_metadata/original_source_manifest.sha256": "0" * 64 + "  source.py\n",
@@ -525,6 +582,8 @@ def create_task_package(
     }
     if include_checkpoint:
         members["checkpoint_staging/model.best_actor"] = "leak"
+    for name in omit_members:
+        members.pop(name, None)
     manifest = ""
     for name, payload in sorted(members.items()):
         if name in set(manifest_omit):
@@ -548,7 +607,7 @@ def create_task_package(
 
 def make_fake_git(tmp_path, head_sha=DYNAMIC_SHA, branch="main", dirty=False):
     bin_dir = tmp_path / "fake-bin"
-    bin_dir.mkdir()
+    bin_dir.mkdir(exist_ok=True)
     fake_git = bin_dir / "git"
     fake_git.write_text(
         f"""#!{sys.executable}
@@ -1383,6 +1442,212 @@ def test_diagnostic_validation_rejects_matrix_job_id_mismatch_when_supplied(tmp_
     assert "matrix_job_id" in result.stderr
 
 
+@pytest.mark.parametrize("csv_name", ["charger_diagnostics.csv", "transformer_diagnostics.csv"])
+@pytest.mark.parametrize(
+    "field,bad_value",
+    [
+        ("scale", "wrong-scale"),
+        ("algorithm", "wrong-algorithm"),
+        ("training_seed", "1"),
+        ("matrix_job_id", "wrong-job"),
+        ("episode_index", "1"),
+        ("episode_seed", "1"),
+    ],
+)
+def test_diagnostic_validation_rejects_infrastructure_row_identity_corruption(
+    tmp_path, csv_name, field, bad_value
+):
+    diagnostic_dir = create_diagnostics(tmp_path)
+    mutate_csv(diagnostic_dir / csv_name, updates={field: bad_value})
+
+    result = run_validator(
+        "validate-diagnostics",
+        "--task-id",
+        0,
+        "--diagnostic-dir",
+        diagnostic_dir,
+        "--validation-dir",
+        tmp_path / "validation",
+        "--matrix-job-id",
+        "999",
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert field in result.stderr
+
+
+@pytest.mark.parametrize("csv_name", ["episode_diagnostics.csv", "seed_summary_diagnostics.csv"])
+@pytest.mark.parametrize(
+    "field,bad_value",
+    [
+        ("scale", "wrong-scale"),
+        ("algorithm", "wrong-algorithm"),
+        ("training_seed", "1"),
+        ("matrix_job_id", "wrong-job"),
+    ],
+)
+def test_diagnostic_validation_rejects_episode_and_seed_identity_corruption(
+    tmp_path, csv_name, field, bad_value
+):
+    diagnostic_dir = create_diagnostics(tmp_path)
+    mutate_csv(diagnostic_dir / csv_name, updates={field: bad_value})
+
+    result = run_validator(
+        "validate-diagnostics",
+        "--task-id",
+        0,
+        "--diagnostic-dir",
+        diagnostic_dir,
+        "--validation-dir",
+        tmp_path / "validation",
+        "--matrix-job-id",
+        "999",
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert field in result.stderr
+
+
+@pytest.mark.parametrize(
+    "updates,error_text",
+    [
+        ({"active_action_decision_count": "nan"}, "active_action_decision_count"),
+        ({"active_action_below_environment_low_count": "nan"}, "below_environment_low_count"),
+        ({"active_action_below_environment_low_fraction": "inf"}, "below_environment_low_fraction"),
+        ({"active_action_below_environment_low_count": "11"}, "active_action_decision_count"),
+        (
+            {
+                "active_action_below_environment_low_count": "1",
+                "active_action_below_environment_low_fraction": "0.2",
+            },
+            "below_environment_low_fraction",
+        ),
+        ({"active_action_above_environment_high_count": "nan"}, "above_environment_high_count"),
+        ({"active_action_above_environment_high_fraction": "inf"}, "above_environment_high_fraction"),
+    ],
+)
+def test_diagnostic_validation_rejects_episode_environment_bound_metric_failures(
+    tmp_path, updates, error_text
+):
+    diagnostic_dir = create_diagnostics(tmp_path)
+    mutate_csv(diagnostic_dir / "episode_diagnostics.csv", updates=updates)
+
+    result = run_validator(
+        "validate-diagnostics",
+        "--task-id",
+        0,
+        "--diagnostic-dir",
+        diagnostic_dir,
+        "--validation-dir",
+        tmp_path / "validation",
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert error_text in result.stderr
+
+
+def test_diagnostic_validation_accepts_blank_environment_fractions_when_active_count_zero(tmp_path):
+    diagnostic_dir = create_diagnostics(tmp_path)
+    mutate_csv(
+        diagnostic_dir / "episode_diagnostics.csv",
+        updates={
+            "active_action_decision_count": "0",
+            "active_action_below_environment_low_count": "0",
+            "active_action_below_environment_low_fraction": "",
+            "active_action_above_environment_high_count": "0",
+            "active_action_above_environment_high_fraction": "",
+        },
+    )
+    mutate_csv(
+        diagnostic_dir / "seed_summary_diagnostics.csv",
+        updates={
+            "active_action_decision_count_mean": "0",
+            "active_action_below_environment_low_count": "0",
+            "active_action_below_environment_low_fraction": "",
+            "active_action_above_environment_high_count": "0",
+            "active_action_above_environment_high_fraction": "",
+        },
+    )
+
+    run_validator(
+        "validate-diagnostics",
+        "--task-id",
+        0,
+        "--diagnostic-dir",
+        diagnostic_dir,
+        "--validation-dir",
+        tmp_path / "validation",
+    )
+
+
+@pytest.mark.parametrize(
+    "updates,error_text",
+    [
+        ({"active_action_below_environment_low_count": "nan"}, "below_environment_low_count"),
+        ({"active_action_below_environment_low_fraction": "inf"}, "below_environment_low_fraction"),
+        ({"global_negative_action_fraction_active_mean": "nan"}, "negative_action_fraction"),
+        (
+            {
+                "global_positive_action_fraction_active_mean": "0.7",
+                "global_zero_action_fraction_active_mean": "0.1",
+                "global_negative_action_fraction_active_mean": "0.1",
+            },
+            "signed",
+        ),
+        ({"active_action_decision_count_mean": "9"}, "seed summary"),
+        ({"global_positive_action_fraction_active_mean": "0.9"}, "seed summary"),
+    ],
+)
+def test_diagnostic_validation_rejects_seed_summary_action_domain_failures(
+    tmp_path, updates, error_text
+):
+    diagnostic_dir = create_diagnostics(tmp_path)
+    mutate_csv(diagnostic_dir / "seed_summary_diagnostics.csv", updates=updates)
+
+    result = run_validator(
+        "validate-diagnostics",
+        "--task-id",
+        0,
+        "--diagnostic-dir",
+        diagnostic_dir,
+        "--validation-dir",
+        tmp_path / "validation",
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert error_text.lower() in result.stderr.lower()
+
+
+def test_diagnostic_validation_rejects_hierarchical_below_low_fraction_without_count(tmp_path):
+    diagnostic_dir = create_diagnostics(tmp_path, scale="25cp", algorithm="hierarchical")
+    mutate_csv(
+        diagnostic_dir / "episode_diagnostics.csv",
+        updates={"active_action_below_environment_low_fraction": "0.1"},
+    )
+    mutate_csv(
+        diagnostic_dir / "seed_summary_diagnostics.csv",
+        updates={"active_action_below_environment_low_fraction": "0.1"},
+    )
+
+    result = run_validator(
+        "validate-diagnostics",
+        "--task-id",
+        1,
+        "--diagnostic-dir",
+        diagnostic_dir,
+        "--validation-dir",
+        tmp_path / "validation",
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "below" in result.stderr.lower()
+
+
 def test_canonical_reconciliation_accepts_values_inside_tolerance(tmp_path):
     diagnostic_dir = create_diagnostics(tmp_path)
     canonical_path = tmp_path / "canonical.csv"
@@ -1558,6 +1823,93 @@ def test_task_package_validation_rejects_failed_canonical_row(tmp_path):
     assert "canonical" in result.stderr.lower()
 
 
+@pytest.mark.parametrize(
+    "reconciliation_kwargs,error_text",
+    [
+        ({"missing_field": "episode_reward"}, "missing"),
+        ({"duplicate_field": "episode_reward"}, "duplicate"),
+        ({"extra_field": "unexpected_metric"}, "unexpected"),
+        ({"wrong_type_field": "algorithm"}, "comparison_type"),
+        ({"pass_value_override": ("episode_reward", "true")}, "pass"),
+    ],
+)
+def test_task_package_validation_rejects_noncanonical_reconciliation_row_set(
+    tmp_path, reconciliation_kwargs, error_text
+):
+    task_package = create_task_package(
+        tmp_path / "task.tar.gz",
+        reconciliation_kwargs=reconciliation_kwargs,
+    )
+
+    result = run_validator(
+        "validate-task-package",
+        "--task-id",
+        0,
+        "--package",
+        task_package,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert error_text in result.stderr.lower()
+
+
+def test_task_package_validation_requires_source_package_resolution_json(tmp_path):
+    task_package = create_task_package(
+        tmp_path / "task.tar.gz",
+        omit_members=["runtime_metadata/source_package_resolution.json"],
+    )
+
+    result = run_validator(
+        "validate-task-package",
+        "--task-id",
+        0,
+        "--package",
+        task_package,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "source_package_resolution.json" in result.stderr
+
+
+def test_task_package_validation_rejects_invalid_source_package_mode(tmp_path):
+    task_package = create_task_package(
+        tmp_path / "task.tar.gz",
+        source_resolution={
+            "source_mode": "unknown",
+            "package_path": "/evidence/package.tar.gz",
+            "expected_package_name": package_basename(),
+        },
+    )
+
+    result = run_validator(
+        "validate-task-package",
+        "--task-id",
+        0,
+        "--package",
+        task_package,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "source_mode" in result.stderr
+
+
+def test_task_package_validation_preserves_nested_bundle_source_provenance(tmp_path):
+    task_package = create_task_package(
+        tmp_path / "task.tar.gz",
+        source_resolution={
+            "source_mode": "complete_bundle_nested_task_package",
+            "package_path": "/scratch/job/package.tar.gz",
+            "expected_package_name": package_basename(),
+            "bundle_member": "complete/task_packages/" + package_basename(),
+        },
+    )
+
+    run_validator("validate-task-package", "--task-id", 0, "--package", task_package)
+
+
 def test_task_package_validation_rejects_incomplete_manifest_coverage(tmp_path):
     task_package = create_task_package(
         tmp_path / "task.tar.gz",
@@ -1675,6 +2027,16 @@ def test_source_bundle_real_mode_writes_basename_checksum_and_dynamic_head(tmp_p
         source_member = f"EV-GNN-infrastructure-diagnostic-smoke-{DYNAMIC_SHA}/SOURCE_COMMIT_SHA.txt"
         source_sha = archive.extractfile(source_member).read().decode("utf-8").strip()
     assert source_sha == DYNAMIC_SHA
+
+
+def test_source_bundle_real_mode_refuses_existing_archive_outputs(tmp_path):
+    first = run_source_bundle(tmp_path)
+    assert first.returncode == 0, first.stderr
+
+    second = run_source_bundle(tmp_path)
+
+    assert second.returncode != 0
+    assert "already exists" in second.stderr
 
 
 def test_source_bundle_real_mode_rejects_explicit_head_mismatch(tmp_path):

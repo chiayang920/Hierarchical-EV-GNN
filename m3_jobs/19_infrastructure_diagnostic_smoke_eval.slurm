@@ -324,16 +324,46 @@ python "${REPO_ROOT}/scripts/validate_infrastructure_diagnostic_smoke.py" \
   --individual-package-root "${FORMAL_PACKAGE_ROOT}" \
   --complete-bundle "${FORMAL_COMPLETE_BUNDLE}" \
   --staging-dir "${FORMAL_STAGING_DIR}" \
-  > "${METADATA_DIR}/source_package.json"
+  > "${METADATA_DIR}/source_package_resolution.json"
 
 FORMAL_PACKAGE_PATH="$(
-  python - "${METADATA_DIR}/source_package.json" <<'PY'
+  python - "${METADATA_DIR}/source_package_resolution.json" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 print(payload["package_path"])
+PY
+)"
+SOURCE_MODE="$(
+  python - "${METADATA_DIR}/source_package_resolution.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+print(payload["source_mode"])
+PY
+)"
+EXPECTED_PACKAGE_NAME="$(
+  python - "${METADATA_DIR}/source_package_resolution.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+print(payload["expected_package_name"])
+PY
+)"
+BUNDLE_MEMBER="$(
+  python - "${METADATA_DIR}/source_package_resolution.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+print(payload.get("bundle_member", ""))
 PY
 )"
 
@@ -346,6 +376,12 @@ PY
 } > "${METADATA_DIR}/source_formal_job.env"
 
 {
+  echo "source_mode=${SOURCE_MODE}"
+  echo "package_path=${FORMAL_PACKAGE_PATH}"
+  echo "expected_package_name=${EXPECTED_PACKAGE_NAME}"
+  if [[ -n "${BUNDLE_MEMBER}" ]]; then
+    echo "bundle_member=${BUNDLE_MEMBER}"
+  fi
   echo "formal_package_path=${FORMAL_PACKAGE_PATH}"
   echo "formal_package_root=${FORMAL_PACKAGE_ROOT}"
   echo "formal_complete_bundle=${FORMAL_COMPLETE_BUNDLE}"

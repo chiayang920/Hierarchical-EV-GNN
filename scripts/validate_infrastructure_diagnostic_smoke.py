@@ -140,6 +140,9 @@ EPISODE_REQUIRED_COLUMNS = {
     "v2g_enabled",
     "active_action_decision_count",
     "active_action_below_environment_low_count",
+    "active_action_below_environment_low_fraction",
+    "active_action_above_environment_high_count",
+    "active_action_above_environment_high_fraction",
     "global_positive_action_fraction_active",
     "global_zero_action_fraction_active",
     "global_negative_action_fraction_active",
@@ -165,7 +168,13 @@ SEED_SUMMARY_REQUIRED_COLUMNS = {
     "algorithm",
     "training_seed",
     "n_eval_episodes",
+    "active_action_decision_count_mean",
     "active_action_below_environment_low_count",
+    "active_action_below_environment_low_fraction",
+    "active_action_above_environment_high_count",
+    "active_action_above_environment_high_fraction",
+    "global_positive_action_fraction_active_mean",
+    "global_zero_action_fraction_active_mean",
     "global_negative_action_fraction_active_mean",
     "inactive_nonzero_action_count_mean",
     "v2g_enabled",
@@ -574,6 +583,177 @@ def require_unique_nonnegative_ids(rows, field):
     return seen
 
 
+def validate_unit_fraction(value, field):
+    fraction = numeric(value, field)
+    if fraction < 0.0 or fraction > 1.0:
+        raise ValidationError(f"{field} must be in [0, 1]: {value!r}")
+    return fraction
+
+
+def validate_row_identity(mapping, rows, label, matrix_job_id=None, require_episode_identity=False):
+    expected_pairs = [
+        ("scale", mapping["scale"]),
+        ("algorithm", mapping["algorithm"]),
+        ("training_seed", "0"),
+    ]
+    for index, row in enumerate(rows):
+        for field, expected in expected_pairs:
+            if str(row.get(field)) != str(expected):
+                raise ValidationError(
+                    f"{label} row {index} identity mismatch for {field}: "
+                    f"{row.get(field)} != {expected}"
+                )
+        if matrix_job_id is not None:
+            if str(row.get("matrix_job_id")) != str(matrix_job_id):
+                raise ValidationError(
+                    f"{label} row {index} identity mismatch for matrix_job_id: "
+                    f"{row.get('matrix_job_id')} != {matrix_job_id}"
+                )
+        if require_episode_identity:
+            if integer_value(row.get("episode_index"), "episode_index") != 0:
+                raise ValidationError(f"{label} row {index} identity mismatch for episode_index")
+            if integer_value(row.get("episode_seed"), "episode_seed") != int(mapping["episode_seed"]):
+                raise ValidationError(f"{label} row {index} identity mismatch for episode_seed")
+
+
+def validate_environment_count_fraction(row, label, active_count, count_field, fraction_field):
+    count = nonnegative_integer(row.get(count_field), count_field)
+    if count > active_count:
+        raise ValidationError(
+            f"{label} {count_field}={count} exceeds active_action_decision_count={active_count}"
+        )
+
+    raw_fraction = row.get(fraction_field)
+    if active_count == 0:
+        if count != 0:
+            raise ValidationError(
+                f"{label} {count_field} must equal zero when active_action_decision_count is zero"
+            )
+        if raw_fraction in ("", None):
+            return count, None
+        fraction = validate_unit_fraction(raw_fraction, fraction_field)
+        if abs(fraction) > 1e-12:
+            raise ValidationError(
+                f"{label} {fraction_field} must be blank or zero when active_action_decision_count is zero"
+            )
+        return count, fraction
+
+    fraction = validate_unit_fraction(raw_fraction, fraction_field)
+    assert_close(
+        f"{label} {fraction_field}",
+        fraction,
+        count / active_count,
+        absolute_tolerance=1e-12,
+        relative_tolerance=0.0,
+    )
+    return count, fraction
+
+
+def validate_episode_environment_bounds(mapping, episode_row):
+    active_count = nonnegative_integer(
+        episode_row.get("active_action_decision_count"),
+        "active_action_decision_count",
+    )
+    below_count, below_fraction = validate_environment_count_fraction(
+        episode_row,
+        "episode",
+        active_count,
+        "active_action_below_environment_low_count",
+        "active_action_below_environment_low_fraction",
+    )
+    validate_environment_count_fraction(
+        episode_row,
+        "episode",
+        active_count,
+        "active_action_above_environment_high_count",
+        "active_action_above_environment_high_fraction",
+    )
+    if mapping["algorithm"] == "hierarchical":
+        if below_count != 0:
+            raise ValidationError("hierarchical below-environment-low count must equal zero")
+        if below_fraction is None or abs(below_fraction) > 1e-12:
+            raise ValidationError("hierarchical below-environment-low fraction must equal zero")
+
+
+def validate_seed_summary_action_domain(episode_row, seed_row):
+    episode_active_count = nonnegative_integer(
+        episode_row.get("active_action_decision_count"),
+        "active_action_decision_count",
+    )
+    active_mean = numeric(
+        seed_row.get("active_action_decision_count_mean"),
+        "active_action_decision_count_mean",
+    )
+    if active_mean < 0:
+        raise ValidationError("active_action_decision_count_mean must be non-negative")
+    assert_close(
+        "seed summary active_action_decision_count_mean",
+        active_mean,
+        episode_active_count,
+        absolute_tolerance=1e-12,
+        relative_tolerance=0.0,
+    )
+
+    for field in [
+        "active_action_below_environment_low_count",
+        "active_action_above_environment_high_count",
+    ]:
+        seed_count = nonnegative_integer(seed_row.get(field), field)
+        episode_count = nonnegative_integer(episode_row.get(field), field)
+        if seed_count != episode_count:
+            raise ValidationError(
+                f"seed summary {field} disagrees with episode value: {seed_count} != {episode_count}"
+            )
+
+    for field in [
+        "active_action_below_environment_low_fraction",
+        "active_action_above_environment_high_fraction",
+    ]:
+        episode_raw = episode_row.get(field)
+        seed_raw = seed_row.get(field)
+        if episode_raw in ("", None):
+            if seed_raw in ("", None):
+                continue
+            seed_fraction = validate_unit_fraction(seed_raw, field)
+            if abs(seed_fraction) > 1e-12:
+                raise ValidationError(
+                    f"seed summary {field} must be blank or zero when episode value is blank"
+                )
+            continue
+        episode_fraction = validate_unit_fraction(episode_raw, field)
+        seed_fraction = validate_unit_fraction(seed_raw, field)
+        assert_close(
+            f"seed summary {field}",
+            seed_fraction,
+            episode_fraction,
+            absolute_tolerance=1e-12,
+            relative_tolerance=0.0,
+        )
+
+    signed_pairs = [
+        ("global_positive_action_fraction_active_mean", "global_positive_action_fraction_active"),
+        ("global_zero_action_fraction_active_mean", "global_zero_action_fraction_active"),
+        ("global_negative_action_fraction_active_mean", "global_negative_action_fraction_active"),
+    ]
+    seed_fractions = []
+    fraction_pairs = []
+    for seed_field, episode_field in signed_pairs:
+        seed_fraction = validate_unit_fraction(seed_row.get(seed_field), seed_field)
+        episode_fraction = validate_unit_fraction(episode_row.get(episode_field), episode_field)
+        seed_fractions.append(seed_fraction)
+        fraction_pairs.append((seed_field, seed_fraction, episode_fraction))
+    if abs(sum(seed_fractions) - 1.0) > 1e-6:
+        raise ValidationError("seed summary signed action fractions must sum to one")
+    for seed_field, seed_fraction, episode_fraction in fraction_pairs:
+        assert_close(
+            f"seed summary {seed_field}",
+            seed_fraction,
+            episode_fraction,
+            absolute_tolerance=1e-12,
+            relative_tolerance=0.0,
+        )
+
+
 def validate_signed_rows(rows, label):
     for index, row in enumerate(rows):
         active_field = "active_action_decision_count" if "active_action_decision_count" in row else "n_active_ev_decisions"
@@ -618,6 +798,14 @@ def validate_no_hierarchical_negative(mapping, episode_rows, seed_rows, charger_
         for row in rows:
             if nonnegative_integer(row.get(field), field) != 0:
                 raise ValidationError(f"hierarchical below-environment-low count is non-zero: {field}")
+    for field, rows in [
+        ("active_action_below_environment_low_fraction", episode_rows),
+        ("active_action_below_environment_low_fraction", seed_rows),
+    ]:
+        for row in rows:
+            value = optional_numeric(row.get(field, ""), field)
+            if value is None or abs(value) > 1e-12:
+                raise ValidationError(f"hierarchical below-environment-low fraction is non-zero: {field}")
 
 
 def validate_diagnostic_identity(mapping, episode_row, seed_row):
@@ -776,21 +964,28 @@ def validate_diagnostics(args):
     validate_schema(charger_rows, "charger")
     validate_schema(transformer_rows, "transformer")
     validate_v2g_false(all_rows)
+    matrix_job_id = getattr(args, "matrix_job_id", None)
+    validate_row_identity(mapping, episode_rows, "episode", matrix_job_id=matrix_job_id)
+    validate_row_identity(mapping, seed_rows, "seed summary", matrix_job_id=matrix_job_id)
+    validate_row_identity(
+        mapping,
+        charger_rows,
+        "charger",
+        matrix_job_id=matrix_job_id,
+        require_episode_identity=True,
+    )
+    validate_row_identity(
+        mapping,
+        transformer_rows,
+        "transformer",
+        matrix_job_id=matrix_job_id,
+        require_episode_identity=True,
+    )
     validate_diagnostic_identity(mapping, episode_rows[0], seed_rows[0])
     if integer_value(seed_rows[0].get("n_eval_episodes"), "n_eval_episodes") != 1:
         raise ValidationError("seed summary n_eval_episodes must equal 1")
-    matrix_job_id = getattr(args, "matrix_job_id", None)
-    if matrix_job_id:
-        for index, row in enumerate(all_rows):
-            if str(row.get("matrix_job_id")) != str(matrix_job_id):
-                raise ValidationError(
-                    f"matrix_job_id mismatch for row {index}: {row.get('matrix_job_id')} != {matrix_job_id}"
-                )
-    for row in charger_rows + transformer_rows:
-        if integer_value(row.get("episode_index"), "episode_index") != 0:
-            raise ValidationError("infrastructure diagnostic episode_index must be 0")
-        if integer_value(row.get("episode_seed"), "episode_seed") != int(mapping["episode_seed"]):
-            raise ValidationError("infrastructure diagnostic episode_seed mismatch")
+    validate_episode_environment_bounds(mapping, episode_rows[0])
+    validate_seed_summary_action_domain(episode_rows[0], seed_rows[0])
     validate_signed_rows(episode_rows, "episode")
     validate_signed_rows(charger_rows, "charger")
     validate_signed_rows(transformer_rows, "transformer")
@@ -1124,11 +1319,90 @@ def validate_packaged_reconciliation(extract_root):
         "pass",
     }
     require_columns(fieldnames, required, "canonical reconciliation")
-    if not rows:
-        raise ValidationError("canonical_reconciliation.csv must contain reconciliation rows")
-    failed = [row.get("field", "<unknown>") for row in rows if row.get("pass") != "True"]
-    if failed:
-        raise ValidationError(f"packaged canonical reconciliation contains failing row(s): {', '.join(failed)}")
+    expected_types = {
+        field: "exact"
+        for field, _, _, _ in EXACT_RECONCILIATION
+    }
+    expected_types.update(
+        {
+            diagnostic_field: "floating"
+            for diagnostic_field, _, _, _ in FLOAT_RECONCILIATION
+        }
+    )
+    seen = set()
+    for index, row in enumerate(rows):
+        field = row.get("field")
+        if field not in expected_types:
+            raise ValidationError(f"canonical reconciliation contains unexpected field: {field}")
+        if field in seen:
+            raise ValidationError(f"canonical reconciliation contains duplicate field: {field}")
+        seen.add(field)
+        expected_type = expected_types[field]
+        if row.get("comparison_type") != expected_type:
+            raise ValidationError(
+                f"canonical reconciliation comparison_type mismatch for {field}: "
+                f"{row.get('comparison_type')} != {expected_type}"
+            )
+        if row.get("pass") != "True":
+            raise ValidationError(
+                f"canonical reconciliation pass value must be exactly True for {field}: {row.get('pass')}"
+            )
+    missing = sorted(set(expected_types) - seen)
+    if missing:
+        raise ValidationError(
+            f"canonical reconciliation missing required field(s): {', '.join(missing)}"
+        )
+
+
+def parse_env_metadata(path):
+    values = {}
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if "=" not in stripped:
+            raise ValidationError(f"invalid env metadata line in {path}: {line!r}")
+        key, value = stripped.split("=", 1)
+        values[key] = value
+    return values
+
+
+def validate_source_package_provenance(extract_root, mapping):
+    json_path = Path(extract_root) / "runtime_metadata/source_package_resolution.json"
+    env_path = Path(extract_root) / "runtime_metadata/source_package.env"
+    try:
+        resolution = json.loads(json_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValidationError("source_package_resolution.json is not valid JSON") from exc
+    if not isinstance(resolution, dict):
+        raise ValidationError("source_package_resolution.json must contain a JSON object")
+
+    source_mode = resolution.get("source_mode")
+    allowed_modes = {"individual_task_package", "complete_bundle_nested_task_package"}
+    if source_mode not in allowed_modes:
+        raise ValidationError(f"source_package_resolution.json source_mode is invalid: {source_mode}")
+    for field in ["package_path", "expected_package_name"]:
+        if not resolution.get(field):
+            raise ValidationError(f"source_package_resolution.json missing required field: {field}")
+    expected_name = formal_package_name(mapping)
+    if resolution.get("expected_package_name") != expected_name:
+        raise ValidationError(
+            "source_package_resolution.json expected_package_name mismatch: "
+            f"{resolution.get('expected_package_name')} != {expected_name}"
+        )
+    if source_mode == "complete_bundle_nested_task_package" and not resolution.get("bundle_member"):
+        raise ValidationError("source_package_resolution.json missing required field: bundle_member")
+
+    env_values = parse_env_metadata(env_path)
+    for field in ["source_mode", "package_path", "expected_package_name"]:
+        if env_values.get(field) != str(resolution.get(field)):
+            raise ValidationError(
+                f"source_package.env provenance mismatch for {field}: "
+                f"{env_values.get(field)} != {resolution.get(field)}"
+            )
+    if source_mode == "complete_bundle_nested_task_package":
+        if env_values.get("bundle_member") != str(resolution.get("bundle_member")):
+            raise ValidationError("source_package.env provenance mismatch for bundle_member")
 
 
 def validate_task_package(args):
@@ -1148,6 +1422,7 @@ def validate_task_package(args):
         "runtime_metadata/source_commit_sha.txt",
         "runtime_metadata/source_formal_job.env",
         "runtime_metadata/source_package.env",
+        "runtime_metadata/source_package_resolution.json",
         "runtime_metadata/source_package.sha256",
         "runtime_metadata/checkpoint_member_hashes.sha256",
         "runtime_metadata/original_source_manifest.sha256",
@@ -1187,6 +1462,7 @@ def validate_task_package(args):
                 f"listed={listed}, members={member_names}"
             )
         task_validation = load_task_validation(extract_root, mapping)
+        validate_source_package_provenance(extract_root, mapping)
         validate_packaged_reconciliation(extract_root)
         matrix_job_id = task_validation.get("matrix_job_id")
         revalidation_dir = Path(tmp_dir) / "revalidation"

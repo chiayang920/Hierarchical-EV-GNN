@@ -62,6 +62,14 @@ write_sha256_file() {
   die "sha256sum or shasum is required to write ${output_path}"
 }
 
+append_source_commit_member() {
+  if tar --no-xattrs -tf "${RAW_TAR}" >/dev/null 2>&1; then
+    tar --no-xattrs -rf "${RAW_TAR}" -C "${TMP_DIR}" "${TOP_LEVEL}/SOURCE_COMMIT_SHA.txt"
+    return
+  fi
+  tar -rf "${RAW_TAR}" -C "${TMP_DIR}" "${TOP_LEVEL}/SOURCE_COMMIT_SHA.txt"
+}
+
 is_prohibited_path() {
   local path="$1"
   case "${path}" in
@@ -140,6 +148,8 @@ set_archive_paths
 git diff-index --quiet HEAD -- || die "tracked worktree is dirty"
 
 mkdir -p "${OUTPUT_ROOT}"
+[[ ! -e "${ARCHIVE_PATH}" ]] || die "target source archive already exists: ${ARCHIVE_PATH}"
+[[ ! -e "${SHA_PATH}" ]] || die "target source archive checksum already exists: ${SHA_PATH}"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/evgnn_source_bundle.XXXXXX")"
 RAW_TAR="${TMP_DIR}/${TOP_LEVEL}.tar"
 trap 'rm -rf "${TMP_DIR}"' EXIT
@@ -148,7 +158,7 @@ mkdir -p "${TMP_DIR}/${TOP_LEVEL}"
 printf "%s\n" "${RECORDED_HEAD_SHA}" > "${TMP_DIR}/${TOP_LEVEL}/SOURCE_COMMIT_SHA.txt"
 
 git archive --format=tar --prefix="${TOP_LEVEL}/" HEAD -- "${ALLOWLIST[@]}" > "${RAW_TAR}"
-tar -rf "${RAW_TAR}" -C "${TMP_DIR}" "${TOP_LEVEL}/SOURCE_COMMIT_SHA.txt"
+append_source_commit_member
 gzip -c "${RAW_TAR}" > "${ARCHIVE_PATH}"
 tar -tzf "${ARCHIVE_PATH}" >/dev/null
 
