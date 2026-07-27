@@ -3,7 +3,7 @@ from collections import defaultdict
 import numpy as np
 
 
-DIAGNOSTIC_SCHEMA_VERSION = "2"
+DIAGNOSTIC_SCHEMA_VERSION = "3"
 UNAVAILABLE = ""
 
 EPISODE_DIAGNOSTIC_COLUMNS = [
@@ -33,6 +33,10 @@ EPISODE_DIAGNOSTIC_COLUMNS = [
     "global_action_fraction_at_max_active",
     "global_action_nonzero_fraction_active",
     "active_action_decision_count",
+    "active_action_below_environment_low_count",
+    "active_action_below_environment_low_fraction",
+    "active_action_above_environment_high_count",
+    "active_action_above_environment_high_fraction",
     "global_positive_action_fraction_active",
     "global_zero_action_fraction_active",
     "global_negative_action_fraction_active",
@@ -111,8 +115,12 @@ TRANSFORMER_DIAGNOSTIC_COLUMNS = [
     "overload_frequency_fraction",
     "served_ev_count",
     "energy_charged_kwh",
+    "energy_discharged_kwh",
+    "user_satisfaction_sum",
     "user_satisfaction_mean",
+    "user_satisfaction_mean_served_ev_weighted",
     "user_satisfaction_observation_count",
+    "user_satisfaction_source",
     "diagnostic_schema_version",
 ]
 
@@ -149,8 +157,11 @@ CHARGER_DIAGNOSTIC_COLUMNS = [
     "cs_power_max_kw",
     "served_ev_count",
     "energy_charged_kwh",
+    "energy_discharged_kwh",
+    "user_satisfaction_sum",
     "user_satisfaction_mean",
     "user_satisfaction_observation_count",
+    "user_satisfaction_source",
     "diagnostic_schema_version",
 ]
 
@@ -164,6 +175,10 @@ SEED_SUMMARY_DIAGNOSTIC_COLUMNS = [
     "global_action_fraction_at_max_all_slots_mean",
     "global_action_nonzero_fraction_active_mean",
     "active_action_decision_count_mean",
+    "active_action_below_environment_low_count",
+    "active_action_below_environment_low_fraction",
+    "active_action_above_environment_high_count",
+    "active_action_above_environment_high_fraction",
     "global_positive_action_fraction_active_mean",
     "global_zero_action_fraction_active_mean",
     "global_negative_action_fraction_active_mean",
@@ -209,20 +224,55 @@ SEED_SUMMARY_DIAGNOSTIC_COLUMNS = [
 
 def build_slot_to_charger_id(env):
     slot_to_charger_id = []
+    seen_charger_ids = set()
     for charging_station in env.charging_stations:
-        slot_to_charger_id.extend([int(charging_station.id)] * int(charging_station.n_ports))
+        charger_id = _validated_non_negative_integral_scalar(
+            getattr(charging_station, "id", None),
+            "charging station ID",
+        )
+        if charger_id in seen_charger_ids:
+            raise ValueError("Duplicate charging station IDs are unsupported.")
+        seen_charger_ids.add(charger_id)
+        slot_to_charger_id.extend([charger_id] * int(charging_station.n_ports))
     return np.asarray(slot_to_charger_id, dtype=int)
 
 
 def build_charger_to_transformer_id(env):
-    return {
-        int(charging_station.id): int(charging_station.connected_transformer)
-        for charging_station in env.charging_stations
-    }
+    charger_to_transformer_id = {}
+    for charging_station in env.charging_stations:
+        charger_id = _validated_non_negative_integral_scalar(
+            getattr(charging_station, "id", None),
+            "charging station ID",
+        )
+        if charger_id in charger_to_transformer_id:
+            raise ValueError("Duplicate charging station IDs are unsupported.")
+        transformer_id = _validated_non_negative_integral_scalar(
+            getattr(charging_station, "connected_transformer", None),
+            "connected transformer ID",
+        )
+        charger_to_transformer_id[charger_id] = transformer_id
+    return charger_to_transformer_id
 
 
 def extract_active_action_slots(state):
-    return np.asarray(getattr(state, "action_mapper", []), dtype=int).reshape(-1)
+    try:
+        return np.asarray(getattr(state, "action_mapper", []), dtype=float).reshape(-1)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("state.action_mapper must contain numeric action slot IDs.") from exc
+
+
+def validate_diagnostic_action_contract(
+    mapped_action,
+    active_slots,
+    action_dim,
+    tolerance=1e-6,
+):
+    values = np.asarray(mapped_action, dtype=float).reshape(-1)
+    if values.size != int(action_dim):
+        raise ValueError("Mapped action length must match EV2Gym action dimension.")
+    if not np.all(np.isfinite(values)):
+        raise ValueError("Mapped action contains non-finite values.")
+    return _validated_active_slots(active_slots, action_dim, tolerance=tolerance)
 
 
 def extract_active_ev_infrastructure(state):
@@ -238,20 +288,28 @@ def extract_active_ev_infrastructure(state):
 
     return {
         "active_slots": active_slots,
-        "charger_ids": ev_features[:, 4].round().astype(int),
-        "transformer_ids": ev_features[:, 5].round().astype(int),
+        "charger_ids": _validated_non_negative_integral_values(
+            ev_features[:, 4],
+            "EV feature charger IDs",
+        ),
+        "transformer_ids": _validated_non_negative_integral_values(
+            ev_features[:, 5],
+            "EV feature transformer IDs",
+        ),
     }
 
 
 def validate_active_infrastructure_mapping(state, slot_to_charger_id, charger_to_transformer_id):
     active_metadata = extract_active_ev_infrastructure(state)
-    active_slots = active_metadata["active_slots"]
+    slot_to_charger_id = np.asarray(slot_to_charger_id, dtype=int).reshape(-1)
+    active_slots = _validated_active_slots(
+        active_metadata["active_slots"],
+        slot_to_charger_id.size,
+        tolerance=0.0,
+    )
+    active_metadata["active_slots"] = active_slots
     if active_slots.size == 0:
         return active_metadata
-
-    slot_to_charger_id = np.asarray(slot_to_charger_id, dtype=int).reshape(-1)
-    if np.any(active_slots < 0) or np.any(active_slots >= slot_to_charger_id.size):
-        raise ValueError("Active action slot is outside the EV2Gym action space.")
 
     mapped_charger_ids = slot_to_charger_id[active_slots]
     if not np.array_equal(mapped_charger_ids, active_metadata["charger_ids"]):
@@ -284,14 +342,16 @@ def validate_environment_action_bounds(action_space, tolerance=1e-6):
         raise ValueError("Environment action-space low/high bounds must have matching sizes.")
     if not np.all(np.isfinite(low_values)) or not np.all(np.isfinite(high_values)):
         raise ValueError("Environment action-space bounds must be finite.")
+    if np.any(low_values > high_values):
+        raise ValueError("Environment action-space low bounds must not exceed high bounds.")
 
     low = float(low_values[0])
     high = float(high_values[0])
     tolerance = float(tolerance)
     if not np.all(np.abs(low_values - low) <= tolerance):
-        raise ValueError("heterogeneous action-space low bounds are unsupported by diagnostic schema v2.")
+        raise ValueError("heterogeneous action-space low bounds are unsupported by diagnostic schema v3.")
     if not np.all(np.abs(high_values - high) <= tolerance):
-        raise ValueError("heterogeneous action-space high bounds are unsupported by diagnostic schema v2.")
+        raise ValueError("heterogeneous action-space high bounds are unsupported by diagnostic schema v3.")
 
     return {
         "environment_action_low": low,
@@ -364,7 +424,7 @@ def signed_action_diagnostics(
             np.mean(values <= float(environment_action_low) + tolerance)
         )
 
-    return {
+    diagnostics = {
         "active_action_decision_count": int(values.size),
         "observed_action_min_active": float(np.min(values)),
         "observed_action_max_active": float(np.max(values)),
@@ -376,6 +436,28 @@ def signed_action_diagnostics(
         "positive_action_sum_active": float(np.sum(values[positive_mask])),
         "negative_action_magnitude_sum_active": float(np.sum(np.abs(values[negative_mask]))),
     }
+    validate_signed_fraction_invariant(diagnostics, tolerance=tolerance)
+    return diagnostics
+
+
+def validate_signed_fraction_invariant(signed_diagnostics, tolerance=1e-6):
+    active_count = int(signed_diagnostics.get("active_action_decision_count", 0))
+    if active_count <= 0:
+        return
+
+    fraction_keys = [
+        "positive_action_fraction_active",
+        "zero_action_fraction_active",
+        "negative_action_fraction_active",
+    ]
+    fractions = []
+    for key in fraction_keys:
+        value = signed_diagnostics.get(key, UNAVAILABLE)
+        if not _is_available_number(value):
+            raise ValueError("Signed action fractions must be finite when active decisions exist.")
+        fractions.append(float(value))
+    if abs(sum(fractions) - 1.0) > float(tolerance):
+        raise ValueError("Signed action fractions must sum to one.")
 
 
 def allocation_concentration(action_values, tolerance=1e-6):
@@ -415,17 +497,18 @@ def aggregate_infrastructure_actions(
         np.asarray(mapped_action, dtype=float).reshape(-1)
         for mapped_action in mapped_actions_by_step
     ]
-    active_slots = [
-        _valid_active_slots(active_slots_for_step, action_dim)
-        for active_slots_for_step in active_slots_by_step
-    ]
 
-    for mapped_action in mapped_actions:
-        if mapped_action.size != action_dim:
-            raise ValueError("Each mapped action must match slot_to_charger_id length.")
-
-    if len(mapped_actions) != len(active_slots):
+    if len(mapped_actions) != len(active_slots_by_step):
         raise ValueError("mapped_actions_by_step and active_slots_by_step must have the same length.")
+    active_slots = [
+        validate_diagnostic_action_contract(
+            mapped_action=mapped_action,
+            active_slots=active_slots_for_step,
+            action_dim=action_dim,
+            tolerance=tolerance,
+        )
+        for mapped_action, active_slots_for_step in zip(mapped_actions, active_slots_by_step)
+    ]
 
     charger_ids = _ordered_charger_ids(slot_to_charger_id, charger_to_transformer_id, env)
     transformer_ids = sorted({int(transformer_id) for transformer_id in charger_to_transformer_id.values()})
@@ -533,6 +616,18 @@ def build_episode_row(
         "global_action_fraction_at_max_active": global_summary["action_fraction_at_max_active"],
         "global_action_nonzero_fraction_active": global_summary["action_nonzero_fraction_active"],
         "active_action_decision_count": global_summary["active_action_decision_count"],
+        "active_action_below_environment_low_count": global_summary[
+            "active_action_below_environment_low_count"
+        ],
+        "active_action_below_environment_low_fraction": global_summary[
+            "active_action_below_environment_low_fraction"
+        ],
+        "active_action_above_environment_high_count": global_summary[
+            "active_action_above_environment_high_count"
+        ],
+        "active_action_above_environment_high_fraction": global_summary[
+            "active_action_above_environment_high_fraction"
+        ],
         "global_positive_action_fraction_active": global_summary["positive_action_fraction_active"],
         "global_zero_action_fraction_active": global_summary["zero_action_fraction_active"],
         "global_negative_action_fraction_active": global_summary["negative_action_fraction_active"],
@@ -649,10 +744,13 @@ def build_charger_rows(metadata, episode_index, episode_seed, action_summary):
             "cs_power_max_kw": charger_summary["cs_power_max_kw"],
             "served_ev_count": charger_summary["served_ev_count"],
             "energy_charged_kwh": charger_summary["energy_charged_kwh"],
+            "energy_discharged_kwh": charger_summary["energy_discharged_kwh"],
+            "user_satisfaction_sum": charger_summary["user_satisfaction_sum"],
             "user_satisfaction_mean": charger_summary["user_satisfaction_mean"],
             "user_satisfaction_observation_count": charger_summary[
                 "user_satisfaction_observation_count"
             ],
+            "user_satisfaction_source": charger_summary["user_satisfaction_source"],
             "diagnostic_schema_version": DIAGNOSTIC_SCHEMA_VERSION,
         })
     return rows
@@ -710,10 +808,16 @@ def build_transformer_rows(metadata, episode_index, episode_seed, action_summary
             "overload_frequency_fraction": transformer_summary["overload_frequency_fraction"],
             "served_ev_count": transformer_summary["served_ev_count"],
             "energy_charged_kwh": transformer_summary["energy_charged_kwh"],
+            "energy_discharged_kwh": transformer_summary["energy_discharged_kwh"],
+            "user_satisfaction_sum": transformer_summary["user_satisfaction_sum"],
             "user_satisfaction_mean": transformer_summary["user_satisfaction_mean"],
+            "user_satisfaction_mean_served_ev_weighted": transformer_summary[
+                "user_satisfaction_mean_served_ev_weighted"
+            ],
             "user_satisfaction_observation_count": transformer_summary[
                 "user_satisfaction_observation_count"
             ],
+            "user_satisfaction_source": transformer_summary["user_satisfaction_source"],
             "diagnostic_schema_version": DIAGNOSTIC_SCHEMA_VERSION,
         })
     return rows
@@ -734,6 +838,22 @@ def build_seed_summary_row(metadata, episode_rows):
         ),
         "active_action_decision_count_mean": _mean_existing(
             episode_rows, "active_action_decision_count"
+        ),
+        "active_action_below_environment_low_count": _sum_existing(
+            episode_rows, "active_action_below_environment_low_count"
+        ),
+        "active_action_below_environment_low_fraction": _fraction_from_count_sums(
+            episode_rows,
+            "active_action_below_environment_low_count",
+            "active_action_decision_count",
+        ),
+        "active_action_above_environment_high_count": _sum_existing(
+            episode_rows, "active_action_above_environment_high_count"
+        ),
+        "active_action_above_environment_high_fraction": _fraction_from_count_sums(
+            episode_rows,
+            "active_action_above_environment_high_count",
+            "active_action_decision_count",
         ),
         "global_positive_action_fraction_active_mean": _mean_existing(
             episode_rows, "global_positive_action_fraction_active", default=UNAVAILABLE
@@ -846,23 +966,189 @@ def build_seed_summary_row(metadata, episode_rows):
     }
 
 
-def _valid_active_slots(active_slots_for_step, action_dim):
-    active_slots = np.asarray(active_slots_for_step, dtype=int).reshape(-1)
-    return active_slots[(active_slots >= 0) & (active_slots < action_dim)]
+def validate_diagnostic_reconciliation(
+    episode_row,
+    charger_rows,
+    transformer_rows,
+    tolerance=1e-6,
+    relative_tolerance=1e-12,
+):
+    _validate_exact_reconciliation(
+        episode_row=episode_row,
+        infrastructure_rows=charger_rows,
+        episode_key="total_ev_served",
+        infrastructure_key="served_ev_count",
+        label="charger served_ev_count",
+        tolerance=tolerance,
+    )
+    _validate_exact_reconciliation(
+        episode_row=episode_row,
+        infrastructure_rows=transformer_rows,
+        episode_key="total_ev_served",
+        infrastructure_key="served_ev_count",
+        label="transformer served_ev_count",
+        tolerance=tolerance,
+    )
+    _validate_tolerant_reconciliation(
+        episode_row=episode_row,
+        infrastructure_rows=charger_rows,
+        episode_key="total_energy_charged",
+        infrastructure_key="energy_charged_kwh",
+        label="charger energy_charged_kwh",
+        tolerance=tolerance,
+        relative_tolerance=relative_tolerance,
+    )
+    _validate_tolerant_reconciliation(
+        episode_row=episode_row,
+        infrastructure_rows=transformer_rows,
+        episode_key="total_energy_charged",
+        infrastructure_key="energy_charged_kwh",
+        label="transformer energy_charged_kwh",
+        tolerance=tolerance,
+        relative_tolerance=relative_tolerance,
+    )
+    _validate_tolerant_reconciliation(
+        episode_row=episode_row,
+        infrastructure_rows=charger_rows,
+        episode_key="total_energy_discharged",
+        infrastructure_key="energy_discharged_kwh",
+        label="charger energy_discharged_kwh",
+        tolerance=tolerance,
+        relative_tolerance=relative_tolerance,
+    )
+    _validate_tolerant_reconciliation(
+        episode_row=episode_row,
+        infrastructure_rows=transformer_rows,
+        episode_key="total_energy_discharged",
+        infrastructure_key="energy_discharged_kwh",
+        label="transformer energy_discharged_kwh",
+        tolerance=tolerance,
+        relative_tolerance=relative_tolerance,
+    )
+
+
+def _validate_exact_reconciliation(
+    episode_row,
+    infrastructure_rows,
+    episode_key,
+    infrastructure_key,
+    label,
+    tolerance,
+):
+    expected = episode_row.get(episode_key, UNAVAILABLE)
+    observed = _row_sum_if_all_available(infrastructure_rows, infrastructure_key)
+    if not _is_available_number(expected) or not _is_available_number(observed):
+        return
+    if not _is_integral_number(expected) or not _is_integral_number(observed):
+        raise ValueError(
+            f"Diagnostic reconciliation mismatch for {label}: "
+            f"{observed} != episode {episode_key} {expected}."
+        )
+    if int(float(expected)) != int(float(observed)):
+        raise ValueError(
+            f"Diagnostic reconciliation mismatch for {label}: "
+            f"{observed} != episode {episode_key} {expected}."
+        )
+
+
+def _validate_tolerant_reconciliation(
+    episode_row,
+    infrastructure_rows,
+    episode_key,
+    infrastructure_key,
+    label,
+    tolerance,
+    relative_tolerance,
+):
+    expected = episode_row.get(episode_key, UNAVAILABLE)
+    observed = _row_sum_if_all_available(infrastructure_rows, infrastructure_key)
+    if not _is_available_number(expected) or not _is_available_number(observed):
+        return
+    if not _within_reconciliation_tolerance(
+        observed=float(observed),
+        expected=float(expected),
+        absolute_tolerance=float(tolerance),
+        relative_tolerance=float(relative_tolerance),
+    ):
+        raise ValueError(
+            f"Diagnostic reconciliation mismatch for {label}: "
+            f"{observed} != episode {episode_key} {expected}."
+        )
+
+
+def _row_sum_if_all_available(rows, key):
+    total = 0.0
+    for row in rows:
+        value = row.get(key, UNAVAILABLE)
+        if not _is_available_number(value):
+            return UNAVAILABLE
+        total += float(value)
+    return total
+
+
+def _within_reconciliation_tolerance(
+    observed,
+    expected,
+    absolute_tolerance,
+    relative_tolerance,
+):
+    difference = abs(float(observed) - float(expected))
+    return (
+        difference <= float(absolute_tolerance)
+        or difference <= float(relative_tolerance) * max(abs(float(expected)), 1.0)
+    )
+
+
+def _validated_active_slots(active_slots_for_step, action_dim, tolerance=1e-6):
+    try:
+        active_slots = np.asarray(active_slots_for_step, dtype=float).reshape(-1)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("active slots must contain numeric EV2Gym action IDs.") from exc
+
+    if active_slots.size == 0:
+        return np.asarray([], dtype=int)
+    if not np.all(np.isfinite(active_slots)):
+        raise ValueError("active slots must be finite EV2Gym action IDs.")
+    if not np.all(active_slots == np.rint(active_slots)):
+        raise ValueError("active slots must be integral EV2Gym action IDs.")
+
+    active_slot_ids = np.rint(active_slots).astype(int)
+    if np.any(active_slot_ids < 0):
+        raise ValueError("active slots contain negative EV2Gym action IDs.")
+    if np.any(active_slot_ids >= int(action_dim)):
+        raise ValueError("active slots outside the EV2Gym action range.")
+    if np.unique(active_slot_ids).size != active_slot_ids.size:
+        raise ValueError("active slots contain duplicate EV2Gym action IDs.")
+    return active_slot_ids
 
 
 def _ordered_charger_ids(slot_to_charger_id, charger_to_transformer_id, env):
     charger_ids = {int(charger_id) for charger_id in np.unique(slot_to_charger_id)}
     charger_ids.update(int(charger_id) for charger_id in charger_to_transformer_id)
     if env is not None:
-        charger_ids.update(int(charging_station.id) for charging_station in env.charging_stations)
+        charger_ids.update(
+            _validated_non_negative_integral_scalar(
+                getattr(charging_station, "id", None),
+                "charging station ID",
+            )
+            for charging_station in env.charging_stations
+        )
     return sorted(charger_ids)
 
 
 def _charger_lookup(env):
     if env is None:
         return {}
-    return {int(charging_station.id): charging_station for charging_station in env.charging_stations}
+    charger_lookup = {}
+    for charging_station in env.charging_stations:
+        charger_id = _validated_non_negative_integral_scalar(
+            getattr(charging_station, "id", None),
+            "charging station ID",
+        )
+        if charger_id in charger_lookup:
+            raise ValueError("Duplicate charging station IDs are unsupported.")
+        charger_lookup[charger_id] = charging_station
+    return charger_lookup
 
 
 def _chargers_by_transformer(charger_ids, charger_to_transformer_id):
@@ -898,6 +1184,37 @@ def _environment_action_domain_support(low, high, tolerance):
     return "zero_only"
 
 
+def _environment_bound_violation_diagnostics(active_values, action_bounds, tolerance):
+    if not (
+        _is_available_number(action_bounds.get("environment_action_low", UNAVAILABLE))
+        and _is_available_number(action_bounds.get("environment_action_high", UNAVAILABLE))
+    ):
+        return {
+            "active_action_below_environment_low_count": UNAVAILABLE,
+            "active_action_below_environment_low_fraction": UNAVAILABLE,
+            "active_action_above_environment_high_count": UNAVAILABLE,
+            "active_action_above_environment_high_fraction": UNAVAILABLE,
+        }
+
+    values = np.asarray(active_values, dtype=float).reshape(-1)
+    low = float(action_bounds["environment_action_low"])
+    high = float(action_bounds["environment_action_high"])
+    below_count = int(np.count_nonzero(values < low - float(tolerance)))
+    above_count = int(np.count_nonzero(values > high + float(tolerance)))
+    if values.size == 0:
+        below_fraction = UNAVAILABLE
+        above_fraction = UNAVAILABLE
+    else:
+        below_fraction = float(below_count / values.size)
+        above_fraction = float(above_count / values.size)
+    return {
+        "active_action_below_environment_low_count": below_count,
+        "active_action_below_environment_low_fraction": below_fraction,
+        "active_action_above_environment_high_count": above_count,
+        "active_action_above_environment_high_fraction": above_fraction,
+    }
+
+
 def _concatenate_or_empty(value_arrays):
     non_empty_arrays = [
         np.asarray(values, dtype=float).reshape(-1)
@@ -929,6 +1246,11 @@ def _global_action_summary(
         environment_action_low=action_bounds.get("environment_action_low", UNAVAILABLE),
         environment_action_high=action_bounds.get("environment_action_high", max_action),
         tolerance=tolerance,
+    )
+    environment_bound_diagnostics = _environment_bound_violation_diagnostics(
+        active_values,
+        action_bounds,
+        tolerance,
     )
     action_dim = int(slot_to_charger_id.size)
     active_slot_counts = [int(active_slots.size) for active_slots in active_slots_by_step]
@@ -975,6 +1297,18 @@ def _global_action_summary(
         ),
         "action_tolerance": float(tolerance),
         "active_action_decision_count": signed_diagnostics["active_action_decision_count"],
+        "active_action_below_environment_low_count": environment_bound_diagnostics[
+            "active_action_below_environment_low_count"
+        ],
+        "active_action_below_environment_low_fraction": environment_bound_diagnostics[
+            "active_action_below_environment_low_fraction"
+        ],
+        "active_action_above_environment_high_count": environment_bound_diagnostics[
+            "active_action_above_environment_high_count"
+        ],
+        "active_action_above_environment_high_fraction": environment_bound_diagnostics[
+            "active_action_above_environment_high_fraction"
+        ],
         "observed_action_min_active": signed_diagnostics["observed_action_min_active"],
         "observed_action_max_active": signed_diagnostics["observed_action_max_active"],
         "action_fraction_at_max_all_slots": all_slot_diagnostics["action_fraction_at_max"],
@@ -1101,10 +1435,13 @@ def _charger_action_summary(
         "cs_power_max_kw": power_summary["cs_power_max_kw"],
         "served_ev_count": service_summary["served_ev_count"],
         "energy_charged_kwh": service_summary["energy_charged_kwh"],
+        "energy_discharged_kwh": service_summary["energy_discharged_kwh"],
+        "user_satisfaction_sum": service_summary["user_satisfaction_sum"],
         "user_satisfaction_mean": service_summary["user_satisfaction_mean"],
         "user_satisfaction_observation_count": service_summary[
             "user_satisfaction_observation_count"
         ],
+        "user_satisfaction_source": service_summary["user_satisfaction_source"],
     }
 
 
@@ -1203,10 +1540,16 @@ def _transformer_action_summary(
         "overload_frequency_fraction": overload_summary["overload_frequency_fraction"],
         "served_ev_count": service_summary["served_ev_count"],
         "energy_charged_kwh": service_summary["energy_charged_kwh"],
+        "energy_discharged_kwh": service_summary["energy_discharged_kwh"],
+        "user_satisfaction_sum": service_summary["user_satisfaction_sum"],
         "user_satisfaction_mean": service_summary["user_satisfaction_mean"],
+        "user_satisfaction_mean_served_ev_weighted": service_summary[
+            "user_satisfaction_mean_served_ev_weighted"
+        ],
         "user_satisfaction_observation_count": service_summary[
             "user_satisfaction_observation_count"
         ],
+        "user_satisfaction_source": service_summary["user_satisfaction_source"],
     }
 
 
@@ -1264,29 +1607,60 @@ def _charger_service_summary(charger):
         return {
             "served_ev_count": UNAVAILABLE,
             "energy_charged_kwh": UNAVAILABLE,
+            "energy_discharged_kwh": UNAVAILABLE,
+            "user_satisfaction_sum": UNAVAILABLE,
             "user_satisfaction_mean": UNAVAILABLE,
             "user_satisfaction_observation_count": 0,
+            "user_satisfaction_source": UNAVAILABLE,
         }
 
-    satisfaction_source = getattr(charger, "all_user_satisfaction", None)
-    satisfaction_values = _finite_satisfaction_values(satisfaction_source)
+    served_ev_count = _count_attr(charger, "total_evs_served")
+    energy_charged_kwh = _numeric_attr(charger, "total_energy_charged")
+    energy_discharged_kwh = _numeric_attr(charger, "total_energy_discharged")
+
+    satisfaction_sum = UNAVAILABLE
+    satisfaction_mean = UNAVAILABLE
+    satisfaction_observation_count = 0
+    satisfaction_source = UNAVAILABLE
+
+    if hasattr(charger, "all_user_satisfaction"):
+        satisfaction_values = _finite_satisfaction_values(
+            getattr(charger, "all_user_satisfaction")
+        )
+        if satisfaction_values.size:
+            satisfaction_sum = float(np.sum(satisfaction_values))
+            satisfaction_observation_count = int(satisfaction_values.size)
+            satisfaction_mean = float(satisfaction_sum / satisfaction_observation_count)
+            satisfaction_source = "charger_all_user_satisfaction"
+
+    if satisfaction_source == UNAVAILABLE:
+        total_satisfaction = _numeric_attr(charger, "total_user_satisfaction")
+        if _is_available_number(total_satisfaction) and _is_available_number(served_ev_count):
+            satisfaction_sum = float(total_satisfaction)
+            satisfaction_observation_count = served_ev_count
+            satisfaction_mean = (
+                float(satisfaction_sum / satisfaction_observation_count)
+                if satisfaction_observation_count > 0
+                else UNAVAILABLE
+            )
+            satisfaction_source = "charger_total_user_satisfaction"
+
     return {
-        "served_ev_count": (
-            int(getattr(charger, "total_evs_served"))
-            if hasattr(charger, "total_evs_served")
-            else UNAVAILABLE
-        ),
+        "served_ev_count": served_ev_count if _is_available_number(served_ev_count) else UNAVAILABLE,
         "energy_charged_kwh": (
-            float(getattr(charger, "total_energy_charged"))
-            if hasattr(charger, "total_energy_charged")
+            float(energy_charged_kwh)
+            if _is_available_number(energy_charged_kwh)
             else UNAVAILABLE
         ),
-        "user_satisfaction_mean": (
-            float(np.mean(satisfaction_values))
-            if satisfaction_values.size
+        "energy_discharged_kwh": (
+            float(energy_discharged_kwh)
+            if _is_available_number(energy_discharged_kwh)
             else UNAVAILABLE
         ),
-        "user_satisfaction_observation_count": int(satisfaction_values.size),
+        "user_satisfaction_sum": satisfaction_sum,
+        "user_satisfaction_mean": satisfaction_mean,
+        "user_satisfaction_observation_count": satisfaction_observation_count,
+        "user_satisfaction_source": satisfaction_source,
     }
 
 
@@ -1328,10 +1702,13 @@ def _transformer_overload_summary(env, transformer_id, tolerance):
 def _transformer_service_summary(charger_ids, charger_rows):
     served_ev_count = 0
     energy_charged_kwh = 0.0
-    satisfaction_weighted_sum = 0.0
+    energy_discharged_kwh = 0.0
+    user_satisfaction_sum = 0.0
     satisfaction_observation_count = 0
     served_seen = False
-    energy_seen = False
+    charged_energy_seen = False
+    discharged_energy_seen = False
+    satisfaction_seen = False
 
     for charger_id in charger_ids:
         charger_row = charger_rows.get(charger_id, {})
@@ -1345,29 +1722,47 @@ def _transformer_service_summary(charger_ids, charger_rows):
 
         energy_charged_value = charger_row.get("energy_charged_kwh", UNAVAILABLE)
         if _is_available_number(energy_charged_value):
-            energy_seen = True
+            charged_energy_seen = True
             energy_charged_kwh += float(energy_charged_value)
 
-        satisfaction_value = charger_row.get("user_satisfaction_mean", UNAVAILABLE)
+        energy_discharged_value = charger_row.get("energy_discharged_kwh", UNAVAILABLE)
+        if _is_available_number(energy_discharged_value):
+            discharged_energy_seen = True
+            energy_discharged_kwh += float(energy_discharged_value)
+
+        satisfaction_sum_value = charger_row.get("user_satisfaction_sum", UNAVAILABLE)
         satisfaction_count = charger_row.get("user_satisfaction_observation_count", 0)
         if (
-            _is_available_number(satisfaction_value)
+            _is_available_number(satisfaction_sum_value)
             and _is_available_number(satisfaction_count)
-            and int(satisfaction_count) > 0
         ):
-            satisfaction_weighted_sum += float(satisfaction_value) * int(satisfaction_count)
+            satisfaction_seen = True
+            user_satisfaction_sum += float(satisfaction_sum_value)
             satisfaction_observation_count += int(satisfaction_count)
 
-    user_satisfaction_mean = (
-        float(satisfaction_weighted_sum / satisfaction_observation_count)
+    user_satisfaction_mean_served_ev_weighted = (
+        float(user_satisfaction_sum / satisfaction_observation_count)
         if satisfaction_observation_count
+        else UNAVAILABLE
+    )
+    user_satisfaction_source = (
+        "charger_satisfaction_sum_count"
+        if satisfaction_seen
         else UNAVAILABLE
     )
     return {
         "served_ev_count": served_ev_count if served_seen else UNAVAILABLE,
-        "energy_charged_kwh": energy_charged_kwh if energy_seen else UNAVAILABLE,
-        "user_satisfaction_mean": user_satisfaction_mean,
+        "energy_charged_kwh": energy_charged_kwh if charged_energy_seen else UNAVAILABLE,
+        "energy_discharged_kwh": (
+            energy_discharged_kwh
+            if discharged_energy_seen
+            else UNAVAILABLE
+        ),
+        "user_satisfaction_sum": user_satisfaction_sum if satisfaction_seen else UNAVAILABLE,
+        "user_satisfaction_mean": user_satisfaction_mean_served_ev_weighted,
+        "user_satisfaction_mean_served_ev_weighted": user_satisfaction_mean_served_ev_weighted,
         "user_satisfaction_observation_count": satisfaction_observation_count,
+        "user_satisfaction_source": user_satisfaction_source,
     }
 
 
@@ -1451,6 +1846,21 @@ def _float_stat(stats, stat_key):
     return numeric_value
 
 
+def _numeric_attr(obj, attr_name):
+    if not hasattr(obj, attr_name):
+        return UNAVAILABLE
+    value = getattr(obj, attr_name)
+    if not _is_available_number(value):
+        return UNAVAILABLE
+    return float(value)
+
+
+def _count_attr(obj, attr_name):
+    if not hasattr(obj, attr_name):
+        return UNAVAILABLE
+    return _validated_non_negative_integral_scalar(getattr(obj, attr_name), attr_name)
+
+
 def _finite_satisfaction_values(satisfaction_source):
     if satisfaction_source is None:
         return np.asarray([], dtype=float)
@@ -1470,6 +1880,32 @@ def _is_available_number(value):
         return False
 
 
+def _is_integral_number(value):
+    if not _is_available_number(value):
+        return False
+    numeric_value = float(value)
+    return numeric_value == round(numeric_value)
+
+
+def _validated_non_negative_integral_scalar(value, label):
+    values = _validated_non_negative_integral_values([value], label)
+    return int(values[0])
+
+
+def _validated_non_negative_integral_values(values, label):
+    try:
+        numeric_values = np.asarray(values, dtype=float).reshape(-1)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be numeric.") from exc
+    if not np.all(np.isfinite(numeric_values)):
+        raise ValueError(f"{label} must be finite.")
+    if np.any(numeric_values < 0):
+        raise ValueError(f"{label} must be non-negative.")
+    if not np.all(numeric_values == np.rint(numeric_values)):
+        raise ValueError(f"{label} must be integral.")
+    return np.rint(numeric_values).astype(int)
+
+
 def _mean_existing(rows, key, default=0.0):
     values = []
     for row in rows:
@@ -1482,6 +1918,31 @@ def _mean_existing(rows, key, default=0.0):
         if np.isfinite(numeric_value):
             values.append(numeric_value)
     return float(np.mean(values)) if values else default
+
+
+def _sum_existing(rows, key, default=UNAVAILABLE):
+    values = []
+    for row in rows:
+        if key not in row:
+            continue
+        value = row[key]
+        if value in (UNAVAILABLE, None):
+            continue
+        numeric_value = float(value)
+        if np.isfinite(numeric_value):
+            values.append(numeric_value)
+    return float(np.sum(values)) if values else default
+
+
+def _fraction_from_count_sums(rows, numerator_key, denominator_key):
+    numerator = _sum_existing(rows, numerator_key, default=UNAVAILABLE)
+    denominator = _sum_existing(rows, denominator_key, default=UNAVAILABLE)
+    if not _is_available_number(numerator) or not _is_available_number(denominator):
+        return UNAVAILABLE
+    denominator = float(denominator)
+    if denominator <= 0.0:
+        return UNAVAILABLE
+    return float(float(numerator) / denominator)
 
 
 def _first_existing(rows, key, default=UNAVAILABLE):

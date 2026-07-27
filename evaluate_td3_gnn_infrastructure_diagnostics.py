@@ -29,8 +29,9 @@ from utils.infrastructure_diagnostics import (
     build_seed_summary_row,
     build_slot_to_charger_id,
     build_transformer_rows,
-    extract_active_action_slots,
     validate_active_infrastructure_mapping,
+    validate_diagnostic_action_contract,
+    validate_diagnostic_reconciliation,
     validate_environment_action_bounds,
 )
 
@@ -96,12 +97,11 @@ def evaluate_diagnostic_episode(
     active_slots_by_step = []
 
     while not done:
-        validate_active_infrastructure_mapping(
+        active_metadata = validate_active_infrastructure_mapping(
             state=state,
             slot_to_charger_id=slot_to_charger_id,
             charger_to_transformer_id=charger_to_transformer_id,
         )
-        active_slots_by_step.append(extract_active_action_slots(state))
         mapped_action = select_mapped_action(
             policy=policy,
             state=state,
@@ -109,6 +109,13 @@ def evaluate_diagnostic_episode(
             eval_expl_noise=eval_expl_noise,
         )
         mapped_action_numpy = np.asarray(mapped_action, dtype=np.float32).reshape(-1)
+        active_slots = validate_diagnostic_action_contract(
+            mapped_action=mapped_action_numpy,
+            active_slots=active_metadata["active_slots"],
+            action_dim=slot_to_charger_id.size,
+            tolerance=max_action_tolerance,
+        )
+        active_slots_by_step.append(active_slots)
         mapped_actions_by_step.append(mapped_action_numpy)
         state, reward, done, stats = normalise_step_result(env.step(mapped_action_numpy))
         episode_reward += float(reward)
@@ -274,9 +281,27 @@ def main(argv=None):
             max_action=max_action,
             tolerance=args.max_action_tolerance,
         )
+        episode_charger_rows = build_charger_rows(
+            metadata,
+            episode_index,
+            episode_seed,
+            action_summary,
+        )
+        episode_transformer_rows = build_transformer_rows(
+            metadata,
+            episode_index,
+            episode_seed,
+            action_summary,
+        )
+        validate_diagnostic_reconciliation(
+            episode_row=episode_row,
+            charger_rows=episode_charger_rows,
+            transformer_rows=episode_transformer_rows,
+            tolerance=args.max_action_tolerance,
+        )
         episode_rows.append(episode_row)
-        charger_rows.extend(build_charger_rows(metadata, episode_index, episode_seed, action_summary))
-        transformer_rows.extend(build_transformer_rows(metadata, episode_index, episode_seed, action_summary))
+        charger_rows.extend(episode_charger_rows)
+        transformer_rows.extend(episode_transformer_rows)
 
     seed_summary_rows = [
         build_seed_summary_row(summary_metadata, episode_rows)

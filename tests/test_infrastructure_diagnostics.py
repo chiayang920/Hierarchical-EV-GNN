@@ -20,8 +20,15 @@ def fake_charger(
     total_energy_charged=0.0,
     total_energy_discharged=0.0,
     total_evs_served=0,
+    total_user_satisfaction=None,
     all_user_satisfaction=None,
 ):
+    if total_user_satisfaction is None:
+        total_user_satisfaction = (
+            0.0
+            if all_user_satisfaction is None
+            else float(np.sum(np.asarray(all_user_satisfaction, dtype=float)))
+        )
     return SimpleNamespace(
         id=charger_id,
         n_ports=n_ports,
@@ -29,6 +36,7 @@ def fake_charger(
         total_energy_charged=total_energy_charged,
         total_energy_discharged=total_energy_discharged,
         total_evs_served=total_evs_served,
+        total_user_satisfaction=total_user_satisfaction,
         all_user_satisfaction=(
             None
             if all_user_satisfaction is None
@@ -71,6 +79,29 @@ def fake_state(action_mapper, ev_features):
     )
 
 
+class FailingStepEnv:
+    def __init__(self, state):
+        self.state = state
+        self.step_called = False
+        self.charging_stations = [fake_charger(0, 1, 0)]
+
+    def reset(self, seed=None):
+        return self.state, {}
+
+    def step(self, mapped_action):
+        self.step_called = True
+        raise AssertionError("env.step should not be called for invalid diagnostic actions")
+
+
+class ConstantActionPolicy:
+    def __init__(self, mapped_action):
+        self.mapped_action = np.asarray(mapped_action, dtype=np.float32)
+
+    def select_action(self, state, expl_noise=0.0, return_mapped_action=False):
+        assert return_mapped_action is True
+        return self.mapped_action
+
+
 def test_slot_to_charger_id_uses_ev2gym_port_order_for_non_uniform_ports():
     from utils.infrastructure_diagnostics import build_slot_to_charger_id
 
@@ -83,6 +114,36 @@ def test_slot_to_charger_id_uses_ev2gym_port_order_for_non_uniform_ports():
     assert build_slot_to_charger_id(env).tolist() == [10, 10, 11, 12, 12, 12]
 
 
+def test_slot_to_charger_id_rejects_duplicate_charger_ids():
+    from utils.infrastructure_diagnostics import build_slot_to_charger_id
+
+    env = fake_env([
+        fake_charger(0, 1, 0),
+        fake_charger(0, 1, 1),
+    ])
+
+    with pytest.raises(ValueError, match="Duplicate charging station IDs"):
+        build_slot_to_charger_id(env)
+
+
+@pytest.mark.parametrize(
+    ("charger_id", "expected_message"),
+    [
+        (0.5, "charging station ID must be integral"),
+        (-1, "charging station ID must be non-negative"),
+        (np.nan, "charging station ID must be finite"),
+        (np.inf, "charging station ID must be finite"),
+    ],
+)
+def test_slot_to_charger_id_rejects_invalid_charger_ids(charger_id, expected_message):
+    from utils.infrastructure_diagnostics import build_slot_to_charger_id
+
+    env = fake_env([fake_charger(charger_id, 1, 0)])
+
+    with pytest.raises(ValueError, match=expected_message):
+        build_slot_to_charger_id(env)
+
+
 def test_charger_to_transformer_id_uses_realized_env_topology():
     from utils.infrastructure_diagnostics import build_charger_to_transformer_id
 
@@ -93,6 +154,27 @@ def test_charger_to_transformer_id_uses_realized_env_topology():
     ])
 
     assert build_charger_to_transformer_id(env) == {0: 3, 1: 3, 2: 4}
+
+
+@pytest.mark.parametrize(
+    ("transformer_id", "expected_message"),
+    [
+        (0.5, "connected transformer ID must be integral"),
+        (-1, "connected transformer ID must be non-negative"),
+        (np.nan, "connected transformer ID must be finite"),
+        (np.inf, "connected transformer ID must be finite"),
+    ],
+)
+def test_charger_to_transformer_id_rejects_invalid_transformer_ids(
+    transformer_id,
+    expected_message,
+):
+    from utils.infrastructure_diagnostics import build_charger_to_transformer_id
+
+    env = fake_env([fake_charger(0, 1, transformer_id)])
+
+    with pytest.raises(ValueError, match=expected_message):
+        build_charger_to_transformer_id(env)
 
 
 def test_extract_active_ev_infrastructure_uses_state_action_mapper_and_features():
@@ -111,6 +193,68 @@ def test_extract_active_ev_infrastructure_uses_state_action_mapper_and_features(
     assert metadata["active_slots"].tolist() == [0, 3]
     assert metadata["charger_ids"].tolist() == [10, 12]
     assert metadata["transformer_ids"].tolist() == [7, 8]
+
+
+@pytest.mark.parametrize(
+    ("charger_id", "expected_message"),
+    [
+        (10.4, "EV feature charger IDs must be integral"),
+        (np.nan, "EV feature charger IDs must be finite"),
+        (np.inf, "EV feature charger IDs must be finite"),
+        (-1.0, "EV feature charger IDs must be non-negative"),
+    ],
+)
+def test_extract_active_ev_infrastructure_rejects_invalid_charger_ids(
+    charger_id,
+    expected_message,
+):
+    from utils.infrastructure_diagnostics import extract_active_ev_infrastructure
+
+    state = fake_state(
+        action_mapper=[0],
+        ev_features=[[0.5, 0.0, 1.0, 0.0, charger_id, 0.0]],
+    )
+
+    with pytest.raises(ValueError, match=expected_message):
+        extract_active_ev_infrastructure(state)
+
+
+@pytest.mark.parametrize(
+    ("transformer_id", "expected_message"),
+    [
+        (7.4, "EV feature transformer IDs must be integral"),
+        (np.nan, "EV feature transformer IDs must be finite"),
+        (np.inf, "EV feature transformer IDs must be finite"),
+        (-1.0, "EV feature transformer IDs must be non-negative"),
+    ],
+)
+def test_extract_active_ev_infrastructure_rejects_invalid_transformer_ids(
+    transformer_id,
+    expected_message,
+):
+    from utils.infrastructure_diagnostics import extract_active_ev_infrastructure
+
+    state = fake_state(
+        action_mapper=[0],
+        ev_features=[[0.5, 0.0, 1.0, 0.0, 0.0, transformer_id]],
+    )
+
+    with pytest.raises(ValueError, match=expected_message):
+        extract_active_ev_infrastructure(state)
+
+
+def test_extract_active_ev_infrastructure_accepts_float_encoded_integer_ids():
+    from utils.infrastructure_diagnostics import extract_active_ev_infrastructure
+
+    state = fake_state(
+        action_mapper=[0],
+        ev_features=[[0.5, 0.0, 1.0, 0.0, 10.0, 7.0]],
+    )
+
+    metadata = extract_active_ev_infrastructure(state)
+
+    assert metadata["charger_ids"].tolist() == [10]
+    assert metadata["transformer_ids"].tolist() == [7]
 
 
 def test_active_only_denominator_excludes_inactive_slots():
@@ -1319,6 +1463,493 @@ def test_v2g_metadata_records_unavailable_when_runtime_and_config_do_not_expose_
         "v2g_enabled": "",
         "v2g_enabled_source": "unavailable",
     }
+
+
+@pytest.mark.parametrize(
+    ("mapped_action", "expected_message"),
+    [
+        ([np.nan], "Mapped action contains non-finite values"),
+        ([np.inf], "Mapped action contains non-finite values"),
+        ([-np.inf], "Mapped action contains non-finite values"),
+        ([], "Mapped action length must match EV2Gym action dimension"),
+        ([0.1, 0.2], "Mapped action length must match EV2Gym action dimension"),
+    ],
+)
+def test_diagnostic_evaluator_rejects_invalid_mapped_action_before_env_step(
+    mapped_action,
+    expected_message,
+):
+    from evaluate_td3_gnn_infrastructure_diagnostics import evaluate_diagnostic_episode
+
+    state = fake_state(
+        action_mapper=[0],
+        ev_features=[[0.5, 0.0, 1.0, 0.0, 0.0, 0.0]],
+    )
+    env = FailingStepEnv(state)
+
+    with pytest.raises(ValueError, match=expected_message):
+        evaluate_diagnostic_episode(
+            policy=ConstantActionPolicy(mapped_action),
+            env=env,
+            seed=710000,
+            max_action=1.0,
+            max_action_tolerance=1e-6,
+        )
+
+    assert env.step_called is False
+
+
+@pytest.mark.parametrize(
+    ("active_slots", "expected_message"),
+    [
+        ([0, 0], "active slots contain duplicate"),
+        ([-1], "active slots contain negative"),
+        ([2], "active slots outside the EV2Gym action range"),
+        ([0.5], "active slots must be integral"),
+        ([1.0000005], "active slots must be integral"),
+    ],
+)
+def test_diagnostic_action_contract_rejects_invalid_active_slots(active_slots, expected_message):
+    from utils.infrastructure_diagnostics import validate_diagnostic_action_contract
+
+    with pytest.raises(ValueError, match=expected_message):
+        validate_diagnostic_action_contract(
+            mapped_action=np.array([0.0, 0.0], dtype=float),
+            active_slots=np.asarray(active_slots, dtype=float),
+            action_dim=2,
+            tolerance=1e-6,
+        )
+
+
+@pytest.mark.parametrize(
+    ("active_slots", "ev_features", "expected_message"),
+    [
+        ([0, 0], [[0.5, 0.0, 1.0, 0.0, 0.0, 0.0], [0.5, 0.0, 1.0, 0.0, 0.0, 0.0]], "active slots contain duplicate"),
+        ([-1], [[0.5, 0.0, 1.0, 0.0, 0.0, 0.0]], "active slots contain negative"),
+        ([1], [[0.5, 0.0, 1.0, 0.0, 0.0, 0.0]], "active slots outside the EV2Gym action range"),
+        ([0.5], [[0.5, 0.0, 1.0, 0.0, 0.0, 0.0]], "active slots must be integral"),
+    ],
+)
+def test_diagnostic_evaluator_rejects_invalid_active_slots_before_env_step(
+    active_slots,
+    ev_features,
+    expected_message,
+):
+    from evaluate_td3_gnn_infrastructure_diagnostics import evaluate_diagnostic_episode
+
+    state = fake_state(action_mapper=active_slots, ev_features=ev_features)
+    env = FailingStepEnv(state)
+
+    with pytest.raises(ValueError, match=expected_message):
+        evaluate_diagnostic_episode(
+            policy=ConstantActionPolicy([0.0]),
+            env=env,
+            seed=710000,
+            max_action=1.0,
+            max_action_tolerance=1e-6,
+        )
+
+    assert env.step_called is False
+
+
+def test_standalone_aggregation_rejects_invalid_active_slots_without_filtering():
+    from utils.infrastructure_diagnostics import aggregate_infrastructure_actions
+
+    env = fake_env([fake_charger(0, 2, 0)])
+    with pytest.raises(ValueError, match="active slots outside the EV2Gym action range"):
+        aggregate_infrastructure_actions(
+            mapped_actions_by_step=[np.array([0.5, 0.0], dtype=float)],
+            active_slots_by_step=[np.array([0, 2], dtype=float)],
+            slot_to_charger_id=np.array([0, 0], dtype=int),
+            charger_to_transformer_id={0: 0},
+            max_action=1.0,
+            tolerance=1e-6,
+            env=env,
+        )
+
+
+def test_signed_fraction_invariant_passes_on_valid_fractions():
+    from utils.infrastructure_diagnostics import validate_signed_fraction_invariant
+
+    validate_signed_fraction_invariant(
+        {
+            "active_action_decision_count": 4,
+            "positive_action_fraction_active": 0.5,
+            "zero_action_fraction_active": 0.25,
+            "negative_action_fraction_active": 0.25,
+        },
+        tolerance=1e-6,
+    )
+
+
+def test_signed_fraction_invariant_raises_on_invalid_fractions():
+    from utils.infrastructure_diagnostics import validate_signed_fraction_invariant
+
+    with pytest.raises(ValueError, match="Signed action fractions must sum to one"):
+        validate_signed_fraction_invariant(
+            {
+                "active_action_decision_count": 4,
+                "positive_action_fraction_active": 0.5,
+                "zero_action_fraction_active": 0.5,
+                "negative_action_fraction_active": 0.5,
+            },
+            tolerance=1e-6,
+        )
+
+
+def test_environment_low_and_high_violations_are_recorded_not_failed():
+    from utils.infrastructure_diagnostics import aggregate_infrastructure_actions
+
+    env = fake_env([fake_charger(0, 3, 0)], action_low=0.0, action_high=1.0)
+    summary = aggregate_infrastructure_actions(
+        mapped_actions_by_step=[np.array([-0.2, 1.2, 0.5], dtype=float)],
+        active_slots_by_step=[np.array([0, 1, 2], dtype=int)],
+        slot_to_charger_id=np.array([0, 0, 0], dtype=int),
+        charger_to_transformer_id={0: 0},
+        max_action=1.0,
+        tolerance=1e-6,
+        env=env,
+    )
+
+    global_summary = summary["global"]
+    assert global_summary["active_action_below_environment_low_count"] == 1
+    assert global_summary["active_action_below_environment_low_fraction"] == pytest.approx(1.0 / 3.0)
+    assert global_summary["active_action_above_environment_high_count"] == 1
+    assert global_summary["active_action_above_environment_high_fraction"] == pytest.approx(1.0 / 3.0)
+
+
+def test_environment_bound_violation_fractions_are_blank_when_bounds_unavailable():
+    from utils.infrastructure_diagnostics import aggregate_infrastructure_actions
+
+    summary = aggregate_infrastructure_actions(
+        mapped_actions_by_step=[np.array([-0.2, 1.2], dtype=float)],
+        active_slots_by_step=[np.array([0, 1], dtype=int)],
+        slot_to_charger_id=np.array([0, 0], dtype=int),
+        charger_to_transformer_id={0: 0},
+        max_action=1.0,
+        tolerance=1e-6,
+        env=None,
+    )
+
+    global_summary = summary["global"]
+    assert global_summary["active_action_below_environment_low_count"] == ""
+    assert global_summary["active_action_below_environment_low_fraction"] == ""
+    assert global_summary["active_action_above_environment_high_count"] == ""
+    assert global_summary["active_action_above_environment_high_fraction"] == ""
+
+
+def test_aggregate_charger_satisfaction_fallback_uses_total_sum_and_served_count():
+    from utils.infrastructure_diagnostics import aggregate_infrastructure_actions
+
+    env = fake_env([
+        fake_charger(
+            0,
+            1,
+            0,
+            total_evs_served=4,
+            total_user_satisfaction=3.0,
+            all_user_satisfaction=None,
+        )
+    ])
+    summary = aggregate_infrastructure_actions(
+        mapped_actions_by_step=[np.array([0.5], dtype=float)],
+        active_slots_by_step=[np.array([0], dtype=int)],
+        slot_to_charger_id=np.array([0], dtype=int),
+        charger_to_transformer_id={0: 0},
+        max_action=1.0,
+        tolerance=1e-6,
+        env=env,
+    )
+
+    charger_summary = summary["chargers"][0]
+    assert charger_summary["user_satisfaction_sum"] == pytest.approx(3.0)
+    assert charger_summary["user_satisfaction_mean"] == pytest.approx(0.75)
+    assert charger_summary["user_satisfaction_observation_count"] == 4
+    assert charger_summary["user_satisfaction_source"] == "charger_total_user_satisfaction"
+
+
+@pytest.mark.parametrize(
+    ("served_count", "expected_message"),
+    [
+        (2.6, "total_evs_served must be integral"),
+        (-1, "total_evs_served must be non-negative"),
+        (np.nan, "total_evs_served must be finite"),
+        (np.inf, "total_evs_served must be finite"),
+    ],
+)
+def test_charger_service_summary_rejects_invalid_total_evs_served(
+    served_count,
+    expected_message,
+):
+    from utils.infrastructure_diagnostics import aggregate_infrastructure_actions
+
+    env = fake_env([
+        fake_charger(
+            0,
+            1,
+            0,
+            total_evs_served=served_count,
+            total_user_satisfaction=1.0,
+            all_user_satisfaction=None,
+        )
+    ])
+
+    with pytest.raises(ValueError, match=expected_message):
+        aggregate_infrastructure_actions(
+            mapped_actions_by_step=[np.array([0.5], dtype=float)],
+            active_slots_by_step=[np.array([0], dtype=int)],
+            slot_to_charger_id=np.array([0], dtype=int),
+            charger_to_transformer_id={0: 0},
+            max_action=1.0,
+            tolerance=1e-6,
+            env=env,
+        )
+
+
+@pytest.mark.parametrize("served_count", [2, 2.0])
+def test_charger_service_summary_accepts_integral_total_evs_served(served_count):
+    from utils.infrastructure_diagnostics import aggregate_infrastructure_actions
+
+    env = fake_env([
+        fake_charger(
+            0,
+            1,
+            0,
+            total_evs_served=served_count,
+            total_user_satisfaction=1.5,
+            all_user_satisfaction=None,
+        )
+    ])
+
+    summary = aggregate_infrastructure_actions(
+        mapped_actions_by_step=[np.array([0.5], dtype=float)],
+        active_slots_by_step=[np.array([0], dtype=int)],
+        slot_to_charger_id=np.array([0], dtype=int),
+        charger_to_transformer_id={0: 0},
+        max_action=1.0,
+        tolerance=1e-6,
+        env=env,
+    )
+
+    charger_summary = summary["chargers"][0]
+    assert charger_summary["served_ev_count"] == 2
+    assert charger_summary["user_satisfaction_observation_count"] == 2
+    assert charger_summary["user_satisfaction_mean"] == pytest.approx(0.75)
+
+
+def test_zero_served_charger_has_blank_satisfaction_mean_with_source_metadata():
+    from utils.infrastructure_diagnostics import aggregate_infrastructure_actions
+
+    env = fake_env([
+        fake_charger(
+            0,
+            1,
+            0,
+            total_evs_served=0,
+            total_user_satisfaction=0.0,
+            all_user_satisfaction=None,
+        )
+    ])
+    summary = aggregate_infrastructure_actions(
+        mapped_actions_by_step=[np.array([0.0], dtype=float)],
+        active_slots_by_step=[np.array([0], dtype=int)],
+        slot_to_charger_id=np.array([0], dtype=int),
+        charger_to_transformer_id={0: 0},
+        max_action=1.0,
+        tolerance=1e-6,
+        env=env,
+    )
+
+    charger_summary = summary["chargers"][0]
+    assert charger_summary["user_satisfaction_sum"] == pytest.approx(0.0)
+    assert charger_summary["user_satisfaction_mean"] == ""
+    assert charger_summary["user_satisfaction_observation_count"] == 0
+    assert charger_summary["user_satisfaction_source"] == "charger_total_user_satisfaction"
+
+
+def test_transformer_satisfaction_is_served_ev_weighted_from_sums_and_counts():
+    from utils.infrastructure_diagnostics import aggregate_infrastructure_actions
+
+    env = fake_env([
+        fake_charger(0, 1, 0, total_evs_served=2, total_user_satisfaction=1.0, all_user_satisfaction=None),
+        fake_charger(1, 1, 0, total_evs_served=1, total_user_satisfaction=1.0, all_user_satisfaction=None),
+    ])
+    summary = aggregate_infrastructure_actions(
+        mapped_actions_by_step=[np.array([0.5, 0.5], dtype=float)],
+        active_slots_by_step=[np.array([0, 1], dtype=int)],
+        slot_to_charger_id=np.array([0, 1], dtype=int),
+        charger_to_transformer_id={0: 0, 1: 0},
+        max_action=1.0,
+        tolerance=1e-6,
+        env=env,
+    )
+
+    transformer_summary = summary["transformers"][0]
+    assert transformer_summary["user_satisfaction_sum"] == pytest.approx(2.0)
+    assert transformer_summary["user_satisfaction_observation_count"] == 3
+    assert transformer_summary["user_satisfaction_mean_served_ev_weighted"] == pytest.approx(2.0 / 3.0)
+    assert transformer_summary["user_satisfaction_source"] == "charger_satisfaction_sum_count"
+
+
+def test_charger_and_transformer_discharge_are_realised_runtime_totals():
+    from utils.infrastructure_diagnostics import aggregate_infrastructure_actions
+
+    env = fake_env([
+        fake_charger(0, 1, 0, total_energy_charged=2.0, total_energy_discharged=0.5),
+        fake_charger(1, 1, 0, total_energy_charged=3.0, total_energy_discharged=0.75),
+    ])
+    summary = aggregate_infrastructure_actions(
+        mapped_actions_by_step=[np.array([-1.0, -1.0], dtype=float)],
+        active_slots_by_step=[np.array([0, 1], dtype=int)],
+        slot_to_charger_id=np.array([0, 1], dtype=int),
+        charger_to_transformer_id={0: 0, 1: 0},
+        max_action=1.0,
+        tolerance=1e-6,
+        env=env,
+    )
+
+    assert summary["chargers"][0]["energy_discharged_kwh"] == pytest.approx(0.5)
+    assert summary["chargers"][1]["energy_discharged_kwh"] == pytest.approx(0.75)
+    assert summary["transformers"][0]["energy_discharged_kwh"] == pytest.approx(1.25)
+
+
+def test_diagnostic_reconciliation_accepts_matching_counts_and_energy():
+    from utils.infrastructure_diagnostics import validate_diagnostic_reconciliation
+
+    episode_row = {
+        "total_ev_served": 3.0,
+        "total_energy_charged": 5.0,
+        "total_energy_discharged": 1.25,
+    }
+    charger_rows = [
+        {"served_ev_count": 2, "energy_charged_kwh": 2.0, "energy_discharged_kwh": 0.5},
+        {"served_ev_count": 1, "energy_charged_kwh": 3.0, "energy_discharged_kwh": 0.75},
+    ]
+    transformer_rows = [
+        {"served_ev_count": 3, "energy_charged_kwh": 5.0, "energy_discharged_kwh": 1.25},
+    ]
+
+    validate_diagnostic_reconciliation(episode_row, charger_rows, transformer_rows, tolerance=1e-6)
+
+
+def test_diagnostic_reconciliation_raises_on_served_count_mismatch():
+    from utils.infrastructure_diagnostics import validate_diagnostic_reconciliation
+
+    episode_row = {"total_ev_served": 3.0}
+    charger_rows = [{"served_ev_count": 2}]
+    transformer_rows = [{"served_ev_count": 3}]
+
+    with pytest.raises(ValueError, match="charger served_ev_count"):
+        validate_diagnostic_reconciliation(episode_row, charger_rows, transformer_rows, tolerance=1e-6)
+
+
+def test_diagnostic_reconciliation_raises_on_fractional_served_count_sum():
+    from utils.infrastructure_diagnostics import validate_diagnostic_reconciliation
+
+    episode_row = {"total_ev_served": 3.0}
+    charger_rows = [{"served_ev_count": 2.6}]
+    transformer_rows = [{"served_ev_count": 3.0}]
+
+    with pytest.raises(ValueError, match="charger served_ev_count"):
+        validate_diagnostic_reconciliation(episode_row, charger_rows, transformer_rows, tolerance=1e-6)
+
+
+def test_diagnostic_reconciliation_raises_on_charged_energy_mismatch():
+    from utils.infrastructure_diagnostics import validate_diagnostic_reconciliation
+
+    episode_row = {"total_energy_charged": 5.0}
+    charger_rows = [{"energy_charged_kwh": 4.9}]
+    transformer_rows = [{"energy_charged_kwh": 5.0}]
+
+    with pytest.raises(ValueError, match="charger energy_charged_kwh"):
+        validate_diagnostic_reconciliation(episode_row, charger_rows, transformer_rows, tolerance=1e-6)
+
+
+def test_diagnostic_reconciliation_raises_on_discharged_energy_mismatch():
+    from utils.infrastructure_diagnostics import validate_diagnostic_reconciliation
+
+    episode_row = {"total_energy_discharged": 1.25}
+    charger_rows = [{"energy_discharged_kwh": 1.25}]
+    transformer_rows = [{"energy_discharged_kwh": 1.0}]
+
+    with pytest.raises(ValueError, match="transformer energy_discharged_kwh"):
+        validate_diagnostic_reconciliation(episode_row, charger_rows, transformer_rows, tolerance=1e-6)
+
+
+@pytest.mark.parametrize(
+    ("low_values", "high_values"),
+    [
+        ([np.nan, 0.0], [1.0, 1.0]),
+        ([0.0, 0.0], [np.inf, 1.0]),
+        ([0.0, 0.0], [-np.inf, 1.0]),
+    ],
+)
+def test_non_finite_environment_action_bounds_fail_clearly(low_values, high_values):
+    from utils.infrastructure_diagnostics import validate_environment_action_bounds
+
+    action_space = SimpleNamespace(
+        low=np.asarray(low_values, dtype=float),
+        high=np.asarray(high_values, dtype=float),
+    )
+
+    with pytest.raises(ValueError, match="Environment action-space bounds must be finite"):
+        validate_environment_action_bounds(action_space, tolerance=1e-6)
+
+
+def test_environment_action_bounds_reject_low_greater_than_high():
+    from utils.infrastructure_diagnostics import validate_environment_action_bounds
+
+    action_space = SimpleNamespace(
+        low=np.array([0.0, 2.0], dtype=float),
+        high=np.array([1.0, 1.0], dtype=float),
+    )
+
+    with pytest.raises(ValueError, match="Environment action-space low bounds must not exceed high bounds"):
+        validate_environment_action_bounds(action_space, tolerance=1e-6)
+
+
+def test_schema_v3_columns_include_service_discharge_and_environment_bound_metrics():
+    from utils.infrastructure_diagnostics import (
+        CHARGER_DIAGNOSTIC_COLUMNS,
+        DIAGNOSTIC_SCHEMA_VERSION,
+        EPISODE_DIAGNOSTIC_COLUMNS,
+        SEED_SUMMARY_DIAGNOSTIC_COLUMNS,
+        TRANSFORMER_DIAGNOSTIC_COLUMNS,
+    )
+
+    assert DIAGNOSTIC_SCHEMA_VERSION == "3"
+    assert "active_action_below_environment_low_count" in EPISODE_DIAGNOSTIC_COLUMNS
+    assert "active_action_below_environment_low_fraction" in EPISODE_DIAGNOSTIC_COLUMNS
+    assert "active_action_above_environment_high_count" in EPISODE_DIAGNOSTIC_COLUMNS
+    assert "active_action_above_environment_high_fraction" in EPISODE_DIAGNOSTIC_COLUMNS
+    assert "active_action_below_environment_low_count" in SEED_SUMMARY_DIAGNOSTIC_COLUMNS
+    assert "active_action_above_environment_high_fraction" in SEED_SUMMARY_DIAGNOSTIC_COLUMNS
+    assert "user_satisfaction_sum" in CHARGER_DIAGNOSTIC_COLUMNS
+    assert "user_satisfaction_source" in CHARGER_DIAGNOSTIC_COLUMNS
+    assert "energy_discharged_kwh" in CHARGER_DIAGNOSTIC_COLUMNS
+    assert "user_satisfaction_sum" in TRANSFORMER_DIAGNOSTIC_COLUMNS
+    assert "user_satisfaction_mean_served_ev_weighted" in TRANSFORMER_DIAGNOSTIC_COLUMNS
+    assert "user_satisfaction_source" in TRANSFORMER_DIAGNOSTIC_COLUMNS
+    assert "energy_discharged_kwh" in TRANSFORMER_DIAGNOSTIC_COLUMNS
+
+
+def test_schema_v3_keeps_existing_schema_v2_action_and_service_columns():
+    from utils.infrastructure_diagnostics import (
+        CHARGER_DIAGNOSTIC_COLUMNS,
+        EPISODE_DIAGNOSTIC_COLUMNS,
+        SEED_SUMMARY_DIAGNOSTIC_COLUMNS,
+        TRANSFORMER_DIAGNOSTIC_COLUMNS,
+    )
+
+    assert "global_positive_action_fraction_active" in EPISODE_DIAGNOSTIC_COLUMNS
+    assert "global_zero_action_fraction_active" in EPISODE_DIAGNOSTIC_COLUMNS
+    assert "global_negative_action_fraction_active" in EPISODE_DIAGNOSTIC_COLUMNS
+    assert "inactive_nonzero_action_fraction_all_slots" in EPISODE_DIAGNOSTIC_COLUMNS
+    assert "total_energy_discharged" in EPISODE_DIAGNOSTIC_COLUMNS
+    assert "average_user_satisfaction_mean" in SEED_SUMMARY_DIAGNOSTIC_COLUMNS
+    assert "user_satisfaction_mean" in CHARGER_DIAGNOSTIC_COLUMNS
+    assert "user_satisfaction_observation_count" in CHARGER_DIAGNOSTIC_COLUMNS
+    assert "user_satisfaction_observation_count" in TRANSFORMER_DIAGNOSTIC_COLUMNS
 
 
 def test_diagnostic_evaluator_help_works():
