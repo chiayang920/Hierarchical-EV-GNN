@@ -224,16 +224,34 @@ SEED_SUMMARY_DIAGNOSTIC_COLUMNS = [
 
 def build_slot_to_charger_id(env):
     slot_to_charger_id = []
+    seen_charger_ids = set()
     for charging_station in env.charging_stations:
-        slot_to_charger_id.extend([int(charging_station.id)] * int(charging_station.n_ports))
+        charger_id = _validated_non_negative_integral_scalar(
+            getattr(charging_station, "id", None),
+            "charging station ID",
+        )
+        if charger_id in seen_charger_ids:
+            raise ValueError("Duplicate charging station IDs are unsupported.")
+        seen_charger_ids.add(charger_id)
+        slot_to_charger_id.extend([charger_id] * int(charging_station.n_ports))
     return np.asarray(slot_to_charger_id, dtype=int)
 
 
 def build_charger_to_transformer_id(env):
-    return {
-        int(charging_station.id): int(charging_station.connected_transformer)
-        for charging_station in env.charging_stations
-    }
+    charger_to_transformer_id = {}
+    for charging_station in env.charging_stations:
+        charger_id = _validated_non_negative_integral_scalar(
+            getattr(charging_station, "id", None),
+            "charging station ID",
+        )
+        if charger_id in charger_to_transformer_id:
+            raise ValueError("Duplicate charging station IDs are unsupported.")
+        transformer_id = _validated_non_negative_integral_scalar(
+            getattr(charging_station, "connected_transformer", None),
+            "connected transformer ID",
+        )
+        charger_to_transformer_id[charger_id] = transformer_id
+    return charger_to_transformer_id
 
 
 def extract_active_action_slots(state):
@@ -270,8 +288,14 @@ def extract_active_ev_infrastructure(state):
 
     return {
         "active_slots": active_slots,
-        "charger_ids": ev_features[:, 4].round().astype(int),
-        "transformer_ids": ev_features[:, 5].round().astype(int),
+        "charger_ids": _validated_non_negative_integral_values(
+            ev_features[:, 4],
+            "EV feature charger IDs",
+        ),
+        "transformer_ids": _validated_non_negative_integral_values(
+            ev_features[:, 5],
+            "EV feature transformer IDs",
+        ),
     }
 
 
@@ -318,6 +342,8 @@ def validate_environment_action_bounds(action_space, tolerance=1e-6):
         raise ValueError("Environment action-space low/high bounds must have matching sizes.")
     if not np.all(np.isfinite(low_values)) or not np.all(np.isfinite(high_values)):
         raise ValueError("Environment action-space bounds must be finite.")
+    if np.any(low_values > high_values):
+        raise ValueError("Environment action-space low bounds must not exceed high bounds.")
 
     low = float(low_values[0])
     high = float(high_values[0])
@@ -1100,14 +1126,29 @@ def _ordered_charger_ids(slot_to_charger_id, charger_to_transformer_id, env):
     charger_ids = {int(charger_id) for charger_id in np.unique(slot_to_charger_id)}
     charger_ids.update(int(charger_id) for charger_id in charger_to_transformer_id)
     if env is not None:
-        charger_ids.update(int(charging_station.id) for charging_station in env.charging_stations)
+        charger_ids.update(
+            _validated_non_negative_integral_scalar(
+                getattr(charging_station, "id", None),
+                "charging station ID",
+            )
+            for charging_station in env.charging_stations
+        )
     return sorted(charger_ids)
 
 
 def _charger_lookup(env):
     if env is None:
         return {}
-    return {int(charging_station.id): charging_station for charging_station in env.charging_stations}
+    charger_lookup = {}
+    for charging_station in env.charging_stations:
+        charger_id = _validated_non_negative_integral_scalar(
+            getattr(charging_station, "id", None),
+            "charging station ID",
+        )
+        if charger_id in charger_lookup:
+            raise ValueError("Duplicate charging station IDs are unsupported.")
+        charger_lookup[charger_id] = charging_station
+    return charger_lookup
 
 
 def _chargers_by_transformer(charger_ids, charger_to_transformer_id):
@@ -1573,7 +1614,7 @@ def _charger_service_summary(charger):
             "user_satisfaction_source": UNAVAILABLE,
         }
 
-    served_ev_count = _numeric_attr(charger, "total_evs_served")
+    served_ev_count = _count_attr(charger, "total_evs_served")
     energy_charged_kwh = _numeric_attr(charger, "total_energy_charged")
     energy_discharged_kwh = _numeric_attr(charger, "total_energy_discharged")
 
@@ -1596,7 +1637,7 @@ def _charger_service_summary(charger):
         total_satisfaction = _numeric_attr(charger, "total_user_satisfaction")
         if _is_available_number(total_satisfaction) and _is_available_number(served_ev_count):
             satisfaction_sum = float(total_satisfaction)
-            satisfaction_observation_count = int(served_ev_count)
+            satisfaction_observation_count = served_ev_count
             satisfaction_mean = (
                 float(satisfaction_sum / satisfaction_observation_count)
                 if satisfaction_observation_count > 0
@@ -1605,7 +1646,7 @@ def _charger_service_summary(charger):
             satisfaction_source = "charger_total_user_satisfaction"
 
     return {
-        "served_ev_count": int(served_ev_count) if _is_available_number(served_ev_count) else UNAVAILABLE,
+        "served_ev_count": served_ev_count if _is_available_number(served_ev_count) else UNAVAILABLE,
         "energy_charged_kwh": (
             float(energy_charged_kwh)
             if _is_available_number(energy_charged_kwh)
@@ -1814,6 +1855,12 @@ def _numeric_attr(obj, attr_name):
     return float(value)
 
 
+def _count_attr(obj, attr_name):
+    if not hasattr(obj, attr_name):
+        return UNAVAILABLE
+    return _validated_non_negative_integral_scalar(getattr(obj, attr_name), attr_name)
+
+
 def _finite_satisfaction_values(satisfaction_source):
     if satisfaction_source is None:
         return np.asarray([], dtype=float)
@@ -1838,6 +1885,25 @@ def _is_integral_number(value):
         return False
     numeric_value = float(value)
     return numeric_value == round(numeric_value)
+
+
+def _validated_non_negative_integral_scalar(value, label):
+    values = _validated_non_negative_integral_values([value], label)
+    return int(values[0])
+
+
+def _validated_non_negative_integral_values(values, label):
+    try:
+        numeric_values = np.asarray(values, dtype=float).reshape(-1)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be numeric.") from exc
+    if not np.all(np.isfinite(numeric_values)):
+        raise ValueError(f"{label} must be finite.")
+    if np.any(numeric_values < 0):
+        raise ValueError(f"{label} must be non-negative.")
+    if not np.all(numeric_values == np.rint(numeric_values)):
+        raise ValueError(f"{label} must be integral.")
+    return np.rint(numeric_values).astype(int)
 
 
 def _mean_existing(rows, key, default=0.0):

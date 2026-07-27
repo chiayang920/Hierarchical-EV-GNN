@@ -114,6 +114,36 @@ def test_slot_to_charger_id_uses_ev2gym_port_order_for_non_uniform_ports():
     assert build_slot_to_charger_id(env).tolist() == [10, 10, 11, 12, 12, 12]
 
 
+def test_slot_to_charger_id_rejects_duplicate_charger_ids():
+    from utils.infrastructure_diagnostics import build_slot_to_charger_id
+
+    env = fake_env([
+        fake_charger(0, 1, 0),
+        fake_charger(0, 1, 1),
+    ])
+
+    with pytest.raises(ValueError, match="Duplicate charging station IDs"):
+        build_slot_to_charger_id(env)
+
+
+@pytest.mark.parametrize(
+    ("charger_id", "expected_message"),
+    [
+        (0.5, "charging station ID must be integral"),
+        (-1, "charging station ID must be non-negative"),
+        (np.nan, "charging station ID must be finite"),
+        (np.inf, "charging station ID must be finite"),
+    ],
+)
+def test_slot_to_charger_id_rejects_invalid_charger_ids(charger_id, expected_message):
+    from utils.infrastructure_diagnostics import build_slot_to_charger_id
+
+    env = fake_env([fake_charger(charger_id, 1, 0)])
+
+    with pytest.raises(ValueError, match=expected_message):
+        build_slot_to_charger_id(env)
+
+
 def test_charger_to_transformer_id_uses_realized_env_topology():
     from utils.infrastructure_diagnostics import build_charger_to_transformer_id
 
@@ -124,6 +154,27 @@ def test_charger_to_transformer_id_uses_realized_env_topology():
     ])
 
     assert build_charger_to_transformer_id(env) == {0: 3, 1: 3, 2: 4}
+
+
+@pytest.mark.parametrize(
+    ("transformer_id", "expected_message"),
+    [
+        (0.5, "connected transformer ID must be integral"),
+        (-1, "connected transformer ID must be non-negative"),
+        (np.nan, "connected transformer ID must be finite"),
+        (np.inf, "connected transformer ID must be finite"),
+    ],
+)
+def test_charger_to_transformer_id_rejects_invalid_transformer_ids(
+    transformer_id,
+    expected_message,
+):
+    from utils.infrastructure_diagnostics import build_charger_to_transformer_id
+
+    env = fake_env([fake_charger(0, 1, transformer_id)])
+
+    with pytest.raises(ValueError, match=expected_message):
+        build_charger_to_transformer_id(env)
 
 
 def test_extract_active_ev_infrastructure_uses_state_action_mapper_and_features():
@@ -142,6 +193,68 @@ def test_extract_active_ev_infrastructure_uses_state_action_mapper_and_features(
     assert metadata["active_slots"].tolist() == [0, 3]
     assert metadata["charger_ids"].tolist() == [10, 12]
     assert metadata["transformer_ids"].tolist() == [7, 8]
+
+
+@pytest.mark.parametrize(
+    ("charger_id", "expected_message"),
+    [
+        (10.4, "EV feature charger IDs must be integral"),
+        (np.nan, "EV feature charger IDs must be finite"),
+        (np.inf, "EV feature charger IDs must be finite"),
+        (-1.0, "EV feature charger IDs must be non-negative"),
+    ],
+)
+def test_extract_active_ev_infrastructure_rejects_invalid_charger_ids(
+    charger_id,
+    expected_message,
+):
+    from utils.infrastructure_diagnostics import extract_active_ev_infrastructure
+
+    state = fake_state(
+        action_mapper=[0],
+        ev_features=[[0.5, 0.0, 1.0, 0.0, charger_id, 0.0]],
+    )
+
+    with pytest.raises(ValueError, match=expected_message):
+        extract_active_ev_infrastructure(state)
+
+
+@pytest.mark.parametrize(
+    ("transformer_id", "expected_message"),
+    [
+        (7.4, "EV feature transformer IDs must be integral"),
+        (np.nan, "EV feature transformer IDs must be finite"),
+        (np.inf, "EV feature transformer IDs must be finite"),
+        (-1.0, "EV feature transformer IDs must be non-negative"),
+    ],
+)
+def test_extract_active_ev_infrastructure_rejects_invalid_transformer_ids(
+    transformer_id,
+    expected_message,
+):
+    from utils.infrastructure_diagnostics import extract_active_ev_infrastructure
+
+    state = fake_state(
+        action_mapper=[0],
+        ev_features=[[0.5, 0.0, 1.0, 0.0, 0.0, transformer_id]],
+    )
+
+    with pytest.raises(ValueError, match=expected_message):
+        extract_active_ev_infrastructure(state)
+
+
+def test_extract_active_ev_infrastructure_accepts_float_encoded_integer_ids():
+    from utils.infrastructure_diagnostics import extract_active_ev_infrastructure
+
+    state = fake_state(
+        action_mapper=[0],
+        ev_features=[[0.5, 0.0, 1.0, 0.0, 10.0, 7.0]],
+    )
+
+    metadata = extract_active_ev_infrastructure(state)
+
+    assert metadata["charger_ids"].tolist() == [10]
+    assert metadata["transformer_ids"].tolist() == [7]
 
 
 def test_active_only_denominator_excludes_inactive_slots():
@@ -1555,6 +1668,75 @@ def test_aggregate_charger_satisfaction_fallback_uses_total_sum_and_served_count
     assert charger_summary["user_satisfaction_source"] == "charger_total_user_satisfaction"
 
 
+@pytest.mark.parametrize(
+    ("served_count", "expected_message"),
+    [
+        (2.6, "total_evs_served must be integral"),
+        (-1, "total_evs_served must be non-negative"),
+        (np.nan, "total_evs_served must be finite"),
+        (np.inf, "total_evs_served must be finite"),
+    ],
+)
+def test_charger_service_summary_rejects_invalid_total_evs_served(
+    served_count,
+    expected_message,
+):
+    from utils.infrastructure_diagnostics import aggregate_infrastructure_actions
+
+    env = fake_env([
+        fake_charger(
+            0,
+            1,
+            0,
+            total_evs_served=served_count,
+            total_user_satisfaction=1.0,
+            all_user_satisfaction=None,
+        )
+    ])
+
+    with pytest.raises(ValueError, match=expected_message):
+        aggregate_infrastructure_actions(
+            mapped_actions_by_step=[np.array([0.5], dtype=float)],
+            active_slots_by_step=[np.array([0], dtype=int)],
+            slot_to_charger_id=np.array([0], dtype=int),
+            charger_to_transformer_id={0: 0},
+            max_action=1.0,
+            tolerance=1e-6,
+            env=env,
+        )
+
+
+@pytest.mark.parametrize("served_count", [2, 2.0])
+def test_charger_service_summary_accepts_integral_total_evs_served(served_count):
+    from utils.infrastructure_diagnostics import aggregate_infrastructure_actions
+
+    env = fake_env([
+        fake_charger(
+            0,
+            1,
+            0,
+            total_evs_served=served_count,
+            total_user_satisfaction=1.5,
+            all_user_satisfaction=None,
+        )
+    ])
+
+    summary = aggregate_infrastructure_actions(
+        mapped_actions_by_step=[np.array([0.5], dtype=float)],
+        active_slots_by_step=[np.array([0], dtype=int)],
+        slot_to_charger_id=np.array([0], dtype=int),
+        charger_to_transformer_id={0: 0},
+        max_action=1.0,
+        tolerance=1e-6,
+        env=env,
+    )
+
+    charger_summary = summary["chargers"][0]
+    assert charger_summary["served_ev_count"] == 2
+    assert charger_summary["user_satisfaction_observation_count"] == 2
+    assert charger_summary["user_satisfaction_mean"] == pytest.approx(0.75)
+
+
 def test_zero_served_charger_has_blank_satisfaction_mean_with_source_metadata():
     from utils.infrastructure_diagnostics import aggregate_infrastructure_actions
 
@@ -1711,6 +1893,18 @@ def test_non_finite_environment_action_bounds_fail_clearly(low_values, high_valu
     )
 
     with pytest.raises(ValueError, match="Environment action-space bounds must be finite"):
+        validate_environment_action_bounds(action_space, tolerance=1e-6)
+
+
+def test_environment_action_bounds_reject_low_greater_than_high():
+    from utils.infrastructure_diagnostics import validate_environment_action_bounds
+
+    action_space = SimpleNamespace(
+        low=np.array([0.0, 2.0], dtype=float),
+        high=np.array([1.0, 1.0], dtype=float),
+    )
+
+    with pytest.raises(ValueError, match="Environment action-space low bounds must not exceed high bounds"):
         validate_environment_action_bounds(action_space, tolerance=1e-6)
 
 
