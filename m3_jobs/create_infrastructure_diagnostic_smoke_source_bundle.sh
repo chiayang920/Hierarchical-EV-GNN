@@ -24,6 +24,9 @@ ALLOWLIST=(
   config_files/PublicPST_500.yaml
   config_files/PublicPST_1000.yaml
   m3_jobs/19_infrastructure_diagnostic_smoke_eval.slurm
+  m3_jobs/20_infrastructure_diagnostic_smoke_reduce_bundle.slurm
+  m3_jobs/submit_infrastructure_diagnostic_smoke_workflow.sh
+  docs/infrastructure_diagnostic_smoke_protocol.md
   scripts/validate_infrastructure_diagnostic_smoke.py
   utils/ev2gym_training_utils.py
   utils/infrastructure_diagnostics.py

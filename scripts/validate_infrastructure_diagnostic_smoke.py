@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 import argparse
+import contextlib
 import csv
 import hashlib
+import io
 import json
 import math
 import re
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 from argparse import Namespace
 from pathlib import Path, PurePosixPath
 
@@ -224,6 +228,48 @@ TRANSFORMER_REQUIRED_COLUMNS = {
     "diagnostic_schema_version",
 }
 
+DIAGNOSTIC_PACKAGE_CSVS = [
+    "diagnostics/episode_diagnostics.csv",
+    "diagnostics/seed_summary_diagnostics.csv",
+    "diagnostics/transformer_diagnostics.csv",
+    "diagnostics/charger_diagnostics.csv",
+]
+
+SERIOUS_LOG_SIGNATURES = [
+    "Traceback",
+    "RuntimeError",
+    "ValueError",
+    "Killed",
+    "Out Of Memory",
+    "OOM",
+    "Segmentation fault",
+    "Bus error",
+]
+
+KNOWN_WARNING_SUBSTRINGS = [
+    "pkg_resources is deprecated as an API",
+]
+
+COMPLETE_BUNDLE_REQUIRED_FILES = [
+    "summaries/task_inventory.csv",
+    "summaries/runtime_summary.csv",
+    "summaries/canonical_reconciliation_summary.csv",
+    "summaries/service_reconciliation_summary.csv",
+    "summaries/source_provenance_summary.csv",
+    "summaries/warning_inventory.csv",
+    "summaries/failure_manifest.csv",
+    "runtime_metadata/source_commit_sha.txt",
+    "runtime_metadata/array_job_id.txt",
+    "runtime_metadata/reducer_job_id.txt",
+    "runtime_metadata/sacct_raw.txt",
+    "runtime_metadata/reducer_runtime_metadata.env",
+    "runtime_metadata/reducer_markers.env",
+    "runtime_metadata/reducer_stdout_snapshot.log",
+    "runtime_metadata/reducer_stderr_snapshot.log",
+    "runtime_metadata/complete_file_list.txt",
+    "runtime_metadata/complete_file_checksums.sha256",
+]
+
 
 class ValidationError(Exception):
     pass
@@ -241,6 +287,17 @@ def formal_package_name(mapping):
         f"m3_controlled_multiscale_formal_{mapping['scale']}_{mapping['algorithm']}_seed0_"
         f"job{FORMAL_JOB_ID}_task{mapping['formal_task_id']}.tar.gz"
     )
+
+
+def smoke_task_package_name(mapping, array_job_id):
+    return (
+        f"m3_infrastructure_diagnostic_smoke_{mapping['scale']}_{mapping['algorithm']}_seed0_"
+        f"job{array_job_id}_task{mapping['task_id']}.tar.gz"
+    )
+
+
+def smoke_slurm_log_name(array_job_id, task_id, suffix):
+    return f"evgnn_infra_diag_smoke_{array_job_id}_{task_id}.{suffix}"
 
 
 def run_name(mapping):
@@ -1485,6 +1542,640 @@ def validate_task_package(args):
     print(json.dumps({"status": "ok", "task_id": mapping["task_id"], "package": str(package_path)}, sort_keys=True))
 
 
+def csv_text(rows, fieldnames):
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+    writer.writerows(rows)
+    return output.getvalue()
+
+
+def write_csv_rows(path, fieldnames, rows):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(csv_text(rows, fieldnames), encoding="utf-8")
+
+
+def is_available_accounting_value(value):
+    return str(value or "").strip() not in {"", "Unknown", "N/A", "None"}
+
+
+def parse_sacct_raw(raw_text, array_job_id):
+    parents = {}
+    batches = {}
+    for line in raw_text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("JobIDRaw|"):
+            continue
+        cells = stripped.split("|")
+        if len(cells) < 7:
+            raise ValidationError(f"invalid sacct row: {line!r}")
+        row = {
+            "JobIDRaw": cells[0],
+            "State": cells[1],
+            "ExitCode": cells[2],
+            "ElapsedRaw": cells[3],
+            "AllocCPUS": cells[4],
+            "MaxRSS": cells[5],
+            "TotalCPU": cells[6],
+        }
+        parent_match = re.fullmatch(rf"{re.escape(str(array_job_id))}_([0-9]+)", row["JobIDRaw"])
+        batch_match = re.fullmatch(rf"{re.escape(str(array_job_id))}_([0-9]+)\.batch", row["JobIDRaw"])
+        if parent_match:
+            task_id = int(parent_match.group(1))
+            if task_id not in TASKS:
+                raise ValidationError(f"unexpected accounting task identity: {row['JobIDRaw']}")
+            if task_id in parents:
+                raise ValidationError(f"duplicate or contradictory accounting row for {row['JobIDRaw']}")
+            parents[task_id] = row
+            continue
+        if batch_match:
+            task_id = int(batch_match.group(1))
+            if task_id not in TASKS:
+                raise ValidationError(f"unexpected accounting batch task identity: {row['JobIDRaw']}")
+            if task_id in batches:
+                raise ValidationError(f"duplicate or contradictory accounting row for {row['JobIDRaw']}")
+            batches[task_id] = row
+
+    missing = sorted(set(TASKS) - set(parents))
+    if missing:
+        raise ValidationError(f"required accounting unavailable for task(s): {missing}")
+
+    runtime_rows = []
+    for task_id in sorted(TASKS):
+        parent = parents[task_id]
+        if parent["State"] != "COMPLETED":
+            raise ValidationError(
+                f"Slurm accounting task {array_job_id}_{task_id} must be COMPLETED, got {parent['State']}"
+            )
+        if parent["ExitCode"] != "0:0":
+            raise ValidationError(
+                f"Slurm accounting task {array_job_id}_{task_id} ExitCode must be 0:0, got {parent['ExitCode']}"
+            )
+        batch = batches.get(task_id, {})
+        maxrss_source = "parent"
+        totalcpu_source = "parent"
+        maxrss = parent["MaxRSS"]
+        totalcpu = parent["TotalCPU"]
+        if not is_available_accounting_value(maxrss):
+            maxrss = batch.get("MaxRSS", "")
+            maxrss_source = "batch"
+        if not is_available_accounting_value(totalcpu):
+            totalcpu = batch.get("TotalCPU", "")
+            totalcpu_source = "batch"
+        if not is_available_accounting_value(maxrss):
+            raise ValidationError(f"MaxRSS unavailable for Slurm task {array_job_id}_{task_id}")
+        if not is_available_accounting_value(totalcpu):
+            raise ValidationError(f"TotalCPU unavailable for Slurm task {array_job_id}_{task_id}")
+        runtime_rows.append(
+            {
+                "task_id": task_id,
+                "job_id_raw": parent["JobIDRaw"],
+                "state": parent["State"],
+                "exit_code": parent["ExitCode"],
+                "elapsed_raw": parent["ElapsedRaw"],
+                "alloc_cpus": parent["AllocCPUS"],
+                "max_rss": maxrss,
+                "total_cpu": totalcpu,
+                "maxrss_source": maxrss_source,
+                "totalcpu_source": totalcpu_source,
+            }
+        )
+    return runtime_rows
+
+
+def collect_sacct_raw(args):
+    if getattr(args, "sacct_raw_file", None):
+        return Path(args.sacct_raw_file).read_text(encoding="utf-8")
+
+    attempts = max(1, int(args.sacct_attempts))
+    last_error = None
+    raw_text = ""
+    command = [
+        str(args.sacct_command),
+        "-j",
+        str(args.array_job_id),
+        "--parsable2",
+        "--noheader",
+        "--format=JobIDRaw,State,ExitCode,ElapsedRaw,AllocCPUS,MaxRSS,TotalCPU",
+    ]
+    for attempt in range(1, attempts + 1):
+        completed = subprocess.run(
+            command,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if completed.returncode != 0:
+            last_error = ValidationError(
+                f"sacct command failed on attempt {attempt}: {completed.stderr.strip()}"
+            )
+        else:
+            raw_text = completed.stdout
+            try:
+                parse_sacct_raw(raw_text, args.array_job_id)
+                return raw_text
+            except ValidationError as exc:
+                last_error = exc
+        if attempt < attempts:
+            time.sleep(float(args.sacct_delay_seconds))
+    raise ValidationError(f"Slurm accounting unavailable after {attempts} attempt(s): {last_error}")
+
+
+def validate_expected_paths(paths, expected_paths, label):
+    observed = sorted(Path(path).name for path in paths)
+    expected = sorted(Path(path).name for path in expected_paths)
+    if len(observed) != len(expected):
+        raise ValidationError(f"expected exactly {len(expected)} {label}, got {len(observed)}")
+    missing = sorted(set(expected) - set(observed))
+    unexpected = sorted(set(observed) - set(expected))
+    if missing:
+        raise ValidationError(f"missing expected {label}: {', '.join(missing)}")
+    if unexpected:
+        raise ValidationError(f"unexpected {label}: {', '.join(unexpected)}")
+
+
+def scan_log_text(source_name, text):
+    warnings = []
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        lowered = line.lower()
+        for signature in SERIOUS_LOG_SIGNATURES:
+            if signature.lower() in lowered:
+                raise ValidationError(f"serious log signature {signature!r} in {source_name}:{line_number}: {line}")
+        if "warning" in lowered:
+            if any(known in line for known in KNOWN_WARNING_SUBSTRINGS):
+                continue
+            warnings.append(
+                {
+                    "source": source_name,
+                    "line_number": line_number,
+                    "warning": line.strip(),
+                }
+            )
+    return warnings
+
+
+def read_json_file(path, label):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValidationError(f"{label} is not valid JSON") from exc
+
+
+def validate_and_summarise_task_package(package_path, mapping, array_job_id, expected_source_commit, extract_root):
+    with contextlib.redirect_stdout(io.StringIO()):
+        validate_task_package(Namespace(task_id=mapping["task_id"], package=str(package_path)))
+
+    task_extract_dir = Path(extract_root) / f"task{mapping['task_id']}"
+    safe_extract_tar(package_path, task_extract_dir)
+    task_validation = load_task_validation(task_extract_dir, mapping)
+    if str(task_validation.get("matrix_job_id")) != str(array_job_id):
+        raise ValidationError(
+            f"task_validation.json matrix_job_id mismatch for task {mapping['task_id']}: "
+            f"{task_validation.get('matrix_job_id')} != {array_job_id}"
+        )
+    source_commit = (task_extract_dir / "runtime_metadata/source_commit_sha.txt").read_text(encoding="utf-8").strip()
+    if source_commit != expected_source_commit:
+        raise ValidationError(
+            f"source commit mismatch for task {mapping['task_id']}: {source_commit} != {expected_source_commit}"
+        )
+    validate_source_package_provenance(task_extract_dir, mapping)
+    validate_packaged_reconciliation(task_extract_dir)
+    require_files(task_extract_dir, DIAGNOSTIC_PACKAGE_CSVS)
+    diagnostic_csv_count = len(DIAGNOSTIC_PACKAGE_CSVS)
+
+    episode_rows, _ = read_rows(task_extract_dir / "diagnostics/episode_diagnostics.csv")
+    charger_rows, _ = read_rows(task_extract_dir / "diagnostics/charger_diagnostics.csv")
+    transformer_rows, _ = read_rows(task_extract_dir / "diagnostics/transformer_diagnostics.csv")
+    reconciliation_rows, _ = read_rows(task_extract_dir / "validation/canonical_reconciliation.csv")
+    source_resolution = read_json_file(
+        task_extract_dir / "runtime_metadata/source_package_resolution.json",
+        "source_package_resolution.json",
+    )
+
+    warnings = []
+    for relative in ["stderr.log", "runtime_metadata/evaluator_time_verbose.txt"]:
+        warnings.extend(
+            scan_log_text(
+                f"task{mapping['task_id']}:{relative}",
+                (task_extract_dir / relative).read_text(encoding="utf-8"),
+            )
+        )
+
+    episode = episode_rows[0]
+    inventory_row = {
+        "task_id": mapping["task_id"],
+        "scale": mapping["scale"],
+        "algorithm": mapping["algorithm"],
+        "formal_task_id": mapping["formal_task_id"],
+        "episode_seed": mapping["episode_seed"],
+        "package_name": Path(package_path).name,
+        "package_sha256": sha256_file(package_path),
+        "diagnostic_csv_count": diagnostic_csv_count,
+        "task_validation_rows": 1,
+        "canonical_reconciliation_rows": len(reconciliation_rows),
+    }
+    canonical_rows = []
+    for row in reconciliation_rows:
+        canonical = {"task_id": mapping["task_id"], "scale": mapping["scale"], "algorithm": mapping["algorithm"]}
+        canonical.update(row)
+        canonical_rows.append(canonical)
+    service_row = {
+        "task_id": mapping["task_id"],
+        "scale": mapping["scale"],
+        "algorithm": mapping["algorithm"],
+        "total_ev_served": episode.get("total_ev_served"),
+        "total_energy_charged": episode.get("total_energy_charged"),
+        "total_energy_discharged": episode.get("total_energy_discharged"),
+        "average_user_satisfaction": episode.get("average_user_satisfaction"),
+        "charger_rows": len(charger_rows),
+        "transformer_rows": len(transformer_rows),
+    }
+    source_row = {
+        "task_id": mapping["task_id"],
+        "scale": mapping["scale"],
+        "algorithm": mapping["algorithm"],
+        "source_commit_sha": source_commit,
+        "source_mode": source_resolution.get("source_mode", ""),
+        "package_path": source_resolution.get("package_path", ""),
+        "expected_package_name": source_resolution.get("expected_package_name", ""),
+        "bundle_member": source_resolution.get("bundle_member", ""),
+    }
+    return {
+        "task_id": mapping["task_id"],
+        "inventory": inventory_row,
+        "canonical_rows": canonical_rows,
+        "service": service_row,
+        "source": source_row,
+        "warnings": warnings,
+        "diagnostic_csv_count": diagnostic_csv_count,
+    }
+
+
+def write_complete_manifest(staging_root):
+    staging_root = Path(staging_root)
+    file_list_path = staging_root / "runtime_metadata/complete_file_list.txt"
+    checksum_path = staging_root / "runtime_metadata/complete_file_checksums.sha256"
+    existing_files = sorted(
+        path.relative_to(staging_root).as_posix()
+        for path in staging_root.rglob("*")
+        if path.is_file() and path not in {file_list_path, checksum_path}
+    )
+    listed = existing_files + [
+        "runtime_metadata/complete_file_list.txt",
+        "runtime_metadata/complete_file_checksums.sha256",
+    ]
+    file_list_path.write_text("\n".join(listed) + "\n", encoding="utf-8")
+    manifest_files = sorted(
+        path for path in staging_root.rglob("*")
+        if path.is_file() and path != checksum_path
+    )
+    with checksum_path.open("w", encoding="utf-8") as handle:
+        for path in manifest_files:
+            handle.write(f"{sha256_file(path)}  {path.relative_to(staging_root).as_posix()}\n")
+
+
+def create_complete_bundle(staging_root, bundle_path):
+    with tarfile.open(bundle_path, "w:gz") as bundle:
+        for path in sorted(Path(staging_root).rglob("*")):
+            if path.is_file():
+                bundle.add(path, arcname=path.relative_to(staging_root).as_posix())
+
+
+def read_complete_file_list(extract_root):
+    path = Path(extract_root) / "runtime_metadata/complete_file_list.txt"
+    if not path.is_file():
+        raise ValidationError("missing runtime_metadata/complete_file_list.txt")
+    return sorted(
+        normalise_member_name(line.strip())
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    )
+
+
+def is_prohibited_complete_member(member_name):
+    path = normalise_member_name(member_name)
+    parts = PurePosixPath(path).parts
+    if "__MACOSX" in parts:
+        return True
+    if any(part.startswith("._") for part in parts):
+        return True
+    return False
+
+
+def task_id_from_smoke_package_name(package_name):
+    match = re.fullmatch(r".+_task([0-7])\.tar\.gz", Path(package_name).name)
+    if not match:
+        raise ValidationError(f"cannot infer task id from task package name: {package_name}")
+    return int(match.group(1))
+
+
+def validate_complete_bundle_file(bundle_path):
+    bundle_path = Path(bundle_path)
+    with open_tar(bundle_path) as bundle:
+        members = safe_tar_members(bundle)
+        member_names = sorted({
+            normalise_member_name(member.name)
+            for member in members
+            if member.isfile()
+        })
+    prohibited = sorted(name for name in member_names if is_prohibited_complete_member(name))
+    if prohibited:
+        raise ValidationError(f"complete bundle contains prohibited member(s): {', '.join(prohibited)}")
+    checkpoint_leaks = sorted(name for name in member_names if is_checkpoint_leak(name))
+    if checkpoint_leaks:
+        raise ValidationError(f"checkpoint bytes are forbidden in complete bundle: {', '.join(checkpoint_leaks)}")
+    require_files_in_bundle = sorted(set(COMPLETE_BUNDLE_REQUIRED_FILES) - set(member_names))
+    if require_files_in_bundle:
+        raise ValidationError(f"complete bundle missing required file(s): {', '.join(require_files_in_bundle)}")
+    task_packages = sorted(name for name in member_names if name.startswith("task_packages/") and name.endswith(".tar.gz"))
+    stdout_logs = sorted(name for name in member_names if name.startswith("logs/") and name.endswith(".out"))
+    stderr_logs = sorted(name for name in member_names if name.startswith("logs/") and name.endswith(".err"))
+    if len(task_packages) != 8:
+        raise ValidationError(f"complete bundle must contain 8 task packages, got {len(task_packages)}")
+    if len(stdout_logs) != 8 or len(stderr_logs) != 8:
+        raise ValidationError(
+            f"complete bundle must contain 8 stdout and 8 stderr logs, got {len(stdout_logs)} and {len(stderr_logs)}"
+        )
+    verify_tar_manifest(
+        bundle_path,
+        "runtime_metadata/complete_file_checksums.sha256",
+        required_coverage=set(member_names) - {"runtime_metadata/complete_file_checksums.sha256"},
+        require_all_files=True,
+    )
+    with tempfile.TemporaryDirectory(prefix="infra_diag_smoke_complete_bundle_") as tmp_dir:
+        extract_root = safe_extract_tar(bundle_path, tmp_dir)
+        listed = read_complete_file_list(extract_root)
+        if listed != member_names:
+            raise ValidationError(
+                "complete_file_list.txt does not exactly match complete bundle members: "
+                f"listed={listed}, members={member_names}"
+            )
+        for package_member in task_packages:
+            task_id = task_id_from_smoke_package_name(package_member)
+            with contextlib.redirect_stdout(io.StringIO()):
+                validate_task_package(
+                    Namespace(
+                        task_id=task_id,
+                        package=str(Path(extract_root) / package_member),
+                    )
+                )
+    return {
+        "status": "ok",
+        "bundle": str(bundle_path),
+        "files": len(member_names),
+        "task_packages": len(task_packages),
+        "stdout_logs": len(stdout_logs),
+        "stderr_logs": len(stderr_logs),
+    }
+
+
+def final_complete_bundle_path(output_root, array_job_id):
+    return Path(output_root) / f"infrastructure_diagnostic_smoke_complete_evidence_job{array_job_id}.tar.gz"
+
+
+def reduce_bundle(args):
+    array_job_id = str(args.array_job_id)
+    expected_source_commit = str(args.source_commit_sha).strip()
+    output_root = Path(args.output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
+    bundle_path = final_complete_bundle_path(output_root, array_job_id)
+    if bundle_path.exists():
+        raise ValidationError(f"final complete evidence bundle already exists: {bundle_path}")
+
+    package_root = Path(args.task_package_root)
+    log_root = Path(args.slurm_log_root)
+    expected_packages = [
+        package_root / smoke_task_package_name(TASKS[task_id], array_job_id)
+        for task_id in sorted(TASKS)
+    ]
+    observed_packages = sorted(package_root.glob("m3_infrastructure_diagnostic_smoke_*.tar.gz"))
+    validate_expected_paths(observed_packages, expected_packages, "task packages")
+
+    expected_stdout_logs = [
+        log_root / smoke_slurm_log_name(array_job_id, task_id, "out")
+        for task_id in sorted(TASKS)
+    ]
+    expected_stderr_logs = [
+        log_root / smoke_slurm_log_name(array_job_id, task_id, "err")
+        for task_id in sorted(TASKS)
+    ]
+    observed_stdout_logs = sorted(log_root.glob(f"evgnn_infra_diag_smoke_{array_job_id}_*.out"))
+    observed_stderr_logs = sorted(log_root.glob(f"evgnn_infra_diag_smoke_{array_job_id}_*.err"))
+    validate_expected_paths(observed_stdout_logs, expected_stdout_logs, "Slurm stdout logs")
+    validate_expected_paths(observed_stderr_logs, expected_stderr_logs, "Slurm stderr logs")
+
+    sacct_raw = collect_sacct_raw(args)
+    runtime_rows = parse_sacct_raw(sacct_raw, array_job_id)
+
+    work_root = Path(args.work_root) / f"job{array_job_id}"
+    staging_root = work_root / "complete_bundle_staging"
+    if staging_root.exists():
+        shutil.rmtree(staging_root)
+    for subdir in ["task_packages", "logs", "summaries", "runtime_metadata"]:
+        (staging_root / subdir).mkdir(parents=True, exist_ok=True)
+
+    warning_rows = []
+    for task_id, stderr_log in enumerate(expected_stderr_logs):
+        warning_rows.extend(scan_log_text(f"slurm:{stderr_log.name}", stderr_log.read_text(encoding="utf-8")))
+
+    task_inventory_rows = []
+    canonical_summary_rows = []
+    service_summary_rows = []
+    source_summary_rows = []
+    diagnostic_csv_count = 0
+    task_identities = []
+    with tempfile.TemporaryDirectory(prefix="infra_diag_smoke_reducer_tasks_") as tmp_dir:
+        for task_id in sorted(TASKS):
+            mapping = TASKS[task_id]
+            package_path = package_root / smoke_task_package_name(mapping, array_job_id)
+            summary = validate_and_summarise_task_package(
+                package_path,
+                mapping,
+                array_job_id,
+                expected_source_commit,
+                Path(tmp_dir),
+            )
+            task_identities.append(summary["task_id"])
+            task_inventory_rows.append(summary["inventory"])
+            canonical_summary_rows.extend(summary["canonical_rows"])
+            service_summary_rows.append(summary["service"])
+            source_summary_rows.append(summary["source"])
+            warning_rows.extend(summary["warnings"])
+            diagnostic_csv_count += summary["diagnostic_csv_count"]
+            shutil.copy2(package_path, staging_root / "task_packages" / package_path.name)
+    if sorted(task_identities) != list(sorted(TASKS)):
+        raise ValidationError(f"duplicate or missing task identities: {task_identities}")
+    if diagnostic_csv_count != 32:
+        raise ValidationError(f"expected 32 internal diagnostic CSV files, got {diagnostic_csv_count}")
+
+    for stdout_log in expected_stdout_logs:
+        shutil.copy2(stdout_log, staging_root / "logs" / stdout_log.name)
+    for stderr_log in expected_stderr_logs:
+        shutil.copy2(stderr_log, staging_root / "logs" / stderr_log.name)
+
+    write_csv_rows(
+        staging_root / "summaries/task_inventory.csv",
+        [
+            "task_id",
+            "scale",
+            "algorithm",
+            "formal_task_id",
+            "episode_seed",
+            "package_name",
+            "package_sha256",
+            "diagnostic_csv_count",
+            "task_validation_rows",
+            "canonical_reconciliation_rows",
+        ],
+        task_inventory_rows,
+    )
+    write_csv_rows(
+        staging_root / "summaries/runtime_summary.csv",
+        [
+            "task_id",
+            "job_id_raw",
+            "state",
+            "exit_code",
+            "elapsed_raw",
+            "alloc_cpus",
+            "max_rss",
+            "total_cpu",
+            "maxrss_source",
+            "totalcpu_source",
+        ],
+        runtime_rows,
+    )
+    write_csv_rows(
+        staging_root / "summaries/canonical_reconciliation_summary.csv",
+        [
+            "task_id",
+            "scale",
+            "algorithm",
+            "field",
+            "comparison_type",
+            "canonical_value",
+            "diagnostic_value",
+            "absolute_difference",
+            "relative_difference",
+            "absolute_tolerance",
+            "relative_tolerance",
+            "pass",
+        ],
+        canonical_summary_rows,
+    )
+    write_csv_rows(
+        staging_root / "summaries/service_reconciliation_summary.csv",
+        [
+            "task_id",
+            "scale",
+            "algorithm",
+            "total_ev_served",
+            "total_energy_charged",
+            "total_energy_discharged",
+            "average_user_satisfaction",
+            "charger_rows",
+            "transformer_rows",
+        ],
+        service_summary_rows,
+    )
+    write_csv_rows(
+        staging_root / "summaries/source_provenance_summary.csv",
+        [
+            "task_id",
+            "scale",
+            "algorithm",
+            "source_commit_sha",
+            "source_mode",
+            "package_path",
+            "expected_package_name",
+            "bundle_member",
+        ],
+        source_summary_rows,
+    )
+    write_csv_rows(
+        staging_root / "summaries/warning_inventory.csv",
+        ["source", "line_number", "warning"],
+        warning_rows,
+    )
+    write_csv_rows(
+        staging_root / "summaries/failure_manifest.csv",
+        ["failure_id", "severity", "description"],
+        [],
+    )
+
+    runtime_metadata = staging_root / "runtime_metadata"
+    (runtime_metadata / "source_commit_sha.txt").write_text(expected_source_commit + "\n", encoding="utf-8")
+    (runtime_metadata / "array_job_id.txt").write_text(array_job_id + "\n", encoding="utf-8")
+    (runtime_metadata / "reducer_job_id.txt").write_text(str(args.reducer_job_id) + "\n", encoding="utf-8")
+    (runtime_metadata / "sacct_raw.txt").write_text(sacct_raw, encoding="utf-8")
+    stdout_snapshot = Path(args.reducer_stdout_log)
+    stderr_snapshot = Path(args.reducer_stderr_log)
+    (runtime_metadata / "reducer_stdout_snapshot.log").write_text(
+        stdout_snapshot.read_text(encoding="utf-8") if stdout_snapshot.is_file() else "",
+        encoding="utf-8",
+    )
+    (runtime_metadata / "reducer_stderr_snapshot.log").write_text(
+        stderr_snapshot.read_text(encoding="utf-8") if stderr_snapshot.is_file() else "",
+        encoding="utf-8",
+    )
+    reducer_runtime = {
+        "array_job_id": array_job_id,
+        "reducer_job_id": str(args.reducer_job_id),
+        "task_package_count": "8",
+        "stdout_log_count": "8",
+        "stderr_log_count": "8",
+        "diagnostic_csv_count": str(diagnostic_csv_count),
+        "warning_count": str(len(warning_rows)),
+        "complete_bundle_path": str(bundle_path),
+    }
+    (runtime_metadata / "reducer_runtime_metadata.env").write_text(
+        "".join(f"{key}={value}\n" for key, value in reducer_runtime.items()),
+        encoding="utf-8",
+    )
+    markers = {
+        "TASK_PACKAGE_COUNT": "8",
+        "STDOUT_LOG_COUNT": "8",
+        "STDERR_LOG_COUNT": "8",
+        "DIAGNOSTIC_CSV_COUNT": str(diagnostic_csv_count),
+        "ALL_TASK_CHECKSUMS_OK": "1",
+        "ALL_SCHEMA_VERSION_3": "1",
+        "ALL_CANONICAL_RECONCILIATIONS_OK": "1",
+        "ALL_SERVICE_RECONCILIATIONS_OK": "1",
+        "ALL_ACTION_CONTRACTS_OK": "1",
+        "ALL_RUNTIME_METADATA_PRESENT": "1",
+        "ALL_SLURM_TASKS_COMPLETED": "1",
+        "COMPLETE_DIAGNOSTIC_SMOKE_BUNDLE_OK": "1",
+        "COMPLETE_DIAGNOSTIC_SMOKE_BUNDLE_PATH": str(bundle_path),
+        "INFRASTRUCTURE_DIAGNOSTIC_SMOKE_REDUCER_COMPLETED": "1",
+    }
+    (runtime_metadata / "reducer_markers.env").write_text(
+        "".join(f"{key}={value}\n" for key, value in markers.items()),
+        encoding="utf-8",
+    )
+
+    write_complete_manifest(staging_root)
+    create_complete_bundle(staging_root, bundle_path)
+    with contextlib.redirect_stdout(io.StringIO()):
+        validation = validate_complete_bundle_file(bundle_path)
+    payload = {
+        "status": "ok",
+        "array_job_id": array_job_id,
+        "bundle_path": str(bundle_path),
+        "diagnostic_csv_count": diagnostic_csv_count,
+        "warning_count": len(warning_rows),
+        **{f"validated_{key}": value for key, value in validation.items() if key != "status"},
+    }
+    print(json.dumps(payload, sort_keys=True))
+
+
+def validate_complete_bundle(args):
+    payload = validate_complete_bundle_file(args.bundle)
+    print(json.dumps(payload, sort_keys=True))
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="Validate Stage C3.2A infrastructure diagnostic smoke evidence.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1518,6 +2209,24 @@ def build_parser():
     task_package_parser = subparsers.add_parser("validate-task-package")
     task_package_parser.add_argument("--task-id", type=int, required=True)
     task_package_parser.add_argument("--package", required=True)
+
+    reduce_parser = subparsers.add_parser("reduce-bundle")
+    reduce_parser.add_argument("--array-job-id", required=True)
+    reduce_parser.add_argument("--task-package-root", required=True)
+    reduce_parser.add_argument("--slurm-log-root", required=True)
+    reduce_parser.add_argument("--output-root", required=True)
+    reduce_parser.add_argument("--work-root", required=True)
+    reduce_parser.add_argument("--source-commit-sha", required=True)
+    reduce_parser.add_argument("--reducer-job-id", required=True)
+    reduce_parser.add_argument("--sacct-raw-file")
+    reduce_parser.add_argument("--sacct-command", default="sacct")
+    reduce_parser.add_argument("--sacct-attempts", type=int, default=6)
+    reduce_parser.add_argument("--sacct-delay-seconds", type=float, default=10.0)
+    reduce_parser.add_argument("--reducer-stdout-log", required=True)
+    reduce_parser.add_argument("--reducer-stderr-log", required=True)
+
+    complete_parser = subparsers.add_parser("validate-complete-bundle")
+    complete_parser.add_argument("--bundle", required=True)
     return parser
 
 
@@ -1538,6 +2247,10 @@ def main(argv=None):
         reconcile_canonical(args)
     elif args.command == "validate-task-package":
         validate_task_package(args)
+    elif args.command == "reduce-bundle":
+        reduce_bundle(args)
+    elif args.command == "validate-complete-bundle":
+        validate_complete_bundle(args)
     else:
         raise ValidationError(f"unsupported command: {args.command}")
 

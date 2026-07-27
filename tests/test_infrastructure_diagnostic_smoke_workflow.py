@@ -18,6 +18,8 @@ SOURCE_BUNDLE_SCRIPT = (
     PROJECT_ROOT / "m3_jobs" / "create_infrastructure_diagnostic_smoke_source_bundle.sh"
 )
 ARRAY_SCRIPT = PROJECT_ROOT / "m3_jobs" / "19_infrastructure_diagnostic_smoke_eval.slurm"
+REDUCER_SCRIPT = PROJECT_ROOT / "m3_jobs" / "20_infrastructure_diagnostic_smoke_reduce_bundle.slurm"
+SUBMIT_SCRIPT = PROJECT_ROOT / "m3_jobs" / "submit_infrastructure_diagnostic_smoke_workflow.sh"
 
 TASKS = [
     (0, "25cp", "actiongnn", 0, 710000, 25, 3),
@@ -257,6 +259,14 @@ def mutate_csv(path, row_index=0, updates=None, delete_columns=()):
     rewrite_csv(path, fieldnames, rows)
 
 
+def task_package_basename(task_id, array_job_id="123456"):
+    _, scale, algorithm, _, _, _, _ = TASKS[task_id]
+    return (
+        f"m3_infrastructure_diagnostic_smoke_{scale}_{algorithm}_seed0_"
+        f"job{array_job_id}_task{task_id}.tar.gz"
+    )
+
+
 def create_diagnostics(
     directory,
     scale="25cp",
@@ -264,6 +274,7 @@ def create_diagnostics(
     charger_count=25,
     transformer_count=3,
     schema_version="3",
+    matrix_job_id="999",
     inactive_nonzero=0,
     negative_fraction=0.0,
     signed_sum=1.0,
@@ -271,7 +282,7 @@ def create_diagnostics(
 ):
     diagnostic_dir = directory / "diagnostics"
     episode_row = {
-        "matrix_job_id": "999",
+        "matrix_job_id": matrix_job_id,
         "scale": scale,
         "algorithm": algorithm,
         "training_seed": "0",
@@ -308,7 +319,7 @@ def create_diagnostics(
         "diagnostic_schema_version": schema_version,
     }
     seed_row = {
-        "matrix_job_id": "999",
+        "matrix_job_id": matrix_job_id,
         "scale": scale,
         "algorithm": algorithm,
         "training_seed": "0",
@@ -329,7 +340,7 @@ def create_diagnostics(
     for charger_id in range(charger_count):
         charger_rows.append(
             {
-                "matrix_job_id": "999",
+                "matrix_job_id": matrix_job_id,
                 "scale": scale,
                 "algorithm": algorithm,
                 "training_seed": "0",
@@ -360,7 +371,7 @@ def create_diagnostics(
         satisfaction = sum(float(row["user_satisfaction_sum"]) for row in chargers)
         transformer_rows.append(
             {
-                "matrix_job_id": "999",
+                "matrix_job_id": matrix_job_id,
                 "scale": scale,
                 "algorithm": algorithm,
                 "training_seed": "0",
@@ -408,6 +419,8 @@ def canonical_episode0_csv_text(scale="25cp", algorithm="actiongnn"):
 
 
 def reconciliation_csv_text(
+    algorithm="actiongnn",
+    episode_seed=710000,
     failed=False,
     missing_field=None,
     duplicate_field=None,
@@ -428,10 +441,10 @@ def reconciliation_csv_text(
     ]
     rows = []
     for field, value in [
-        ("algorithm", "actiongnn"),
+        ("algorithm", algorithm),
         ("training seed", "0"),
         ("episode index", "0"),
-        ("episode seed", "710000"),
+        ("episode seed", str(episode_seed)),
         ("episode steps", "112"),
         ("done", "True"),
         ("total_ev_served", "25"),
@@ -508,31 +521,45 @@ def reconciliation_csv_text(
 
 def create_task_package(
     path,
+    task_id=0,
+    array_job_id="999",
+    source_commit_sha=BASE_SHA,
     include_checkpoint=False,
     task_validation=None,
     failed_reconciliation=False,
     reconciliation_kwargs=None,
     source_resolution=None,
+    stdout_log="",
+    stderr_log="",
+    evaluator_time_verbose="Maximum resident set size (kbytes): 1\n",
     manifest_omit=(),
     file_list_omit=(),
     omit_members=(),
 ):
+    _, scale, algorithm, formal_task_id, episode_seed, charger_count, transformer_count = TASKS[task_id]
     fixture_root = path.parent / f"{path.stem}_fixture"
-    diagnostic_dir = create_diagnostics(fixture_root)
+    diagnostic_dir = create_diagnostics(
+        fixture_root,
+        scale=scale,
+        algorithm=algorithm,
+        charger_count=charger_count,
+        transformer_count=transformer_count,
+        matrix_job_id=str(array_job_id),
+    )
     task_validation = (
         {
             "status": "ok",
-            "task_id": 0,
-            "scale": "25cp",
-            "algorithm": "actiongnn",
-            "formal_task_id": 0,
-            "episode_seed": 710000,
+            "task_id": task_id,
+            "scale": scale,
+            "algorithm": algorithm,
+            "formal_task_id": formal_task_id,
+            "episode_seed": episode_seed,
             "schema_version": "3",
             "episode_rows": 1,
             "seed_summary_rows": 1,
-            "charger_rows": 25,
-            "transformer_rows": 3,
-            "matrix_job_id": "999",
+            "charger_rows": charger_count,
+            "transformer_rows": transformer_count,
+            "matrix_job_id": str(array_job_id),
         }
         if task_validation is None
         else task_validation
@@ -540,8 +567,8 @@ def create_task_package(
     source_resolution = (
         {
             "source_mode": "individual_task_package",
-            "package_path": "/evidence/m3_controlled_multiscale_formal_25cp_actiongnn_seed0_job58513929_task0.tar.gz",
-            "expected_package_name": package_basename(),
+            "package_path": f"/evidence/{package_basename(scale, algorithm, formal_task_id)}",
+            "expected_package_name": package_basename(scale, algorithm, formal_task_id),
         }
         if source_resolution is None
         else source_resolution
@@ -554,22 +581,24 @@ def create_task_package(
     if source_resolution.get("bundle_member"):
         source_package_env += f"bundle_member={source_resolution['bundle_member']}\n"
     members = {
-        "stdout.log": "",
-        "stderr.log": "",
+        "stdout.log": stdout_log,
+        "stderr.log": stderr_log,
         "diagnostics/episode_diagnostics.csv": (diagnostic_dir / "episode_diagnostics.csv").read_text(encoding="utf-8"),
         "diagnostics/seed_summary_diagnostics.csv": (diagnostic_dir / "seed_summary_diagnostics.csv").read_text(encoding="utf-8"),
         "diagnostics/transformer_diagnostics.csv": (diagnostic_dir / "transformer_diagnostics.csv").read_text(encoding="utf-8"),
         "diagnostics/charger_diagnostics.csv": (diagnostic_dir / "charger_diagnostics.csv").read_text(encoding="utf-8"),
-        "canonical/complete_eval30.csv": canonical_csv_text(),
-        "canonical/canonical_episode0.csv": canonical_episode0_csv_text(),
-        "config/formal_config.yaml": formal_config_text(),
+        "canonical/complete_eval30.csv": canonical_csv_text(scale=scale, algorithm=algorithm),
+        "canonical/canonical_episode0.csv": canonical_episode0_csv_text(scale=scale, algorithm=algorithm),
+        "config/formal_config.yaml": formal_config_text(scale=scale),
         "validation/task_validation.json": json.dumps(task_validation, sort_keys=True) + "\n",
         "validation/canonical_reconciliation.csv": reconciliation_csv_text(
+            algorithm=algorithm,
+            episode_seed=episode_seed,
             failed=failed_reconciliation,
             **(reconciliation_kwargs or {}),
         ),
-        "runtime_metadata/source_commit_sha.txt": BASE_SHA + "\n",
-        "runtime_metadata/source_formal_job.env": "formal_job_id=58513929\nformal_task_id=0\n",
+        "runtime_metadata/source_commit_sha.txt": source_commit_sha + "\n",
+        "runtime_metadata/source_formal_job.env": f"formal_job_id=58513929\nformal_task_id={formal_task_id}\n",
         "runtime_metadata/source_package.env": source_package_env,
         "runtime_metadata/source_package_resolution.json": json.dumps(source_resolution, sort_keys=True) + "\n",
         "runtime_metadata/source_package.sha256": "0" * 64 + "  package.tar.gz\n",
@@ -577,8 +606,8 @@ def create_task_package(
         "runtime_metadata/original_source_manifest.sha256": "0" * 64 + "  source.py\n",
         "runtime_metadata/original_task_runtime_metadata.env": "task_id=0\n",
         "runtime_metadata/diagnostic_command.txt": "python evaluate_td3_gnn_infrastructure_diagnostics.py\n",
-        "runtime_metadata/evaluator_time_verbose.txt": "Maximum resident set size (kbytes): 1\n",
-        "runtime_metadata/task_runtime_metadata.env": "task_id=0\n",
+        "runtime_metadata/evaluator_time_verbose.txt": evaluator_time_verbose,
+        "runtime_metadata/task_runtime_metadata.env": f"task_id={task_id}\n",
     }
     if include_checkpoint:
         members["checkpoint_staging/model.best_actor"] = "leak"
@@ -686,6 +715,164 @@ def run_array_real_guard(tmp_path, extra_env=None):
         env=env,
         check=False,
     )
+
+
+def sacct_raw_text(
+    array_job_id="123456",
+    missing_task_ids=(),
+    state_overrides=None,
+    exit_overrides=None,
+    parent_resource_blanks=(),
+    duplicate_parent_rows=(),
+):
+    state_overrides = state_overrides or {}
+    exit_overrides = exit_overrides or {}
+    rows = []
+    for task_id in range(8):
+        if task_id in set(missing_task_ids):
+            continue
+        job_id_raw = f"{array_job_id}_{task_id}"
+        parent_maxrss = "" if task_id in set(parent_resource_blanks) else "2048K"
+        parent_total_cpu = "" if task_id in set(parent_resource_blanks) else "00:00:10"
+        rows.append(
+            "|".join(
+                [
+                    job_id_raw,
+                    state_overrides.get(task_id, "COMPLETED"),
+                    exit_overrides.get(task_id, "0:0"),
+                    "12",
+                    "4",
+                    parent_maxrss,
+                    parent_total_cpu,
+                ]
+            )
+        )
+        rows.append("|".join([f"{job_id_raw}.batch", "COMPLETED", "0:0", "12", "4", "4096K", "00:00:12"]))
+        if task_id in set(duplicate_parent_rows):
+            rows.append("|".join([job_id_raw, "FAILED", "1:0", "12", "4", "2048K", "00:00:10"]))
+    return "\n".join(rows) + "\n"
+
+
+def create_reducer_fixture(
+    tmp_path,
+    array_job_id="123456",
+    source_commit_sha=DYNAMIC_SHA,
+    package_overrides=None,
+    slurm_stderr_overrides=None,
+    missing_stdout_ids=(),
+    missing_stderr_ids=(),
+    sacct_text=None,
+):
+    package_overrides = package_overrides or {}
+    slurm_stderr_overrides = slurm_stderr_overrides or {}
+    package_root = tmp_path / "task_packages"
+    slurm_log_root = tmp_path / "slurm_logs"
+    output_root = tmp_path / "output"
+    work_root = tmp_path / "work"
+    package_root.mkdir()
+    slurm_log_root.mkdir()
+    output_root.mkdir()
+    work_root.mkdir()
+    for task_id in range(8):
+        create_task_package(
+            package_root / task_package_basename(task_id, array_job_id),
+            task_id=task_id,
+            array_job_id=array_job_id,
+            source_commit_sha=source_commit_sha,
+            **package_overrides.get(task_id, {}),
+        )
+        if task_id not in set(missing_stdout_ids):
+            (slurm_log_root / f"evgnn_infra_diag_smoke_{array_job_id}_{task_id}.out").write_text(
+                f"task {task_id} completed\n",
+                encoding="utf-8",
+            )
+        if task_id not in set(missing_stderr_ids):
+            (slurm_log_root / f"evgnn_infra_diag_smoke_{array_job_id}_{task_id}.err").write_text(
+                slurm_stderr_overrides.get(task_id, ""),
+                encoding="utf-8",
+            )
+    sacct_path = tmp_path / "sacct_raw.txt"
+    sacct_path.write_text(sacct_text or sacct_raw_text(array_job_id), encoding="utf-8")
+    reducer_stdout = tmp_path / "reducer_stdout.log"
+    reducer_stderr = tmp_path / "reducer_stderr.log"
+    reducer_stdout.write_text("reducer stdout snapshot\n", encoding="utf-8")
+    reducer_stderr.write_text("reducer stderr snapshot\n", encoding="utf-8")
+    return {
+        "array_job_id": array_job_id,
+        "source_commit_sha": source_commit_sha,
+        "package_root": package_root,
+        "slurm_log_root": slurm_log_root,
+        "output_root": output_root,
+        "work_root": work_root,
+        "sacct_path": sacct_path,
+        "reducer_stdout": reducer_stdout,
+        "reducer_stderr": reducer_stderr,
+    }
+
+
+def run_reducer_validator(fixture, extra_args=(), check=False):
+    return run_validator(
+        "reduce-bundle",
+        "--array-job-id",
+        fixture["array_job_id"],
+        "--task-package-root",
+        fixture["package_root"],
+        "--slurm-log-root",
+        fixture["slurm_log_root"],
+        "--output-root",
+        fixture["output_root"],
+        "--work-root",
+        fixture["work_root"],
+        "--source-commit-sha",
+        fixture["source_commit_sha"],
+        "--reducer-job-id",
+        "reducer123",
+        "--sacct-raw-file",
+        fixture["sacct_path"],
+        "--sacct-attempts",
+        "1",
+        "--sacct-delay-seconds",
+        "0",
+        "--reducer-stdout-log",
+        fixture["reducer_stdout"],
+        "--reducer-stderr-log",
+        fixture["reducer_stderr"],
+        *extra_args,
+        check=check,
+    )
+
+
+def read_bundle_member(bundle_path, member_name):
+    with tarfile.open(bundle_path, "r:gz") as bundle:
+        member = bundle.extractfile(member_name)
+        assert member is not None
+        return member.read().decode("utf-8")
+
+
+def complete_bundle_path(output_root, array_job_id="123456"):
+    return output_root / f"infrastructure_diagnostic_smoke_complete_evidence_job{array_job_id}.tar.gz"
+
+
+def make_delayed_fake_sacct(tmp_path, array_job_id="123456"):
+    fake_sacct = tmp_path / "fake_sacct.py"
+    counter_path = tmp_path / "sacct_counter.txt"
+    counter_path.write_text("0", encoding="utf-8")
+    fake_sacct.write_text(
+        f"""#!{sys.executable}
+from pathlib import Path
+
+counter_path = Path({str(counter_path)!r})
+count = int(counter_path.read_text(encoding="utf-8"))
+counter_path.write_text(str(count + 1), encoding="utf-8")
+if count == 0:
+    print("")
+else:
+    print({sacct_raw_text(array_job_id)!r}, end="")
+""",
+        encoding="utf-8",
+    )
+    fake_sacct.chmod(0o755)
+    return fake_sacct
 
 
 @pytest.mark.parametrize(
@@ -1954,6 +2141,358 @@ def test_task_package_validation_accepts_checkpoint_free_package(tmp_path):
     run_validator("validate-task-package", "--task-id", 0, "--package", task_package)
 
 
+def test_reducer_accepts_exactly_eight_task_packages_and_creates_complete_bundle(tmp_path):
+    fixture = create_reducer_fixture(tmp_path)
+
+    result = run_reducer_validator(fixture)
+    payload = json.loads(result.stdout)
+    bundle_path = Path(payload["bundle_path"])
+
+    assert bundle_path == complete_bundle_path(fixture["output_root"], fixture["array_job_id"])
+    assert bundle_path.is_file()
+    markers = read_bundle_member(bundle_path, "runtime_metadata/reducer_markers.env")
+    assert "TASK_PACKAGE_COUNT=8" in markers
+    assert "COMPLETE_DIAGNOSTIC_SMOKE_BUNDLE_OK=1" in markers
+
+
+def test_reducer_rejects_missing_package_count(tmp_path):
+    fixture = create_reducer_fixture(tmp_path)
+    (fixture["package_root"] / task_package_basename(7, fixture["array_job_id"])).unlink()
+
+    result = run_reducer_validator(fixture)
+
+    assert result.returncode != 0
+    assert "exactly 8 task packages" in result.stderr
+
+
+def test_reducer_rejects_missing_expected_package_name(tmp_path):
+    fixture = create_reducer_fixture(tmp_path)
+    expected = fixture["package_root"] / task_package_basename(3, fixture["array_job_id"])
+    expected.rename(fixture["package_root"] / "m3_infrastructure_diagnostic_smoke_unexpected_job123456_task3.tar.gz")
+
+    result = run_reducer_validator(fixture)
+
+    assert result.returncode != 0
+    assert "missing expected task package" in result.stderr
+
+
+def test_reducer_rejects_duplicate_task_identity_inside_packages(tmp_path):
+    fixture = create_reducer_fixture(tmp_path)
+    task_one_package = fixture["package_root"] / task_package_basename(1, fixture["array_job_id"])
+    task_validation = {
+        "status": "ok",
+        "task_id": 0,
+        "scale": "25cp",
+        "algorithm": "actiongnn",
+        "formal_task_id": 0,
+        "episode_seed": 710000,
+        "schema_version": "3",
+        "episode_rows": 1,
+        "seed_summary_rows": 1,
+        "charger_rows": 25,
+        "transformer_rows": 3,
+        "matrix_job_id": fixture["array_job_id"],
+    }
+    create_task_package(
+        task_one_package,
+        task_id=1,
+        array_job_id=fixture["array_job_id"],
+        source_commit_sha=fixture["source_commit_sha"],
+        task_validation=task_validation,
+    )
+
+    result = run_reducer_validator(fixture)
+
+    assert result.returncode != 0
+    assert "task_validation" in result.stderr
+
+
+def test_reducer_rejects_wrong_source_commit(tmp_path):
+    fixture = create_reducer_fixture(
+        tmp_path,
+        source_commit_sha="e" * 40,
+    )
+
+    result = run_reducer_validator(
+        fixture,
+        extra_args=["--source-commit-sha", DYNAMIC_SHA],
+    )
+
+    assert result.returncode != 0
+    assert "source commit" in result.stderr.lower()
+
+
+def test_reducer_invokes_task_package_validator(tmp_path):
+    fixture = create_reducer_fixture(
+        tmp_path,
+        package_overrides={0: {"omit_members": ["runtime_metadata/source_package_resolution.json"]}},
+    )
+
+    result = run_reducer_validator(fixture)
+
+    assert result.returncode != 0
+    assert "source_package_resolution.json" in result.stderr
+
+
+def test_reducer_counts_32_internal_diagnostic_csvs(tmp_path):
+    fixture = create_reducer_fixture(tmp_path)
+
+    result = run_reducer_validator(fixture)
+    payload = json.loads(result.stdout)
+    markers = read_bundle_member(Path(payload["bundle_path"]), "runtime_metadata/reducer_markers.env")
+
+    assert "DIAGNOSTIC_CSV_COUNT=32" in markers
+
+
+def test_reducer_requires_eight_stdout_and_eight_stderr_logs(tmp_path):
+    fixture = create_reducer_fixture(tmp_path, missing_stdout_ids={4}, missing_stderr_ids={5})
+
+    result = run_reducer_validator(fixture)
+
+    assert result.returncode != 0
+    assert "Slurm stdout" in result.stderr or "Slurm stderr" in result.stderr
+
+
+def test_reducer_rejects_serious_stderr_signature(tmp_path):
+    fixture = create_reducer_fixture(
+        tmp_path,
+        package_overrides={2: {"stderr_log": "RuntimeError: failed\n"}},
+    )
+
+    result = run_reducer_validator(fixture)
+
+    assert result.returncode != 0
+    assert "RuntimeError" in result.stderr
+
+
+def test_reducer_allows_known_pkg_resources_warning(tmp_path):
+    known_warning = (
+        "/opt/env/site-packages/ev2gym/utilities/loaders.py:9: "
+        "UserWarning: pkg_resources is deprecated as an API\n"
+    )
+    fixture = create_reducer_fixture(tmp_path, slurm_stderr_overrides={0: known_warning})
+
+    result = run_reducer_validator(fixture)
+
+    assert result.returncode == 0, result.stderr
+    warning_inventory = read_bundle_member(
+        Path(json.loads(result.stdout)["bundle_path"]),
+        "summaries/warning_inventory.csv",
+    )
+    assert "pkg_resources is deprecated" not in warning_inventory
+
+
+def test_reducer_records_unknown_warning_inventory(tmp_path):
+    fixture = create_reducer_fixture(
+        tmp_path,
+        slurm_stderr_overrides={0: "UserWarning: unexpected calibration warning\n"},
+    )
+
+    result = run_reducer_validator(fixture)
+
+    assert result.returncode == 0, result.stderr
+    warning_inventory = read_bundle_member(
+        Path(json.loads(result.stdout)["bundle_path"]),
+        "summaries/warning_inventory.csv",
+    )
+    assert "unexpected calibration warning" in warning_inventory
+
+
+def test_reducer_retries_until_sacct_data_is_available(tmp_path):
+    fixture = create_reducer_fixture(tmp_path)
+    fake_sacct = make_delayed_fake_sacct(tmp_path, fixture["array_job_id"])
+
+    result = run_validator(
+        "reduce-bundle",
+        "--array-job-id",
+        fixture["array_job_id"],
+        "--task-package-root",
+        fixture["package_root"],
+        "--slurm-log-root",
+        fixture["slurm_log_root"],
+        "--output-root",
+        fixture["output_root"],
+        "--work-root",
+        fixture["work_root"],
+        "--source-commit-sha",
+        fixture["source_commit_sha"],
+        "--reducer-job-id",
+        "reducer123",
+        "--sacct-command",
+        fake_sacct,
+        "--sacct-attempts",
+        "2",
+        "--sacct-delay-seconds",
+        "0",
+        "--reducer-stdout-log",
+        fixture["reducer_stdout"],
+        "--reducer-stderr-log",
+        fixture["reducer_stderr"],
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_reducer_rejects_missing_task_accounting(tmp_path):
+    fixture = create_reducer_fixture(
+        tmp_path,
+        sacct_text=sacct_raw_text("123456", missing_task_ids={6}),
+    )
+
+    result = run_reducer_validator(fixture)
+
+    assert result.returncode != 0
+    assert "accounting" in result.stderr.lower()
+
+
+def test_reducer_rejects_non_completed_state(tmp_path):
+    fixture = create_reducer_fixture(
+        tmp_path,
+        sacct_text=sacct_raw_text("123456", state_overrides={2: "FAILED"}),
+    )
+
+    result = run_reducer_validator(fixture)
+
+    assert result.returncode != 0
+    assert "COMPLETED" in result.stderr
+
+
+def test_reducer_rejects_nonzero_exit_code(tmp_path):
+    fixture = create_reducer_fixture(
+        tmp_path,
+        sacct_text=sacct_raw_text("123456", exit_overrides={2: "1:0"}),
+    )
+
+    result = run_reducer_validator(fixture)
+
+    assert result.returncode != 0
+    assert "ExitCode" in result.stderr
+
+
+def test_reducer_uses_batch_step_for_missing_parent_maxrss(tmp_path):
+    fixture = create_reducer_fixture(
+        tmp_path,
+        sacct_text=sacct_raw_text("123456", parent_resource_blanks={0}),
+    )
+
+    result = run_reducer_validator(fixture)
+    runtime_summary = read_bundle_member(
+        Path(json.loads(result.stdout)["bundle_path"]),
+        "summaries/runtime_summary.csv",
+    )
+
+    assert "123456_0,COMPLETED,0:0,12,4,4096K,00:00:12,batch,batch" in runtime_summary
+
+
+def test_reducer_rejects_contradictory_accounting_rows(tmp_path):
+    fixture = create_reducer_fixture(
+        tmp_path,
+        sacct_text=sacct_raw_text("123456", duplicate_parent_rows={0}),
+    )
+
+    result = run_reducer_validator(fixture)
+
+    assert result.returncode != 0
+    assert "duplicate" in result.stderr.lower() or "contradictory" in result.stderr.lower()
+
+
+def test_reducer_refuses_to_overwrite_final_bundle(tmp_path):
+    fixture = create_reducer_fixture(tmp_path)
+    final_bundle = complete_bundle_path(fixture["output_root"], fixture["array_job_id"])
+    final_bundle.write_text("existing", encoding="utf-8")
+
+    result = run_reducer_validator(fixture)
+
+    assert result.returncode != 0
+    assert "already exists" in result.stderr
+
+
+def test_reducer_rejects_checkpoint_leak_from_task_package(tmp_path):
+    fixture = create_reducer_fixture(
+        tmp_path,
+        package_overrides={0: {"include_checkpoint": True}},
+    )
+
+    result = run_reducer_validator(fixture)
+
+    assert result.returncode != 0
+    assert "checkpoint" in result.stderr.lower()
+
+
+def test_reducer_validates_final_manifest_and_file_list(tmp_path):
+    fixture = create_reducer_fixture(tmp_path)
+
+    result = run_reducer_validator(fixture)
+    bundle_path = Path(json.loads(result.stdout)["bundle_path"])
+    validation = run_validator("validate-complete-bundle", "--bundle", bundle_path)
+
+    assert json.loads(validation.stdout)["status"] == "ok"
+
+
+def test_reducer_script_dry_run(tmp_path):
+    env = {
+        **os.environ,
+        "EV_GNN_DIAGNOSTIC_SMOKE_REDUCER_DRY_RUN": "1",
+        "EV_GNN_DIAGNOSTIC_SMOKE_ARRAY_JOB_ID": "123456",
+    }
+    result = subprocess.run(
+        ["bash", str(REDUCER_SCRIPT)],
+        cwd=PROJECT_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "DRY_RUN_NO_REDUCTION_OR_PACKAGING" in result.stdout
+    assert "infrastructure_diagnostic_smoke_complete_evidence_job123456.tar.gz" in result.stdout
+
+
+def test_submit_helper_dry_run_prints_mapping_and_sbatch_commands():
+    env = {
+        **os.environ,
+        "EV_GNN_DIAGNOSTIC_SMOKE_SUBMIT_DRY_RUN": "1",
+        "EV_GNN_DIAGNOSTIC_SMOKE_EXPECTED_SOURCE_COMMIT": DYNAMIC_SHA,
+    }
+    result = subprocess.run(
+        ["bash", str(SUBMIT_SCRIPT)],
+        cwd=PROJECT_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "task_id=0 scale=25cp algorithm=actiongnn formal_task_id=0 episode_seed=710000" in result.stdout
+    assert "SBATCH_ARRAY_COMMAND=sbatch --parsable" in result.stdout
+    assert "SBATCH_REDUCER_COMMAND=sbatch --parsable" in result.stdout
+
+
+def test_submit_helper_uses_afterok_dependency_in_dry_run():
+    env = {
+        **os.environ,
+        "EV_GNN_DIAGNOSTIC_SMOKE_SUBMIT_DRY_RUN": "1",
+        "EV_GNN_DIAGNOSTIC_SMOKE_EXPECTED_SOURCE_COMMIT": DYNAMIC_SHA,
+    }
+    result = subprocess.run(
+        ["bash", str(SUBMIT_SCRIPT)],
+        cwd=PROJECT_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "--dependency=afterok:<array_job_id>" in result.stdout
+
+
 def test_source_bundle_prohibited_path_rejection():
     env = {
         **os.environ,
@@ -2005,6 +2544,24 @@ def test_source_bundle_dry_run():
 
     assert result.returncode == 0
     assert "DRY_RUN_NO_ARCHIVE_CREATED" in result.stdout
+
+
+def test_source_bundle_allowlist_includes_batch_b_runtime_files():
+    env = {**os.environ, "EV_GNN_DIAGNOSTIC_SMOKE_SOURCE_DRY_RUN": "1"}
+    result = subprocess.run(
+        ["bash", str(SOURCE_BUNDLE_SCRIPT)],
+        cwd=PROJECT_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "m3_jobs/20_infrastructure_diagnostic_smoke_reduce_bundle.slurm" in result.stdout
+    assert "m3_jobs/submit_infrastructure_diagnostic_smoke_workflow.sh" in result.stdout
+    assert "docs/infrastructure_diagnostic_smoke_protocol.md" in result.stdout
 
 
 def test_source_bundle_real_mode_writes_basename_checksum_and_dynamic_head(tmp_path):
@@ -2103,16 +2660,25 @@ def test_array_script_rejects_existing_output_package_before_real_work(tmp_path)
     assert "package already exists" in result.stderr
 
 
-def test_m3_array_script_contains_no_git_or_training_command():
-    script_text = ARRAY_SCRIPT.read_text(encoding="utf-8")
+@pytest.mark.parametrize("script_path", [ARRAY_SCRIPT, REDUCER_SCRIPT, SUBMIT_SCRIPT])
+def test_m3_runtime_scripts_contain_no_git_or_training_command(script_path):
+    script_text = script_path.read_text(encoding="utf-8")
 
     assert "git " not in script_text
     assert "train_td3_gnn.py" not in script_text
+    assert "train_td3_gnn" not in script_text
 
 
-def test_bash_syntax_for_batch_a_scripts():
+def test_bash_syntax_for_batch_a_and_b_scripts():
     result = subprocess.run(
-        ["bash", "-n", str(SOURCE_BUNDLE_SCRIPT), str(ARRAY_SCRIPT)],
+        [
+            "bash",
+            "-n",
+            str(SOURCE_BUNDLE_SCRIPT),
+            str(ARRAY_SCRIPT),
+            str(REDUCER_SCRIPT),
+            str(SUBMIT_SCRIPT),
+        ],
         cwd=PROJECT_ROOT,
         text=True,
         stdout=subprocess.PIPE,
