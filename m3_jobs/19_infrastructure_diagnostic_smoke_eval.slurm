@@ -64,6 +64,7 @@ VALIDATION_DIR="${TASK_DIR}/validation"
 METADATA_DIR="${TASK_DIR}/runtime_metadata"
 PACKAGE_STAGING_DIR="${TASK_DIR}/package_staging"
 PACKAGE_PATH="${OUTPUT_ROOT}/m3_infrastructure_diagnostic_smoke_${SCALE}_${ALGORITHM}_seed0_job${ARRAY_JOB_ID}_task${TASK_ID}.tar.gz"
+PACKAGE_BASENAME="$(basename "${PACKAGE_PATH}")"
 RUN_NAME="infrastructure_diagnostic_smoke_${SCALE}_${ALGORITHM}_seed0_job${ARRAY_JOB_ID}_task${TASK_ID}"
 STDOUT_LOG="${TASK_DIR}/stdout.log"
 STDERR_LOG="${TASK_DIR}/stderr.log"
@@ -203,19 +204,31 @@ PY
 package_task() {
   prepare_package_staging
   generate_package_manifest
-  tar -czf "${PACKAGE_PATH}" -C "${PACKAGE_STAGING_DIR}" \
-    stdout.log \
-    stderr.log \
-    diagnostics \
-    canonical \
-    config \
-    validation \
-    runtime_metadata
-  tar -tzf "${PACKAGE_PATH}" >/dev/null
+  local temp_package_path
+  temp_package_path="$(mktemp "${OUTPUT_ROOT}/.${PACKAGE_BASENAME}.tmp.XXXXXX")"
+  if ! tar -czf "${temp_package_path}" -C "${PACKAGE_STAGING_DIR}" \
+      stdout.log \
+      stderr.log \
+      diagnostics \
+      canonical \
+      config \
+      validation \
+      runtime_metadata; then
+    rm -f "${temp_package_path}"
+    return 1
+  fi
+  if ! tar -tzf "${temp_package_path}" >/dev/null; then
+    rm -f "${temp_package_path}"
+    return 1
+  fi
   python "${REPO_ROOT}/scripts/validate_infrastructure_diagnostic_smoke.py" \
     validate-task-package \
     --task-id "${TASK_ID}" \
-    --package "${PACKAGE_PATH}"
+    --package "${temp_package_path}" || {
+      rm -f "${temp_package_path}"
+      return 1
+    }
+  mv "${temp_package_path}" "${PACKAGE_PATH}"
 }
 
 if [[ "${EV_GNN_DIAGNOSTIC_SMOKE_DRY_RUN:-0}" == "1" ]]; then

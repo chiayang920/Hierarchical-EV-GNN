@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -22,6 +23,7 @@ import yaml
 FORMAL_JOB_ID = "58513929"
 SCHEMA_VERSION = "3"
 HEX_SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
+HEX_SHA1 = re.compile(r"^[0-9a-f]{40}$")
 
 TASKS = {
     0: {
@@ -235,15 +237,15 @@ DIAGNOSTIC_PACKAGE_CSVS = [
     "diagnostics/charger_diagnostics.csv",
 ]
 
-SERIOUS_LOG_SIGNATURES = [
-    "Traceback",
-    "RuntimeError",
-    "ValueError",
-    "Killed",
-    "Out Of Memory",
-    "OOM",
-    "Segmentation fault",
-    "Bus error",
+SERIOUS_LOG_PATTERNS = [
+    ("Traceback", re.compile(r"\bTraceback\b", re.IGNORECASE)),
+    ("RuntimeError", re.compile(r"\bRuntimeError\b", re.IGNORECASE)),
+    ("ValueError", re.compile(r"\bValueError\b", re.IGNORECASE)),
+    ("Killed", re.compile(r"\bKilled\b", re.IGNORECASE)),
+    ("Out Of Memory", re.compile(r"\bOut\s+Of\s+Memory\b", re.IGNORECASE)),
+    ("OOM", re.compile(r"(?<![A-Za-z0-9_])OOM(?![A-Za-z0-9_])", re.IGNORECASE)),
+    ("Segmentation fault", re.compile(r"\bSegmentation\s+fault\b", re.IGNORECASE)),
+    ("Bus error", re.compile(r"\bBus\s+error\b", re.IGNORECASE)),
 ]
 
 KNOWN_WARNING_SUBSTRINGS = [
@@ -268,6 +270,43 @@ COMPLETE_BUNDLE_REQUIRED_FILES = [
     "runtime_metadata/reducer_stderr_snapshot.log",
     "runtime_metadata/complete_file_list.txt",
     "runtime_metadata/complete_file_checksums.sha256",
+]
+
+EXPECTED_REDUCER_MARKERS = {
+    "TASK_PACKAGE_COUNT": "8",
+    "STDOUT_LOG_COUNT": "8",
+    "STDERR_LOG_COUNT": "8",
+    "DIAGNOSTIC_CSV_COUNT": "32",
+    "ALL_TASK_CHECKSUMS_OK": "1",
+    "ALL_SCHEMA_VERSION_3": "1",
+    "ALL_CANONICAL_RECONCILIATIONS_OK": "1",
+    "ALL_SERVICE_RECONCILIATIONS_OK": "1",
+    "ALL_ACTION_CONTRACTS_OK": "1",
+    "ALL_RUNTIME_METADATA_PRESENT": "1",
+    "ALL_SLURM_TASKS_COMPLETED": "1",
+    "COMPLETE_DIAGNOSTIC_SMOKE_BUNDLE_OK": "1",
+    "INFRASTRUCTURE_DIAGNOSTIC_SMOKE_REDUCER_COMPLETED": "1",
+}
+
+SERVICE_SUMMARY_FIELDS = [
+    "task_id",
+    "scale",
+    "algorithm",
+    "episode_total_ev_served",
+    "charger_served_sum",
+    "transformer_served_sum",
+    "charger_satisfaction_count_sum",
+    "transformer_satisfaction_count_sum",
+    "episode_total_energy_charged",
+    "charger_energy_charged_sum",
+    "transformer_energy_charged_sum",
+    "episode_total_energy_discharged",
+    "charger_energy_discharged_sum",
+    "transformer_energy_discharged_sum",
+    "served_reconciliation_pass",
+    "satisfaction_reconciliation_pass",
+    "charged_energy_reconciliation_pass",
+    "discharged_energy_reconciliation_pass",
 ]
 
 
@@ -989,6 +1028,50 @@ def validate_service_reconciliation(episode_row, charger_rows, transformer_rows)
             raise ValidationError(f"reconciliation mismatch for transformer {transformer_id} satisfaction count")
 
 
+def service_summary_from_rows(mapping, episode_row, charger_rows, transformer_rows):
+    episode_served = nonnegative_integer(episode_row.get("total_ev_served"), "total_ev_served")
+    charger_served = sum_integer(charger_rows, "served_ev_count")
+    transformer_served = sum_integer(transformer_rows, "served_ev_count")
+    charger_satisfaction_count = sum_integer(charger_rows, "user_satisfaction_observation_count")
+    transformer_satisfaction_count = sum_integer(transformer_rows, "user_satisfaction_observation_count")
+
+    episode_charged = numeric(episode_row.get("total_energy_charged"), "total_energy_charged")
+    charger_charged = sum_available(charger_rows, "energy_charged_kwh")
+    transformer_charged = sum_available(transformer_rows, "energy_charged_kwh")
+    episode_discharged = numeric(episode_row.get("total_energy_discharged"), "total_energy_discharged")
+    charger_discharged = sum_available(charger_rows, "energy_discharged_kwh")
+    transformer_discharged = sum_available(transformer_rows, "energy_discharged_kwh")
+
+    return {
+        "task_id": str(mapping["task_id"]),
+        "scale": str(mapping["scale"]),
+        "algorithm": str(mapping["algorithm"]),
+        "episode_total_ev_served": str(episode_served),
+        "charger_served_sum": str(charger_served),
+        "transformer_served_sum": str(transformer_served),
+        "charger_satisfaction_count_sum": str(charger_satisfaction_count),
+        "transformer_satisfaction_count_sum": str(transformer_satisfaction_count),
+        "episode_total_energy_charged": str(episode_charged),
+        "charger_energy_charged_sum": str(charger_charged),
+        "transformer_energy_charged_sum": str(transformer_charged),
+        "episode_total_energy_discharged": str(episode_discharged),
+        "charger_energy_discharged_sum": str(charger_discharged),
+        "transformer_energy_discharged_sum": str(transformer_discharged),
+        "served_reconciliation_pass": str(charger_served == transformer_served == episode_served),
+        "satisfaction_reconciliation_pass": str(
+            charger_satisfaction_count == transformer_satisfaction_count == episode_served
+        ),
+        "charged_energy_reconciliation_pass": str(
+            abs(charger_charged - episode_charged) <= 1e-6
+            and abs(transformer_charged - episode_charged) <= 1e-6
+        ),
+        "discharged_energy_reconciliation_pass": str(
+            abs(charger_discharged - episode_discharged) <= 1e-6
+            and abs(transformer_discharged - episode_discharged) <= 1e-6
+        ),
+    }
+
+
 def validate_diagnostics(args):
     mapping = task_mapping(args.task_id)
     diagnostic_dir = Path(args.diagnostic_dir)
@@ -1485,6 +1568,7 @@ def validate_task_package(args):
         "runtime_metadata/original_source_manifest.sha256",
         "runtime_metadata/original_task_runtime_metadata.env",
         "runtime_metadata/diagnostic_command.txt",
+        "runtime_metadata/evaluator_stdout.txt",
         "runtime_metadata/evaluator_time_verbose.txt",
         "runtime_metadata/task_runtime_metadata.env",
         "runtime_metadata/package_file_checksums.sha256",
@@ -1618,6 +1702,21 @@ def parse_sacct_raw(raw_text, array_job_id):
         totalcpu_source = "parent"
         maxrss = parent["MaxRSS"]
         totalcpu = parent["TotalCPU"]
+        needs_batch_resource = (
+            not is_available_accounting_value(maxrss)
+            or not is_available_accounting_value(totalcpu)
+        )
+        if needs_batch_resource:
+            if not batch:
+                raise ValidationError(f"required .batch accounting unavailable for Slurm task {array_job_id}_{task_id}")
+            if batch.get("State") != "COMPLETED":
+                raise ValidationError(
+                    f"Slurm accounting task {array_job_id}_{task_id}.batch must be COMPLETED, got {batch.get('State')}"
+                )
+            if batch.get("ExitCode") != "0:0":
+                raise ValidationError(
+                    f"Slurm accounting task {array_job_id}_{task_id}.batch ExitCode must be 0:0, got {batch.get('ExitCode')}"
+                )
         if not is_available_accounting_value(maxrss):
             maxrss = batch.get("MaxRSS", "")
             maxrss_source = "batch"
@@ -1701,8 +1800,8 @@ def scan_log_text(source_name, text):
     warnings = []
     for line_number, line in enumerate(text.splitlines(), start=1):
         lowered = line.lower()
-        for signature in SERIOUS_LOG_SIGNATURES:
-            if signature.lower() in lowered:
+        for signature, pattern in SERIOUS_LOG_PATTERNS:
+            if pattern.search(line):
                 raise ValidationError(f"serious log signature {signature!r} in {source_name}:{line_number}: {line}")
         if "warning" in lowered:
             if any(known in line for known in KNOWN_WARNING_SUBSTRINGS):
@@ -1756,7 +1855,11 @@ def validate_and_summarise_task_package(package_path, mapping, array_job_id, exp
     )
 
     warnings = []
-    for relative in ["stderr.log", "runtime_metadata/evaluator_time_verbose.txt"]:
+    for relative in [
+        "stderr.log",
+        "runtime_metadata/evaluator_stdout.txt",
+        "runtime_metadata/evaluator_time_verbose.txt",
+    ]:
         warnings.extend(
             scan_log_text(
                 f"task{mapping['task_id']}:{relative}",
@@ -1782,17 +1885,7 @@ def validate_and_summarise_task_package(package_path, mapping, array_job_id, exp
         canonical = {"task_id": mapping["task_id"], "scale": mapping["scale"], "algorithm": mapping["algorithm"]}
         canonical.update(row)
         canonical_rows.append(canonical)
-    service_row = {
-        "task_id": mapping["task_id"],
-        "scale": mapping["scale"],
-        "algorithm": mapping["algorithm"],
-        "total_ev_served": episode.get("total_ev_served"),
-        "total_energy_charged": episode.get("total_energy_charged"),
-        "total_energy_discharged": episode.get("total_energy_discharged"),
-        "average_user_satisfaction": episode.get("average_user_satisfaction"),
-        "charger_rows": len(charger_rows),
-        "transformer_rows": len(transformer_rows),
-    }
+    service_row = service_summary_from_rows(mapping, episode, charger_rows, transformer_rows)
     source_row = {
         "task_id": mapping["task_id"],
         "scale": mapping["scale"],
@@ -1844,6 +1937,39 @@ def create_complete_bundle(staging_root, bundle_path):
                 bundle.add(path, arcname=path.relative_to(staging_root).as_posix())
 
 
+def unique_temporary_output_path(output_root, final_name):
+    stamp = f"{os.getpid()}.{time.time_ns()}"
+    return Path(output_root) / f".{final_name}.tmp.{stamp}"
+
+
+def validate_sha256_sidecar(archive_path, sidecar_path):
+    archive_path = Path(archive_path)
+    sidecar_path = Path(sidecar_path)
+    line = sidecar_path.read_text(encoding="utf-8").strip()
+    match = re.fullmatch(r"([0-9a-f]{64})  (.+)", line)
+    if not match:
+        raise ValidationError(f"invalid SHA-256 sidecar format: {sidecar_path}")
+    digest, basename = match.groups()
+    if basename != archive_path.name:
+        raise ValidationError(f"SHA-256 sidecar basename mismatch: {basename} != {archive_path.name}")
+    observed = sha256_file(archive_path)
+    if digest != observed:
+        raise ValidationError(f"SHA-256 sidecar digest mismatch for {archive_path}")
+
+
+def write_validated_sha256_sidecar(archive_path, sidecar_path):
+    archive_path = Path(archive_path)
+    sidecar_path = Path(sidecar_path)
+    temp_path = unique_temporary_output_path(sidecar_path.parent, sidecar_path.name)
+    try:
+        temp_path.write_text(f"{sha256_file(archive_path)}  {archive_path.name}\n", encoding="utf-8")
+        validate_sha256_sidecar(archive_path, temp_path)
+        os.replace(temp_path, sidecar_path)
+        validate_sha256_sidecar(archive_path, sidecar_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
 def read_complete_file_list(extract_root):
     path = Path(extract_root) / "runtime_metadata/complete_file_list.txt"
     if not path.is_file():
@@ -1865,11 +1991,310 @@ def is_prohibited_complete_member(member_name):
     return False
 
 
-def task_id_from_smoke_package_name(package_name):
-    match = re.fullmatch(r".+_task([0-7])\.tar\.gz", Path(package_name).name)
-    if not match:
-        raise ValidationError(f"cannot infer task id from task package name: {package_name}")
-    return int(match.group(1))
+def complete_bundle_name(array_job_id):
+    return f"infrastructure_diagnostic_smoke_complete_evidence_job{array_job_id}.tar.gz"
+
+
+def checksum_sidecar_path(bundle_path):
+    bundle_path = Path(bundle_path)
+    return bundle_path.with_name(bundle_path.name + ".sha256")
+
+
+def exact_complete_task_package_members(array_job_id):
+    return sorted(
+        f"task_packages/{smoke_task_package_name(TASKS[task_id], array_job_id)}"
+        for task_id in sorted(TASKS)
+    )
+
+
+def exact_complete_log_members(array_job_id, suffix):
+    return sorted(
+        f"logs/{smoke_slurm_log_name(array_job_id, task_id, suffix)}"
+        for task_id in sorted(TASKS)
+    )
+
+
+def validate_exact_member_set(observed, expected, label):
+    observed = sorted(observed)
+    expected = sorted(expected)
+    if observed == expected:
+        return
+    missing = sorted(set(expected) - set(observed))
+    unexpected = sorted(set(observed) - set(expected))
+    details = []
+    if missing:
+        details.append(f"missing expected {label}: {', '.join(missing)}")
+    if unexpected:
+        details.append(f"unexpected {label}: {', '.join(unexpected)}")
+    raise ValidationError("; ".join(details) or f"{label} mismatch")
+
+
+def read_required_text(root, relative_path):
+    path = Path(root) / relative_path
+    if not path.is_file():
+        raise ValidationError(f"missing required file: {relative_path}")
+    return path.read_text(encoding="utf-8").strip()
+
+
+def parse_unique_env_metadata(path, label):
+    values = {}
+    for line_number, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if "=" not in stripped:
+            raise ValidationError(f"malformed {label} line {line_number}: {line!r}")
+        key, value = stripped.split("=", 1)
+        if key in values:
+            raise ValidationError(f"duplicate {label} value for {key}")
+        values[key] = value
+    return values
+
+
+def require_task_indexed_rows(rows, label):
+    if len(rows) != len(TASKS):
+        raise ValidationError(f"{label} must contain exactly 8 task rows, got {len(rows)}")
+    indexed = {}
+    for row in rows:
+        task_id = integer_value(row.get("task_id"), f"{label} task_id")
+        if task_id not in TASKS:
+            raise ValidationError(f"{label} contains unexpected task_id: {task_id}")
+        if task_id in indexed:
+            raise ValidationError(f"{label} contains duplicate task_id: {task_id}")
+        indexed[task_id] = row
+    missing = sorted(set(TASKS) - set(indexed))
+    if missing:
+        raise ValidationError(f"{label} missing task_id(s): {missing}")
+    return indexed
+
+
+def require_row_value(row, field, expected, label):
+    if str(row.get(field, "")) != str(expected):
+        raise ValidationError(f"{label} mismatch for {field}: {row.get(field)} != {expected}")
+
+
+def canonical_expected_types():
+    expected = {field: "exact" for field, _, _, _ in EXACT_RECONCILIATION}
+    expected.update({field: "floating" for field, _, _, _ in FLOAT_RECONCILIATION})
+    return expected
+
+
+def read_packaged_task_details(complete_extract_root, package_member, task_id, source_commit_sha, array_job_id):
+    mapping = TASKS[task_id]
+    package_path = Path(complete_extract_root) / package_member
+    with contextlib.redirect_stdout(io.StringIO()):
+        validate_task_package(Namespace(task_id=task_id, package=str(package_path)))
+
+    task_extract_dir = Path(complete_extract_root) / "_validated_task_extracts" / f"task{task_id}"
+    safe_extract_tar(package_path, task_extract_dir)
+    task_validation = load_task_validation(task_extract_dir, mapping)
+    if str(task_validation.get("matrix_job_id")) != str(array_job_id):
+        raise ValidationError(
+            f"task package task {task_id} matrix_job_id mismatch: "
+            f"{task_validation.get('matrix_job_id')} != {array_job_id}"
+        )
+    packaged_source_commit = read_required_text(task_extract_dir, "runtime_metadata/source_commit_sha.txt")
+    if packaged_source_commit != source_commit_sha:
+        raise ValidationError(
+            f"task package task {task_id} source commit mismatch: "
+            f"{packaged_source_commit} != {source_commit_sha}"
+        )
+    source_resolution = read_json_file(
+        task_extract_dir / "runtime_metadata/source_package_resolution.json",
+        "source_package_resolution.json",
+    )
+    episode_rows, _ = read_rows(task_extract_dir / "diagnostics/episode_diagnostics.csv")
+    charger_rows, _ = read_rows(task_extract_dir / "diagnostics/charger_diagnostics.csv")
+    transformer_rows, _ = read_rows(task_extract_dir / "diagnostics/transformer_diagnostics.csv")
+    reconciliation_rows, _ = read_rows(task_extract_dir / "validation/canonical_reconciliation.csv")
+    return {
+        "package_path": package_path,
+        "task_validation": task_validation,
+        "source_commit_sha": packaged_source_commit,
+        "source": {
+            "task_id": str(task_id),
+            "scale": str(mapping["scale"]),
+            "algorithm": str(mapping["algorithm"]),
+            "source_commit_sha": packaged_source_commit,
+            "source_mode": str(source_resolution.get("source_mode", "")),
+            "package_path": str(source_resolution.get("package_path", "")),
+            "expected_package_name": str(source_resolution.get("expected_package_name", "")),
+            "bundle_member": str(source_resolution.get("bundle_member", "")),
+        },
+        "canonical_rows": reconciliation_rows,
+        "service": service_summary_from_rows(mapping, episode_rows[0], charger_rows, transformer_rows),
+    }
+
+
+def validate_reducer_markers(extract_root, array_job_id):
+    markers_path = Path(extract_root) / "runtime_metadata/reducer_markers.env"
+    markers = parse_unique_env_metadata(markers_path, "reducer_markers.env")
+    required_keys = set(EXPECTED_REDUCER_MARKERS) | {"COMPLETE_DIAGNOSTIC_SMOKE_BUNDLE_PATH"}
+    missing = sorted(required_keys - set(markers))
+    unexpected = sorted(set(markers) - required_keys)
+    if missing:
+        raise ValidationError(f"reducer_markers.env missing required marker(s): {', '.join(missing)}")
+    if unexpected:
+        raise ValidationError(f"reducer_markers.env contains unexpected marker(s): {', '.join(unexpected)}")
+    for key, expected in EXPECTED_REDUCER_MARKERS.items():
+        require_row_value(markers, key, expected, "reducer_markers.env")
+    expected_name = complete_bundle_name(array_job_id)
+    marker_path = markers["COMPLETE_DIAGNOSTIC_SMOKE_BUNDLE_PATH"]
+    if marker_path != expected_name:
+        raise ValidationError(
+            "reducer_markers.env mismatch for COMPLETE_DIAGNOSTIC_SMOKE_BUNDLE_PATH: "
+            f"{marker_path} != {expected_name}"
+        )
+    return markers
+
+
+def validate_complete_bundle_cross_references(extract_root, task_packages, stdout_logs, stderr_logs):
+    extract_root = Path(extract_root)
+    source_commit_sha = read_required_text(extract_root, "runtime_metadata/source_commit_sha.txt")
+    if not HEX_SHA1.fullmatch(source_commit_sha):
+        raise ValidationError(f"source commit SHA must be 40 lowercase hex characters: {source_commit_sha}")
+    array_job_id = read_required_text(extract_root, "runtime_metadata/array_job_id.txt")
+    if not re.fullmatch(r"[0-9]+", array_job_id):
+        raise ValidationError(f"array job ID must be numeric: {array_job_id}")
+    reducer_job_id = read_required_text(extract_root, "runtime_metadata/reducer_job_id.txt")
+    if not reducer_job_id:
+        raise ValidationError("reducer_job_id.txt must not be empty")
+
+    validate_exact_member_set(task_packages, exact_complete_task_package_members(array_job_id), "task package")
+    validate_exact_member_set(stdout_logs, exact_complete_log_members(array_job_id, "out"), "Slurm stdout log")
+    validate_exact_member_set(stderr_logs, exact_complete_log_members(array_job_id, "err"), "Slurm stderr log")
+    validate_reducer_markers(extract_root, array_job_id)
+
+    reducer_runtime = parse_unique_env_metadata(
+        extract_root / "runtime_metadata/reducer_runtime_metadata.env",
+        "reducer_runtime_metadata.env",
+    )
+    require_row_value(reducer_runtime, "array_job_id", array_job_id, "reducer_runtime_metadata.env")
+    require_row_value(reducer_runtime, "reducer_job_id", reducer_job_id, "reducer_runtime_metadata.env")
+    require_row_value(reducer_runtime, "task_package_count", "8", "reducer_runtime_metadata.env")
+    require_row_value(reducer_runtime, "stdout_log_count", "8", "reducer_runtime_metadata.env")
+    require_row_value(reducer_runtime, "stderr_log_count", "8", "reducer_runtime_metadata.env")
+    require_row_value(reducer_runtime, "diagnostic_csv_count", "32", "reducer_runtime_metadata.env")
+    if Path(str(reducer_runtime.get("complete_bundle_path", ""))).name != complete_bundle_name(array_job_id):
+        raise ValidationError("reducer_runtime_metadata.env complete_bundle_path mismatch")
+
+    packaged = {}
+    for task_id in sorted(TASKS):
+        package_member = f"task_packages/{smoke_task_package_name(TASKS[task_id], array_job_id)}"
+        packaged[task_id] = read_packaged_task_details(
+            extract_root,
+            package_member,
+            task_id,
+            source_commit_sha,
+            array_job_id,
+        )
+
+    inventory_rows, _ = read_rows(extract_root / "summaries/task_inventory.csv")
+    inventory_by_task = require_task_indexed_rows(inventory_rows, "task_inventory")
+    for task_id, row in inventory_by_task.items():
+        mapping = TASKS[task_id]
+        package_name = smoke_task_package_name(mapping, array_job_id)
+        expected_inventory = {
+            "scale": mapping["scale"],
+            "algorithm": mapping["algorithm"],
+            "formal_task_id": mapping["formal_task_id"],
+            "episode_seed": mapping["episode_seed"],
+            "package_name": package_name,
+            "package_sha256": sha256_file(extract_root / "task_packages" / package_name),
+            "diagnostic_csv_count": "4",
+            "task_validation_rows": "1",
+            "canonical_reconciliation_rows": str(len(EXACT_RECONCILIATION) + len(FLOAT_RECONCILIATION)),
+        }
+        for field, expected in expected_inventory.items():
+            require_row_value(row, field, expected, "task_inventory")
+
+    source_rows, _ = read_rows(extract_root / "summaries/source_provenance_summary.csv")
+    source_by_task = require_task_indexed_rows(source_rows, "source_provenance_summary")
+    for task_id, row in source_by_task.items():
+        for field, expected in packaged[task_id]["source"].items():
+            require_row_value(row, field, expected, "source provenance summary")
+
+    runtime_rows, _ = read_rows(extract_root / "summaries/runtime_summary.csv")
+    runtime_by_task = require_task_indexed_rows(runtime_rows, "runtime_summary")
+    sacct_raw = (extract_root / "runtime_metadata/sacct_raw.txt").read_text(encoding="utf-8")
+    parsed_runtime_by_task = {
+        int(row["task_id"]): row
+        for row in parse_sacct_raw(sacct_raw, array_job_id)
+    }
+    for task_id, row in runtime_by_task.items():
+        for field in [
+            "job_id_raw",
+            "state",
+            "exit_code",
+            "elapsed_raw",
+            "alloc_cpus",
+            "max_rss",
+            "total_cpu",
+            "maxrss_source",
+            "totalcpu_source",
+        ]:
+            require_row_value(row, field, parsed_runtime_by_task[task_id][field], "runtime_summary")
+
+    expected_types = canonical_expected_types()
+    canonical_rows, _ = read_rows(extract_root / "summaries/canonical_reconciliation_summary.csv")
+    if len(canonical_rows) != len(TASKS) * len(expected_types):
+        raise ValidationError(
+            "canonical_reconciliation_summary.csv must contain exactly "
+            f"{len(TASKS) * len(expected_types)} rows, got {len(canonical_rows)}"
+        )
+    canonical_by_task = {task_id: [] for task_id in TASKS}
+    for row in canonical_rows:
+        task_id = integer_value(row.get("task_id"), "canonical_reconciliation_summary task_id")
+        if task_id not in TASKS:
+            raise ValidationError(f"canonical_reconciliation_summary contains unexpected task_id: {task_id}")
+        mapping = TASKS[task_id]
+        require_row_value(row, "scale", mapping["scale"], "canonical_reconciliation_summary")
+        require_row_value(row, "algorithm", mapping["algorithm"], "canonical_reconciliation_summary")
+        field = row.get("field")
+        if field not in expected_types:
+            raise ValidationError(f"canonical_reconciliation_summary contains unexpected field: {field}")
+        require_row_value(row, "comparison_type", expected_types[field], "canonical_reconciliation_summary")
+        require_row_value(row, "pass", "True", "canonical_reconciliation_summary")
+        canonical_by_task[task_id].append(row)
+    comparison_fields = [
+        "field",
+        "comparison_type",
+        "canonical_value",
+        "diagnostic_value",
+        "absolute_difference",
+        "relative_difference",
+        "absolute_tolerance",
+        "relative_tolerance",
+        "pass",
+    ]
+    for task_id, rows in canonical_by_task.items():
+        seen = [row.get("field") for row in rows]
+        if sorted(seen) != sorted(expected_types):
+            raise ValidationError(f"canonical_reconciliation_summary duplicate or missing field(s) for task {task_id}")
+        packaged_by_field = {row["field"]: row for row in packaged[task_id]["canonical_rows"]}
+        for row in rows:
+            packaged_row = packaged_by_field[row["field"]]
+            for field in comparison_fields:
+                require_row_value(row, field, packaged_row.get(field, ""), "canonical_reconciliation_summary")
+
+    service_rows, _ = read_rows(extract_root / "summaries/service_reconciliation_summary.csv")
+    service_by_task = require_task_indexed_rows(service_rows, "service_reconciliation_summary")
+    for task_id, row in service_by_task.items():
+        for field in SERVICE_SUMMARY_FIELDS:
+            require_row_value(row, field, packaged[task_id]["service"][field], "service reconciliation summary")
+        for field in [
+            "served_reconciliation_pass",
+            "satisfaction_reconciliation_pass",
+            "charged_energy_reconciliation_pass",
+            "discharged_energy_reconciliation_pass",
+        ]:
+            require_row_value(row, field, "True", "service reconciliation summary")
+
+    return {
+        "array_job_id": array_job_id,
+        "source_commit_sha": source_commit_sha,
+        "reducer_job_id": reducer_job_id,
+    }
 
 
 def validate_complete_bundle_file(bundle_path):
@@ -1913,15 +2338,12 @@ def validate_complete_bundle_file(bundle_path):
                 "complete_file_list.txt does not exactly match complete bundle members: "
                 f"listed={listed}, members={member_names}"
             )
-        for package_member in task_packages:
-            task_id = task_id_from_smoke_package_name(package_member)
-            with contextlib.redirect_stdout(io.StringIO()):
-                validate_task_package(
-                    Namespace(
-                        task_id=task_id,
-                        package=str(Path(extract_root) / package_member),
-                    )
-                )
+        cross_reference = validate_complete_bundle_cross_references(
+            extract_root,
+            task_packages,
+            stdout_logs,
+            stderr_logs,
+        )
     return {
         "status": "ok",
         "bundle": str(bundle_path),
@@ -1929,6 +2351,7 @@ def validate_complete_bundle_file(bundle_path):
         "task_packages": len(task_packages),
         "stdout_logs": len(stdout_logs),
         "stderr_logs": len(stderr_logs),
+        **cross_reference,
     }
 
 
@@ -1944,6 +2367,9 @@ def reduce_bundle(args):
     bundle_path = final_complete_bundle_path(output_root, array_job_id)
     if bundle_path.exists():
         raise ValidationError(f"final complete evidence bundle already exists: {bundle_path}")
+    sidecar_path = checksum_sidecar_path(bundle_path)
+    if sidecar_path.exists():
+        raise ValidationError(f"final complete evidence bundle checksum already exists: {sidecar_path}")
 
     package_root = Path(args.task_package_root)
     log_root = Path(args.slurm_log_root)
@@ -2068,17 +2494,7 @@ def reduce_bundle(args):
     )
     write_csv_rows(
         staging_root / "summaries/service_reconciliation_summary.csv",
-        [
-            "task_id",
-            "scale",
-            "algorithm",
-            "total_ev_served",
-            "total_energy_charged",
-            "total_energy_discharged",
-            "average_user_satisfaction",
-            "charger_rows",
-            "transformer_rows",
-        ],
+        SERVICE_SUMMARY_FIELDS,
         service_summary_rows,
     )
     write_csv_rows(
@@ -2148,7 +2564,7 @@ def reduce_bundle(args):
         "ALL_RUNTIME_METADATA_PRESENT": "1",
         "ALL_SLURM_TASKS_COMPLETED": "1",
         "COMPLETE_DIAGNOSTIC_SMOKE_BUNDLE_OK": "1",
-        "COMPLETE_DIAGNOSTIC_SMOKE_BUNDLE_PATH": str(bundle_path),
+        "COMPLETE_DIAGNOSTIC_SMOKE_BUNDLE_PATH": bundle_path.name,
         "INFRASTRUCTURE_DIAGNOSTIC_SMOKE_REDUCER_COMPLETED": "1",
     }
     (runtime_metadata / "reducer_markers.env").write_text(
@@ -2157,13 +2573,28 @@ def reduce_bundle(args):
     )
 
     write_complete_manifest(staging_root)
-    create_complete_bundle(staging_root, bundle_path)
-    with contextlib.redirect_stdout(io.StringIO()):
-        validation = validate_complete_bundle_file(bundle_path)
+    temp_bundle_path = unique_temporary_output_path(output_root, bundle_path.name)
+    published_bundle = False
+    publication_complete = False
+    try:
+        create_complete_bundle(staging_root, temp_bundle_path)
+        with contextlib.redirect_stdout(io.StringIO()):
+            validation = validate_complete_bundle_file(temp_bundle_path)
+        os.replace(temp_bundle_path, bundle_path)
+        published_bundle = True
+        write_validated_sha256_sidecar(bundle_path, sidecar_path)
+        publication_complete = True
+    except Exception:
+        temp_bundle_path.unlink(missing_ok=True)
+        if published_bundle and not publication_complete:
+            bundle_path.unlink(missing_ok=True)
+            sidecar_path.unlink(missing_ok=True)
+        raise
     payload = {
         "status": "ok",
         "array_job_id": array_job_id,
         "bundle_path": str(bundle_path),
+        "checksum_path": str(sidecar_path),
         "diagnostic_csv_count": diagnostic_csv_count,
         "warning_count": len(warning_rows),
         **{f"validated_{key}": value for key, value in validation.items() if key != "status"},

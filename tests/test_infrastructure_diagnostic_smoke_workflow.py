@@ -1,9 +1,12 @@
+import argparse
 import csv
 import hashlib
+import importlib.util
 import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -531,6 +534,7 @@ def create_task_package(
     source_resolution=None,
     stdout_log="",
     stderr_log="",
+    evaluator_stdout="",
     evaluator_time_verbose="Maximum resident set size (kbytes): 1\n",
     manifest_omit=(),
     file_list_omit=(),
@@ -606,6 +610,7 @@ def create_task_package(
         "runtime_metadata/original_source_manifest.sha256": "0" * 64 + "  source.py\n",
         "runtime_metadata/original_task_runtime_metadata.env": "task_id=0\n",
         "runtime_metadata/diagnostic_command.txt": "python evaluate_td3_gnn_infrastructure_diagnostics.py\n",
+        "runtime_metadata/evaluator_stdout.txt": evaluator_stdout,
         "runtime_metadata/evaluator_time_verbose.txt": evaluator_time_verbose,
         "runtime_metadata/task_runtime_metadata.env": f"task_id={task_id}\n",
     }
@@ -722,11 +727,15 @@ def sacct_raw_text(
     missing_task_ids=(),
     state_overrides=None,
     exit_overrides=None,
+    batch_state_overrides=None,
+    batch_exit_overrides=None,
     parent_resource_blanks=(),
     duplicate_parent_rows=(),
 ):
     state_overrides = state_overrides or {}
     exit_overrides = exit_overrides or {}
+    batch_state_overrides = batch_state_overrides or {}
+    batch_exit_overrides = batch_exit_overrides or {}
     rows = []
     for task_id in range(8):
         if task_id in set(missing_task_ids):
@@ -747,7 +756,19 @@ def sacct_raw_text(
                 ]
             )
         )
-        rows.append("|".join([f"{job_id_raw}.batch", "COMPLETED", "0:0", "12", "4", "4096K", "00:00:12"]))
+        rows.append(
+            "|".join(
+                [
+                    f"{job_id_raw}.batch",
+                    batch_state_overrides.get(task_id, "COMPLETED"),
+                    batch_exit_overrides.get(task_id, "0:0"),
+                    "12",
+                    "4",
+                    "4096K",
+                    "00:00:12",
+                ]
+            )
+        )
         if task_id in set(duplicate_parent_rows):
             rows.append("|".join([job_id_raw, "FAILED", "1:0", "12", "4", "2048K", "00:00:10"]))
     return "\n".join(rows) + "\n"
@@ -851,6 +872,171 @@ def read_bundle_member(bundle_path, member_name):
 
 def complete_bundle_path(output_root, array_job_id="123456"):
     return output_root / f"infrastructure_diagnostic_smoke_complete_evidence_job{array_job_id}.tar.gz"
+
+
+def complete_bundle_checksum_path(output_root, array_job_id="123456"):
+    return output_root / f"infrastructure_diagnostic_smoke_complete_evidence_job{array_job_id}.tar.gz.sha256"
+
+
+def load_validator_module():
+    spec = importlib.util.spec_from_file_location("infra_diag_smoke_validator_under_test", VALIDATOR)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def read_bundle_member_bytes(bundle_path, member_name):
+    with tarfile.open(bundle_path, "r:gz") as bundle:
+        member = bundle.extractfile(member_name)
+        assert member is not None
+        return member.read()
+
+
+def refresh_complete_manifest_for_test(staging_root):
+    staging_root = Path(staging_root)
+    file_list_path = staging_root / "runtime_metadata/complete_file_list.txt"
+    checksum_path = staging_root / "runtime_metadata/complete_file_checksums.sha256"
+    file_list_path.unlink(missing_ok=True)
+    checksum_path.unlink(missing_ok=True)
+    file_names = sorted(
+        path.relative_to(staging_root).as_posix()
+        for path in staging_root.rglob("*")
+        if path.is_file()
+    )
+    file_names.extend(
+        [
+            "runtime_metadata/complete_file_checksums.sha256",
+            "runtime_metadata/complete_file_list.txt",
+        ]
+    )
+    file_list_path.write_text("\n".join(sorted(file_names)) + "\n", encoding="utf-8")
+    manifest_names = sorted(name for name in sorted(file_names) if name != "runtime_metadata/complete_file_checksums.sha256")
+    with checksum_path.open("w", encoding="utf-8") as manifest:
+        for name in manifest_names:
+            path = staging_root / name
+            manifest.write(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {name}\n")
+
+
+def create_complete_bundle_from_staging(staging_root, bundle_path):
+    with tarfile.open(bundle_path, "w:gz") as bundle:
+        for path in sorted(Path(staging_root).rglob("*")):
+            if path.is_file():
+                bundle.add(path, arcname=path.relative_to(staging_root).as_posix())
+    return bundle_path
+
+
+def mutate_complete_bundle(tmp_path, bundle_path, mutator, name="mutated_complete.tar.gz"):
+    staging_root = tmp_path / f"{Path(name).stem}_staging"
+    if staging_root.exists():
+        shutil.rmtree(staging_root)
+    staging_root.mkdir(parents=True)
+    with tarfile.open(bundle_path, "r:gz") as bundle:
+        bundle.extractall(staging_root)
+    mutator(staging_root)
+    refresh_complete_manifest_for_test(staging_root)
+    return create_complete_bundle_from_staging(staging_root, tmp_path / name)
+
+
+def mutate_complete_bundle_text(tmp_path, bundle_path, member_name, updater, name="mutated_complete.tar.gz"):
+    def mutate(staging_root):
+        path = staging_root / member_name
+        path.write_text(updater(path.read_text(encoding="utf-8")), encoding="utf-8")
+
+    return mutate_complete_bundle(tmp_path, bundle_path, mutate, name=name)
+
+
+def mutate_complete_bundle_csv(tmp_path, bundle_path, member_name, updater, name="mutated_complete.tar.gz"):
+    def mutate(staging_root):
+        path = staging_root / member_name
+        fieldnames, rows = read_csv_dicts(path)
+        new_fieldnames, new_rows = updater(fieldnames, rows)
+        write_csv(path, new_fieldnames, new_rows)
+
+    return mutate_complete_bundle(tmp_path, bundle_path, mutate, name=name)
+
+
+def make_fake_sbatch(tmp_path, outputs):
+    bin_dir = tmp_path / "fake-sbatch-bin"
+    bin_dir.mkdir()
+    counter_path = tmp_path / "fake_sbatch_counter.txt"
+    calls_path = tmp_path / "fake_sbatch_calls.txt"
+    counter_path.write_text("0", encoding="utf-8")
+    calls_path.write_text("", encoding="utf-8")
+    fake_sbatch = bin_dir / "sbatch"
+    fake_sbatch.write_text(
+        f"""#!{sys.executable}
+import sys
+from pathlib import Path
+
+outputs = {list(outputs)!r}
+counter_path = Path({str(counter_path)!r})
+calls_path = Path({str(calls_path)!r})
+count = int(counter_path.read_text(encoding="utf-8"))
+counter_path.write_text(str(count + 1), encoding="utf-8")
+with calls_path.open("a", encoding="utf-8") as handle:
+    handle.write(" ".join(sys.argv[1:]) + "\\n")
+if count >= len(outputs):
+    print("999999")
+else:
+    print(outputs[count])
+""",
+        encoding="utf-8",
+    )
+    fake_sbatch.chmod(0o755)
+    return bin_dir, calls_path
+
+
+def run_submit_real_with_fake_sbatch(tmp_path, outputs):
+    source_root = tmp_path / "source_root"
+    (source_root / "m3_jobs").mkdir(parents=True)
+    (source_root / "scripts").mkdir()
+    for script in [ARRAY_SCRIPT, REDUCER_SCRIPT, SUBMIT_SCRIPT]:
+        shutil.copy2(script, source_root / "m3_jobs" / script.name)
+    shutil.copy2(VALIDATOR, source_root / "scripts" / VALIDATOR.name)
+    (source_root / "SOURCE_COMMIT_SHA.txt").write_text(DYNAMIC_SHA + "\n", encoding="utf-8")
+    submit_script = source_root / "m3_jobs" / SUBMIT_SCRIPT.name
+
+    formal_root = tmp_path / "formal_packages"
+    for task_id, scale, algorithm, formal_task_id, *_ in TASKS:
+        create_formal_package(formal_root, scale=scale, algorithm=algorithm, formal_task_id=formal_task_id)
+    fake_bin, calls_path = make_fake_sbatch(tmp_path, outputs)
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        "TMPDIR": str(tmp_path),
+        "EV_GNN_DIAGNOSTIC_SMOKE_EXPECTED_SOURCE_COMMIT": DYNAMIC_SHA,
+        "EV_GNN_DIAGNOSTIC_SMOKE_FORMAL_PACKAGE_ROOT": str(formal_root),
+        "EV_GNN_DIAGNOSTIC_SMOKE_FORMAL_COMPLETE_BUNDLE": str(tmp_path / "unused_complete_bundle.tar.gz"),
+        "EV_GNN_DIAGNOSTIC_SMOKE_OUTPUT_ROOT": str(tmp_path / "output"),
+        "EV_GNN_DIAGNOSTIC_SMOKE_RUN_ROOT": str(tmp_path / "runs"),
+    }
+    result = subprocess.run(
+        ["bash", str(submit_script)],
+        cwd=source_root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        check=False,
+    )
+    return result, calls_path.read_text(encoding="utf-8")
+
+
+def extract_bash_function(script_text, function_name):
+    marker = f"{function_name}() {{"
+    start = script_text.index(marker)
+    index = start
+    depth = 0
+    while index < len(script_text):
+        character = script_text[index]
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return script_text[start:index + 1]
+        index += 1
+    raise AssertionError(f"could not extract bash function: {function_name}")
 
 
 def make_delayed_fake_sacct(tmp_path, array_job_id="123456"):
@@ -2155,6 +2341,296 @@ def test_reducer_accepts_exactly_eight_task_packages_and_creates_complete_bundle
     assert "COMPLETE_DIAGNOSTIC_SMOKE_BUNDLE_OK=1" in markers
 
 
+def test_reducer_writes_portable_final_bundle_checksum_sidecar(tmp_path):
+    fixture = create_reducer_fixture(tmp_path)
+
+    result = run_reducer_validator(fixture)
+    bundle_path = Path(json.loads(result.stdout)["bundle_path"])
+    sidecar_path = bundle_path.with_name(bundle_path.name + ".sha256")
+    checksum_line = sidecar_path.read_text(encoding="utf-8").strip()
+
+    expected_digest = hashlib.sha256(bundle_path.read_bytes()).hexdigest()
+    assert sidecar_path.is_file()
+    assert checksum_line == f"{expected_digest}  {bundle_path.name}"
+
+
+def test_complete_bundle_rejects_adversarial_eight_task0_packages_with_distinct_names(tmp_path):
+    fixture = create_reducer_fixture(tmp_path)
+    result = run_reducer_validator(fixture)
+    bundle_path = Path(json.loads(result.stdout)["bundle_path"])
+    task0_bytes = read_bundle_member_bytes(
+        bundle_path,
+        f"task_packages/{task_package_basename(0, fixture['array_job_id'])}",
+    )
+
+    def mutate(staging_root):
+        task_dir = staging_root / "task_packages"
+        for package in task_dir.glob("*.tar.gz"):
+            package.unlink()
+        for copy_index in range(8):
+            (task_dir / f"adversarial_copy{copy_index}_task0.tar.gz").write_bytes(task0_bytes)
+
+    mutated = mutate_complete_bundle(tmp_path, bundle_path, mutate, name="adversarial_task0_complete.tar.gz")
+
+    validation = run_validator("validate-complete-bundle", "--bundle", mutated, check=False)
+
+    assert validation.returncode != 0
+    assert "task package" in validation.stderr.lower()
+
+
+def test_complete_bundle_rejects_non_sha_top_level_source_commit(tmp_path):
+    fixture = create_reducer_fixture(tmp_path)
+    result = run_reducer_validator(fixture)
+    bundle_path = Path(json.loads(result.stdout)["bundle_path"])
+    mutated = mutate_complete_bundle_text(
+        tmp_path,
+        bundle_path,
+        "runtime_metadata/source_commit_sha.txt",
+        lambda _text: "not-a-sha\n",
+        name="bad_source_commit_complete.tar.gz",
+    )
+
+    validation = run_validator("validate-complete-bundle", "--bundle", mutated, check=False)
+
+    assert validation.returncode != 0
+    assert "source commit" in validation.stderr.lower()
+
+
+def test_complete_bundle_rejects_source_provenance_summary_disagreement(tmp_path):
+    fixture = create_reducer_fixture(tmp_path)
+    result = run_reducer_validator(fixture)
+    bundle_path = Path(json.loads(result.stdout)["bundle_path"])
+
+    def updater(fieldnames, rows):
+        rows[0]["source_mode"] = "complete_bundle_nested_task_package"
+        rows[0]["bundle_member"] = "unexpected/member.tar.gz"
+        return fieldnames, rows
+
+    mutated = mutate_complete_bundle_csv(
+        tmp_path,
+        bundle_path,
+        "summaries/source_provenance_summary.csv",
+        updater,
+        name="bad_source_provenance_summary.tar.gz",
+    )
+
+    validation = run_validator("validate-complete-bundle", "--bundle", mutated, check=False)
+
+    assert validation.returncode != 0
+    assert "source provenance" in validation.stderr.lower()
+
+
+def test_complete_bundle_rejects_runtime_summary_array_job_mismatch(tmp_path):
+    fixture = create_reducer_fixture(tmp_path)
+    result = run_reducer_validator(fixture)
+    bundle_path = Path(json.loads(result.stdout)["bundle_path"])
+
+    def updater(fieldnames, rows):
+        rows[0]["job_id_raw"] = "999999_0"
+        return fieldnames, rows
+
+    mutated = mutate_complete_bundle_csv(
+        tmp_path,
+        bundle_path,
+        "summaries/runtime_summary.csv",
+        updater,
+        name="bad_runtime_summary.tar.gz",
+    )
+
+    validation = run_validator("validate-complete-bundle", "--bundle", mutated, check=False)
+
+    assert validation.returncode != 0
+    assert "runtime_summary" in validation.stderr
+
+
+def test_complete_bundle_rejects_runtime_summary_resource_disagreement(tmp_path):
+    fixture = create_reducer_fixture(tmp_path)
+    result = run_reducer_validator(fixture)
+    bundle_path = Path(json.loads(result.stdout)["bundle_path"])
+
+    def updater(fieldnames, rows):
+        rows[0]["max_rss"] = "999K"
+        return fieldnames, rows
+
+    mutated = mutate_complete_bundle_csv(
+        tmp_path,
+        bundle_path,
+        "summaries/runtime_summary.csv",
+        updater,
+        name="bad_runtime_summary_resource.tar.gz",
+    )
+
+    validation = run_validator("validate-complete-bundle", "--bundle", mutated, check=False)
+
+    assert validation.returncode != 0
+    assert "runtime_summary" in validation.stderr
+
+
+def test_complete_bundle_rejects_runtime_summary_fallback_source_disagreement(tmp_path):
+    fixture = create_reducer_fixture(tmp_path)
+    result = run_reducer_validator(fixture)
+    bundle_path = Path(json.loads(result.stdout)["bundle_path"])
+
+    def updater(fieldnames, rows):
+        rows[0]["maxrss_source"] = "batch"
+        return fieldnames, rows
+
+    mutated = mutate_complete_bundle_csv(
+        tmp_path,
+        bundle_path,
+        "summaries/runtime_summary.csv",
+        updater,
+        name="bad_runtime_summary_source.tar.gz",
+    )
+
+    validation = run_validator("validate-complete-bundle", "--bundle", mutated, check=False)
+
+    assert validation.returncode != 0
+    assert "runtime_summary" in validation.stderr
+
+
+def test_complete_bundle_rejects_task_inventory_duplicate_identity(tmp_path):
+    fixture = create_reducer_fixture(tmp_path)
+    result = run_reducer_validator(fixture)
+    bundle_path = Path(json.loads(result.stdout)["bundle_path"])
+
+    def updater(fieldnames, rows):
+        rows[1]["task_id"] = rows[0]["task_id"]
+        rows[1]["package_name"] = rows[0]["package_name"]
+        return fieldnames, rows
+
+    mutated = mutate_complete_bundle_csv(
+        tmp_path,
+        bundle_path,
+        "summaries/task_inventory.csv",
+        updater,
+        name="bad_task_inventory.tar.gz",
+    )
+
+    validation = run_validator("validate-complete-bundle", "--bundle", mutated, check=False)
+
+    assert validation.returncode != 0
+    assert "task_inventory" in validation.stderr
+
+
+def test_complete_bundle_rejects_canonical_summary_row_count_mismatch(tmp_path):
+    fixture = create_reducer_fixture(tmp_path)
+    result = run_reducer_validator(fixture)
+    bundle_path = Path(json.loads(result.stdout)["bundle_path"])
+
+    def updater(fieldnames, rows):
+        return fieldnames, rows[:-1]
+
+    mutated = mutate_complete_bundle_csv(
+        tmp_path,
+        bundle_path,
+        "summaries/canonical_reconciliation_summary.csv",
+        updater,
+        name="bad_canonical_summary.tar.gz",
+    )
+
+    validation = run_validator("validate-complete-bundle", "--bundle", mutated, check=False)
+
+    assert validation.returncode != 0
+    assert "canonical" in validation.stderr.lower()
+
+
+def test_complete_bundle_rejects_service_summary_task_count_mismatch(tmp_path):
+    fixture = create_reducer_fixture(tmp_path)
+    result = run_reducer_validator(fixture)
+    bundle_path = Path(json.loads(result.stdout)["bundle_path"])
+
+    def updater(fieldnames, rows):
+        return fieldnames, rows[:-1]
+
+    mutated = mutate_complete_bundle_csv(
+        tmp_path,
+        bundle_path,
+        "summaries/service_reconciliation_summary.csv",
+        updater,
+        name="bad_service_summary_count.tar.gz",
+    )
+
+    validation = run_validator("validate-complete-bundle", "--bundle", mutated, check=False)
+
+    assert validation.returncode != 0
+    assert "service" in validation.stderr.lower()
+
+
+def test_complete_bundle_rejects_service_summary_value_mismatch(tmp_path):
+    fixture = create_reducer_fixture(tmp_path)
+    result = run_reducer_validator(fixture)
+    bundle_path = Path(json.loads(result.stdout)["bundle_path"])
+
+    def updater(fieldnames, rows):
+        if "charger_served_sum" not in fieldnames:
+            fieldnames = [*fieldnames, "charger_served_sum"]
+        rows[0]["charger_served_sum"] = "24"
+        return fieldnames, rows
+
+    mutated = mutate_complete_bundle_csv(
+        tmp_path,
+        bundle_path,
+        "summaries/service_reconciliation_summary.csv",
+        updater,
+        name="bad_service_summary_value.tar.gz",
+    )
+
+    validation = run_validator("validate-complete-bundle", "--bundle", mutated, check=False)
+
+    assert validation.returncode != 0
+    assert "service" in validation.stderr.lower()
+
+
+@pytest.mark.parametrize(
+    "mutator,error_text",
+    [
+        (lambda text: "", "marker"),
+        (
+            lambda text: text.replace("ALL_SCHEMA_VERSION_3=1\n", ""),
+            "ALL_SCHEMA_VERSION_3",
+        ),
+        (
+            lambda text: text + "ALL_SCHEMA_VERSION_3=1\n",
+            "duplicate",
+        ),
+        (
+            lambda text: text + "MALFORMED_MARKER_LINE\n",
+            "malformed",
+        ),
+        (
+            lambda text: text.replace("TASK_PACKAGE_COUNT=8\n", "TASK_PACKAGE_COUNT=7\n"),
+            "TASK_PACKAGE_COUNT",
+        ),
+        (
+            lambda text: text.replace(
+                "COMPLETE_DIAGNOSTIC_SMOKE_BUNDLE_PATH=infrastructure_diagnostic_smoke_complete_evidence_job123456.tar.gz\n",
+                "COMPLETE_DIAGNOSTIC_SMOKE_BUNDLE_PATH=wrong_bundle.tar.gz\n",
+            ),
+            "COMPLETE_DIAGNOSTIC_SMOKE_BUNDLE_PATH",
+        ),
+    ],
+)
+def test_complete_bundle_rejects_missing_duplicate_malformed_or_contradictory_markers(
+    tmp_path, mutator, error_text
+):
+    fixture = create_reducer_fixture(tmp_path)
+    result = run_reducer_validator(fixture)
+    bundle_path = Path(json.loads(result.stdout)["bundle_path"])
+    mutated = mutate_complete_bundle_text(
+        tmp_path,
+        bundle_path,
+        "runtime_metadata/reducer_markers.env",
+        mutator,
+        name=f"bad_marker_{re.sub(r'[^a-z0-9]+', '_', error_text.lower())}.tar.gz",
+    )
+
+    validation = run_validator("validate-complete-bundle", "--bundle", mutated, check=False)
+
+    assert validation.returncode != 0
+    assert error_text.lower() in validation.stderr.lower()
+
+
 def test_reducer_rejects_missing_package_count(tmp_path):
     fixture = create_reducer_fixture(tmp_path)
     (fixture["package_root"] / task_package_basename(7, fixture["array_job_id"])).unlink()
@@ -2263,6 +2739,57 @@ def test_reducer_rejects_serious_stderr_signature(tmp_path):
 
     assert result.returncode != 0
     assert "RuntimeError" in result.stderr
+
+
+def test_reducer_log_scan_allows_benign_oom_substrings(tmp_path):
+    fixture = create_reducer_fixture(
+        tmp_path,
+        slurm_stderr_overrides={0: "the waiting room can bloom without warning\n"},
+    )
+
+    result = run_reducer_validator(fixture)
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_reducer_log_scan_rejects_bounded_oom_signature(tmp_path):
+    fixture = create_reducer_fixture(
+        tmp_path,
+        slurm_stderr_overrides={0: "slurmstepd: error: Detected 1 OOM event\n"},
+    )
+
+    result = run_reducer_validator(fixture)
+
+    assert result.returncode != 0
+    assert "OOM" in result.stderr
+
+
+def test_reducer_rejects_serious_evaluator_stdout_signature(tmp_path):
+    fixture = create_reducer_fixture(
+        tmp_path,
+        package_overrides={0: {"evaluator_stdout": "Traceback (most recent call last):\n"}},
+    )
+
+    result = run_reducer_validator(fixture)
+
+    assert result.returncode != 0
+    assert "Traceback" in result.stderr
+
+
+def test_reducer_records_evaluator_stdout_unknown_warning_inventory(tmp_path):
+    fixture = create_reducer_fixture(
+        tmp_path,
+        package_overrides={0: {"evaluator_stdout": "UserWarning: stdout warning inventory item\n"}},
+    )
+
+    result = run_reducer_validator(fixture)
+
+    assert result.returncode == 0, result.stderr
+    warning_inventory = read_bundle_member(
+        Path(json.loads(result.stdout)["bundle_path"]),
+        "summaries/warning_inventory.csv",
+    )
+    assert "stdout warning inventory item" in warning_inventory
 
 
 def test_reducer_allows_known_pkg_resources_warning(tmp_path):
@@ -2385,6 +2912,38 @@ def test_reducer_uses_batch_step_for_missing_parent_maxrss(tmp_path):
     assert "123456_0,COMPLETED,0:0,12,4,4096K,00:00:12,batch,batch" in runtime_summary
 
 
+def test_reducer_rejects_failed_batch_step_when_used_for_resource_fallback(tmp_path):
+    fixture = create_reducer_fixture(
+        tmp_path,
+        sacct_text=sacct_raw_text(
+            "123456",
+            parent_resource_blanks={0},
+            batch_state_overrides={0: "FAILED"},
+        ),
+    )
+
+    result = run_reducer_validator(fixture)
+
+    assert result.returncode != 0
+    assert ".batch" in result.stderr or "batch" in result.stderr.lower()
+
+
+def test_reducer_rejects_nonzero_batch_exit_when_used_for_resource_fallback(tmp_path):
+    fixture = create_reducer_fixture(
+        tmp_path,
+        sacct_text=sacct_raw_text(
+            "123456",
+            parent_resource_blanks={0},
+            batch_exit_overrides={0: "1:0"},
+        ),
+    )
+
+    result = run_reducer_validator(fixture)
+
+    assert result.returncode != 0
+    assert ".batch" in result.stderr or "batch" in result.stderr.lower()
+
+
 def test_reducer_rejects_contradictory_accounting_rows(tmp_path):
     fixture = create_reducer_fixture(
         tmp_path,
@@ -2406,6 +2965,80 @@ def test_reducer_refuses_to_overwrite_final_bundle(tmp_path):
 
     assert result.returncode != 0
     assert "already exists" in result.stderr
+
+
+def test_reducer_refuses_to_overwrite_final_checksum_sidecar(tmp_path):
+    fixture = create_reducer_fixture(tmp_path)
+    checksum_path = complete_bundle_checksum_path(fixture["output_root"], fixture["array_job_id"])
+    checksum_path.write_text("old", encoding="utf-8")
+
+    result = run_reducer_validator(fixture)
+
+    assert result.returncode != 0
+    assert "checksum" in result.stderr.lower() or "already exists" in result.stderr.lower()
+
+
+def test_reducer_publication_is_atomic_on_final_validation_failure(tmp_path, monkeypatch):
+    fixture = create_reducer_fixture(tmp_path)
+    validator_module = load_validator_module()
+
+    def fail_validation(_bundle_path):
+        raise validator_module.ValidationError("injected final validation failure")
+
+    monkeypatch.setattr(validator_module, "validate_complete_bundle_file", fail_validation)
+    args = argparse.Namespace(
+        array_job_id=fixture["array_job_id"],
+        task_package_root=fixture["package_root"],
+        slurm_log_root=fixture["slurm_log_root"],
+        output_root=fixture["output_root"],
+        work_root=fixture["work_root"],
+        source_commit_sha=fixture["source_commit_sha"],
+        reducer_job_id="reducer123",
+        sacct_raw_file=fixture["sacct_path"],
+        sacct_command="sacct",
+        sacct_attempts=1,
+        sacct_delay_seconds=0,
+        reducer_stdout_log=fixture["reducer_stdout"],
+        reducer_stderr_log=fixture["reducer_stderr"],
+    )
+
+    with pytest.raises(validator_module.ValidationError, match="injected"):
+        validator_module.reduce_bundle(args)
+
+    assert not complete_bundle_path(fixture["output_root"], fixture["array_job_id"]).exists()
+    assert not complete_bundle_checksum_path(fixture["output_root"], fixture["array_job_id"]).exists()
+
+
+def test_reducer_publication_cleans_final_artifacts_on_sidecar_failure(tmp_path, monkeypatch):
+    fixture = create_reducer_fixture(tmp_path)
+    validator_module = load_validator_module()
+
+    def fail_after_sidecar_created(archive_path, sidecar_path):
+        Path(sidecar_path).write_text("0" * 64 + f"  {Path(archive_path).name}\n", encoding="utf-8")
+        raise validator_module.ValidationError("injected sidecar failure")
+
+    monkeypatch.setattr(validator_module, "write_validated_sha256_sidecar", fail_after_sidecar_created)
+    args = argparse.Namespace(
+        array_job_id=fixture["array_job_id"],
+        task_package_root=fixture["package_root"],
+        slurm_log_root=fixture["slurm_log_root"],
+        output_root=fixture["output_root"],
+        work_root=fixture["work_root"],
+        source_commit_sha=fixture["source_commit_sha"],
+        reducer_job_id="reducer123",
+        sacct_raw_file=fixture["sacct_path"],
+        sacct_command="sacct",
+        sacct_attempts=1,
+        sacct_delay_seconds=0,
+        reducer_stdout_log=fixture["reducer_stdout"],
+        reducer_stderr_log=fixture["reducer_stderr"],
+    )
+
+    with pytest.raises(validator_module.ValidationError, match="sidecar"):
+        validator_module.reduce_bundle(args)
+
+    assert not complete_bundle_path(fixture["output_root"], fixture["array_job_id"]).exists()
+    assert not complete_bundle_checksum_path(fixture["output_root"], fixture["array_job_id"]).exists()
 
 
 def test_reducer_rejects_checkpoint_leak_from_task_package(tmp_path):
@@ -2430,11 +3063,41 @@ def test_reducer_validates_final_manifest_and_file_list(tmp_path):
     assert json.loads(validation.stdout)["status"] == "ok"
 
 
+def test_reducer_expands_service_reconciliation_summary_from_packaged_csvs(tmp_path):
+    fixture = create_reducer_fixture(tmp_path)
+
+    result = run_reducer_validator(fixture)
+    service_summary = read_bundle_member(
+        Path(json.loads(result.stdout)["bundle_path"]),
+        "summaries/service_reconciliation_summary.csv",
+    )
+    rows = list(csv.DictReader(io.StringIO(service_summary)))
+
+    assert len(rows) == 8
+    task0 = next(row for row in rows if row["task_id"] == "0")
+    assert task0["episode_total_ev_served"] == "25"
+    assert task0["charger_served_sum"] == "25"
+    assert task0["transformer_served_sum"] == "25"
+    assert task0["charger_satisfaction_count_sum"] == "25"
+    assert task0["transformer_satisfaction_count_sum"] == "25"
+    assert task0["episode_total_energy_charged"] == "25.0"
+    assert task0["charger_energy_charged_sum"] == "25.0"
+    assert task0["transformer_energy_charged_sum"] == "25.0"
+    assert task0["episode_total_energy_discharged"] == "0.0"
+    assert task0["charger_energy_discharged_sum"] == "0.0"
+    assert task0["transformer_energy_discharged_sum"] == "0.0"
+    assert task0["served_reconciliation_pass"] == "True"
+    assert task0["satisfaction_reconciliation_pass"] == "True"
+    assert task0["charged_energy_reconciliation_pass"] == "True"
+    assert task0["discharged_energy_reconciliation_pass"] == "True"
+
+
 def test_reducer_script_dry_run(tmp_path):
     env = {
         **os.environ,
         "EV_GNN_DIAGNOSTIC_SMOKE_REDUCER_DRY_RUN": "1",
         "EV_GNN_DIAGNOSTIC_SMOKE_ARRAY_JOB_ID": "123456",
+        "SLURM_JOB_ID": "777",
     }
     result = subprocess.run(
         ["bash", str(REDUCER_SCRIPT)],
@@ -2449,6 +3112,7 @@ def test_reducer_script_dry_run(tmp_path):
     assert result.returncode == 0
     assert "DRY_RUN_NO_REDUCTION_OR_PACKAGING" in result.stdout
     assert "infrastructure_diagnostic_smoke_complete_evidence_job123456.tar.gz" in result.stdout
+    assert "reducer_job777" in result.stdout
 
 
 def test_submit_helper_dry_run_prints_mapping_and_sbatch_commands():
@@ -2491,6 +3155,31 @@ def test_submit_helper_uses_afterok_dependency_in_dry_run():
 
     assert result.returncode == 0
     assert "--dependency=afterok:<array_job_id>" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "array_output,reducer_output",
+    [
+        ("123456", "789012"),
+        ("123456;cluster-name", "789012;cluster-name"),
+    ],
+)
+def test_submit_helper_normalises_sbatch_parsable_output(tmp_path, array_output, reducer_output):
+    result, calls = run_submit_real_with_fake_sbatch(tmp_path, [array_output, reducer_output])
+
+    assert result.returncode == 0, result.stderr
+    assert "array_job_id=123456" in result.stdout
+    assert "reducer_job_id=789012" in result.stdout
+    assert "--dependency=afterok:123456" in calls
+    assert "job123456.tar.gz" in result.stdout
+    assert "job123456.tar.gz.sha256" in result.stdout
+
+
+def test_submit_helper_rejects_non_numeric_sbatch_job_id(tmp_path):
+    result, _calls = run_submit_real_with_fake_sbatch(tmp_path, ["abc;cluster-name"])
+
+    assert result.returncode != 0
+    assert "sbatch" in result.stderr.lower()
 
 
 def test_source_bundle_prohibited_path_rejection():
@@ -2658,6 +3347,73 @@ def test_array_script_rejects_existing_output_package_before_real_work(tmp_path)
 
     assert result.returncode != 0
     assert "package already exists" in result.stderr
+
+
+def test_array_task_package_publication_is_atomic_on_validation_failure(tmp_path):
+    package_task_function = extract_bash_function(
+        ARRAY_SCRIPT.read_text(encoding="utf-8"),
+        "package_task",
+    )
+    output_root = tmp_path / "out"
+    staging_root = tmp_path / "package_staging"
+    repo_root = tmp_path / "repo"
+    output_root.mkdir()
+    for member in [
+        "stdout.log",
+        "stderr.log",
+        "diagnostics/episode_diagnostics.csv",
+        "canonical/complete_eval30.csv",
+        "config/formal_config.yaml",
+        "validation/task_validation.json",
+        "runtime_metadata/package_file_list.txt",
+    ]:
+        path = staging_root / member
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("fixture\n", encoding="utf-8")
+    validator = repo_root / "scripts/validate_infrastructure_diagnostic_smoke.py"
+    validator.parent.mkdir(parents=True)
+    validator.write_text("raise SystemExit(1)\n", encoding="utf-8")
+    final_package = output_root / "m3_infrastructure_diagnostic_smoke_25cp_actiongnn_seed0_jobmanual_task0.tar.gz"
+    runner = tmp_path / "run_package_task.sh"
+    runner.write_text(
+        f"""#!/bin/bash
+set -euo pipefail
+OUTPUT_ROOT={str(output_root)!r}
+PACKAGE_STAGING_DIR={str(staging_root)!r}
+PACKAGE_PATH={str(final_package)!r}
+PACKAGE_BASENAME="$(basename "${{PACKAGE_PATH}}")"
+REPO_ROOT={str(repo_root)!r}
+TASK_ID=0
+prepare_package_staging() {{ :; }}
+generate_package_manifest() {{ :; }}
+{package_task_function}
+if package_task; then
+  echo "package_task unexpectedly succeeded" >&2
+  exit 10
+fi
+if [[ -e "${{PACKAGE_PATH}}" ]]; then
+  echo "final package appeared after validation failure" >&2
+  exit 11
+fi
+if compgen -G "${{OUTPUT_ROOT}}/.${{PACKAGE_BASENAME}}.tmp.*" >/dev/null; then
+  echo "temporary package leaked after validation failure" >&2
+  exit 12
+fi
+""",
+        encoding="utf-8",
+    )
+    runner.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(runner)],
+        cwd=tmp_path,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize("script_path", [ARRAY_SCRIPT, REDUCER_SCRIPT, SUBMIT_SCRIPT])

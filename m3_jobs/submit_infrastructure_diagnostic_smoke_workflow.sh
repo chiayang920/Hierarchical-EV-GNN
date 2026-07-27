@@ -51,6 +51,16 @@ reducer_export_vars() {
   printf ",EV_GNN_DIAGNOSTIC_SMOKE_SLURM_LOG_ROOT=%s" "${OUTPUT_ROOT}"
 }
 
+normalise_sbatch_job_id() {
+  local raw="$1"
+  local first_line="${raw%%$'\n'*}"
+  local numeric="${first_line%%;*}"
+  if ! [[ "${numeric}" =~ ^[0-9]+$ ]]; then
+    die "sbatch --parsable returned non-numeric job ID: ${raw}"
+  fi
+  printf "%s" "${numeric}"
+}
+
 if [[ "${EV_GNN_DIAGNOSTIC_SMOKE_SUBMIT_DRY_RUN:-0}" == "1" ]]; then
   echo "INFRASTRUCTURE_DIAGNOSTIC_SMOKE_SUBMIT_DRY_RUN"
   echo "dry_run=1"
@@ -67,7 +77,8 @@ if [[ "${EV_GNN_DIAGNOSTIC_SMOKE_SUBMIT_DRY_RUN:-0}" == "1" ]]; then
   echo "SQUEUE_COMMAND=squeue -j <array_job_id>,<reducer_job_id>"
   echo "SACCT_COMMAND=sacct -j <array_job_id> --format=JobIDRaw,State,ExitCode,ElapsedRaw,AllocCPUS,MaxRSS,TotalCPU"
   echo "M3_TAR_VALIDATION_COMMAND=python ${VALIDATOR} validate-complete-bundle --bundle ${OUTPUT_ROOT}/infrastructure_diagnostic_smoke_complete_evidence_job<array_job_id>.tar.gz"
-  echo "LOCAL_SCP_COMMAND=scp cche0357@m3.massive.org.au:${OUTPUT_ROOT}/infrastructure_diagnostic_smoke_complete_evidence_job<array_job_id>.tar.gz ."
+  echo "M3_CHECKSUM_VALIDATION_COMMAND=cd ${OUTPUT_ROOT} && sha256sum -c infrastructure_diagnostic_smoke_complete_evidence_job<array_job_id>.tar.gz.sha256"
+  echo "LOCAL_SCP_COMMAND=scp cche0357@m3.massive.org.au:${OUTPUT_ROOT}/infrastructure_diagnostic_smoke_complete_evidence_job<array_job_id>.tar.gz cche0357@m3.massive.org.au:${OUTPUT_ROOT}/infrastructure_diagnostic_smoke_complete_evidence_job<array_job_id>.tar.gz.sha256 ."
   echo "DRY_RUN_NO_SBATCH_CALLED"
   exit 0
 fi
@@ -111,26 +122,31 @@ PY
     > "${PREFLIGHT_DIR}/task${task_id}_formal_validation.json"
 done
 
-ARRAY_JOB_ID="$(
+RAW_ARRAY_JOB_ID="$(
   sbatch \
     --parsable \
     --export="$(array_export_vars)" \
     "${ARRAY_SCRIPT}"
 )"
-REDUCER_JOB_ID="$(
+ARRAY_JOB_ID="$(normalise_sbatch_job_id "${RAW_ARRAY_JOB_ID}")"
+RAW_REDUCER_JOB_ID="$(
   sbatch \
     --parsable \
     --dependency="afterok:${ARRAY_JOB_ID}" \
     --export="$(reducer_export_vars "${ARRAY_JOB_ID}")" \
     "${REDUCER_SCRIPT}"
 )"
+REDUCER_JOB_ID="$(normalise_sbatch_job_id "${RAW_REDUCER_JOB_ID}")"
 FINAL_BUNDLE="${OUTPUT_ROOT}/infrastructure_diagnostic_smoke_complete_evidence_job${ARRAY_JOB_ID}.tar.gz"
+FINAL_BUNDLE_SHA256="${FINAL_BUNDLE}.sha256"
 
 echo "INFRASTRUCTURE_DIAGNOSTIC_SMOKE_WORKFLOW_SUBMITTED"
 echo "array_job_id=${ARRAY_JOB_ID}"
 echo "reducer_job_id=${REDUCER_JOB_ID}"
 echo "expected_final_bundle=${FINAL_BUNDLE}"
+echo "expected_final_bundle_sha256=${FINAL_BUNDLE_SHA256}"
 echo "SQUEUE_COMMAND=squeue -j ${ARRAY_JOB_ID},${REDUCER_JOB_ID}"
 echo "SACCT_COMMAND=sacct -j ${ARRAY_JOB_ID} --format=JobIDRaw,State,ExitCode,ElapsedRaw,AllocCPUS,MaxRSS,TotalCPU"
 echo "M3_TAR_VALIDATION_COMMAND=python ${VALIDATOR} validate-complete-bundle --bundle ${FINAL_BUNDLE}"
-echo "LOCAL_SCP_COMMAND=scp cche0357@m3.massive.org.au:${FINAL_BUNDLE} ."
+echo "M3_CHECKSUM_VALIDATION_COMMAND=cd ${OUTPUT_ROOT} && sha256sum -c $(basename "${FINAL_BUNDLE_SHA256}")"
+echo "LOCAL_SCP_COMMAND=scp cche0357@m3.massive.org.au:${FINAL_BUNDLE} cche0357@m3.massive.org.au:${FINAL_BUNDLE_SHA256} ."

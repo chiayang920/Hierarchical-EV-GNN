@@ -87,7 +87,7 @@ EV_GNN_DIAGNOSTIC_SMOKE_EXPECTED_SOURCE_COMMIT=<sha> \
 bash m3_jobs/submit_infrastructure_diagnostic_smoke_workflow.sh
 ```
 
-Dry-run does not require M3 formal package files and does not call `sbatch`. It prints the exact task mapping, array `sbatch` command, reducer `sbatch --dependency=afterok:<array_job_id>` command, monitoring commands, tar validation command, and local download command.
+Dry-run does not require M3 formal package files and does not call `sbatch`. It prints the exact task mapping, array `sbatch` command, reducer `sbatch --dependency=afterok:<array_job_id>` command, monitoring commands, tar validation command, checksum validation command, and local download command for both the archive and sidecar.
 
 ## Real Submission
 
@@ -101,6 +101,8 @@ Real mode requires:
 - all eight formal packages resolvable and valid
 
 Then the helper submits the array job and the reducer job with `afterok:<array_job_id>`.
+
+`sbatch --parsable` may return either `123456` or `123456;cluster-name`. The submit helper normalises this to the numeric job ID before using it in dependencies, filenames, environment exports, and monitoring commands.
 
 ## Monitoring
 
@@ -135,7 +137,13 @@ The final bundle is:
 
 `infrastructure_diagnostic_smoke_complete_evidence_job<array_job_id>.tar.gz`
 
-It contains the eight validated task packages, Slurm logs, reducer summaries, runtime metadata, complete file list, and complete SHA-256 manifest. It does not duplicate the extracted diagnostic CSVs outside the task packages.
+The checksum sidecar is:
+
+`infrastructure_diagnostic_smoke_complete_evidence_job<array_job_id>.tar.gz.sha256`
+
+The array job writes each task package through a unique temporary archive in the output root, validates that temporary archive, and atomically renames it to the final task-package path. The reducer writes the complete bundle through the same temporary-then-rename pattern and creates the SHA-256 sidecar through a temporary file before atomically publishing it. Existing final archive or sidecar paths are refused.
+
+The bundle contains the eight validated task packages, Slurm logs, reducer summaries, runtime metadata, complete file list, and complete SHA-256 manifest. It does not duplicate the extracted diagnostic CSVs outside the task packages.
 
 ## Local Verification
 
@@ -148,6 +156,12 @@ python scripts/validate_infrastructure_diagnostic_smoke.py \
 ```
 
 Also keep the M3 checksum result and the local SHA-256 result with the evidence notes.
+
+Verify the downloaded sidecar:
+
+```bash
+sha256sum -c infrastructure_diagnostic_smoke_complete_evidence_job<array_job_id>.tar.gz.sha256
+```
 
 ## Failure Recovery
 
