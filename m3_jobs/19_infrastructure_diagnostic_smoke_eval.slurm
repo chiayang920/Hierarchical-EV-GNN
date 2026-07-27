@@ -14,17 +14,17 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 DEFAULT_REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 REPO_ROOT="${EV_GNN_DIAGNOSTIC_SMOKE_REPO_ROOT:-${DEFAULT_REPO_ROOT}}"
-RUN_ROOT="/scratch2/fr57/cche0357/EV-GNN_runs/infrastructure_diagnostic_smoke"
+RUN_ROOT="${EV_GNN_DIAGNOSTIC_SMOKE_RUN_ROOT:-/scratch2/fr57/cche0357/EV-GNN_runs/infrastructure_diagnostic_smoke}"
 OUTPUT_ROOT="${EV_GNN_DIAGNOSTIC_SMOKE_OUTPUT_ROOT:-/projects/fr57/cche0357/EV-GNN_outputs}"
 FORMAL_PACKAGE_ROOT="${EV_GNN_DIAGNOSTIC_SMOKE_FORMAL_PACKAGE_ROOT:-${OUTPUT_ROOT}}"
 FORMAL_COMPLETE_BUNDLE="${EV_GNN_DIAGNOSTIC_SMOKE_FORMAL_COMPLETE_BUNDLE:-${OUTPUT_ROOT}/controlled_multiscale_formal_complete_evidence_job58513929.tar.gz}"
 FORMAL_JOB_ID="58513929"
 SOURCE_COMMIT_FILE="${REPO_ROOT}/SOURCE_COMMIT_SHA.txt"
-EXPECTED_SOURCE_COMMIT="${EV_GNN_DIAGNOSTIC_SMOKE_EXPECTED_SOURCE_COMMIT:-c72d7f5da6738da6561904b0840c2faf540b8262}"
+EXPECTED_SOURCE_COMMIT="${EV_GNN_DIAGNOSTIC_SMOKE_EXPECTED_SOURCE_COMMIT:-}"
 DEVICE="cpu"
 DETERMINISTIC="true"
 EVAL_EXPL_NOISE="0.0"
-MAX_EPISODE_STEPS=112
+MAX_EPISODE_STEPS=""
 REQUESTED_MEMORY="64G"
 REQUESTED_WALL_TIME="06:00:00"
 
@@ -92,6 +92,43 @@ require_file() {
     echo "ERROR: required file missing or empty: ${path}" >&2
     exit 4
   fi
+}
+
+write_single_hash() {
+  local path="$1"
+  local label="$2"
+  local output_path="$3"
+  python - "${path}" "${label}" "${output_path}" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+label = sys.argv[2]
+output = Path(sys.argv[3])
+digest = hashlib.sha256(path.read_bytes()).hexdigest()
+output.write_text(f"{digest}  {label}\n", encoding="utf-8")
+PY
+}
+
+write_checkpoint_hashes() {
+  local output_path="$1"
+  shift
+  python - "${output_path}" "$@" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+output = Path(sys.argv[1])
+pairs = sys.argv[2:]
+if len(pairs) % 2:
+    raise SystemExit("checkpoint hash arguments must be path/label pairs")
+with output.open("w", encoding="utf-8") as handle:
+    for index in range(0, len(pairs), 2):
+        path = Path(pairs[index])
+        label = pairs[index + 1]
+        handle.write(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {label}\n")
+PY
 }
 
 write_canonical_episode0() {
@@ -166,7 +203,14 @@ PY
 package_task() {
   prepare_package_staging
   generate_package_manifest
-  tar -czf "${PACKAGE_PATH}" -C "${PACKAGE_STAGING_DIR}" .
+  tar -czf "${PACKAGE_PATH}" -C "${PACKAGE_STAGING_DIR}" \
+    stdout.log \
+    stderr.log \
+    diagnostics \
+    canonical \
+    config \
+    validation \
+    runtime_metadata
   tar -tzf "${PACKAGE_PATH}" >/dev/null
   python "${REPO_ROOT}/scripts/validate_infrastructure_diagnostic_smoke.py" \
     validate-task-package \
@@ -188,7 +232,7 @@ if [[ "${EV_GNN_DIAGNOSTIC_SMOKE_DRY_RUN:-0}" == "1" ]]; then
   echo "task_dir=${TASK_DIR}"
   echo "package_path=${PACKAGE_PATH}"
   echo "VALIDATOR_COMMAND=python ${REPO_ROOT}/scripts/validate_infrastructure_diagnostic_smoke.py task-mapping --task-id ${TASK_ID}"
-  echo "DIAGNOSTIC_COMMAND=python evaluate_td3_gnn_infrastructure_diagnostics.py --algorithm ${ALGORITHM} --seed 0 --eval_episodes 1 --checkpoint <staged_model.best> --config <extracted_formal_config> --output_dir ${DIAGNOSTIC_DIR} --device cpu --deterministic true --eval_expl_noise 0.0 --max_episode_steps 112 --eval_seed_offset ${EPISODE_SEED} --matrix_job_id ${ARRAY_JOB_ID}"
+  echo "DIAGNOSTIC_COMMAND=python evaluate_td3_gnn_infrastructure_diagnostics.py --algorithm ${ALGORITHM} --seed 0 --eval_episodes 1 --checkpoint <staged_model.best> --config <extracted_formal_config> --output_dir ${DIAGNOSTIC_DIR} --device cpu --deterministic true --eval_expl_noise 0.0 --max_episode_steps <validated_simulation_length> --eval_seed_offset ${EPISODE_SEED} --matrix_job_id ${ARRAY_JOB_ID}"
   echo "DRY_RUN_NO_EVALUATION_OR_PACKAGING"
   exit 0
 fi
@@ -205,10 +249,28 @@ export OMP_NUM_THREADS=4
 export MKL_NUM_THREADS=4
 export NUMEXPR_NUM_THREADS=4
 
-if [[ -e "${TASK_DIR}" && "${EV_GNN_DIAGNOSTIC_SMOKE_ALLOW_EXISTING_TASK_DIR:-0}" != "1" ]]; then
-  echo "ERROR: task directory already exists: ${TASK_DIR}" >&2
-  echo "Set EV_GNN_DIAGNOSTIC_SMOKE_ALLOW_EXISTING_TASK_DIR=1 to reuse it." >&2
+if [[ -z "${EXPECTED_SOURCE_COMMIT}" ]]; then
+  echo "ERROR: EV_GNN_DIAGNOSTIC_SMOKE_EXPECTED_SOURCE_COMMIT must be exported in real mode" >&2
+  exit 2
+fi
+
+if [[ -e "${PACKAGE_PATH}" ]]; then
+  echo "ERROR: final task package already exists: ${PACKAGE_PATH}" >&2
   exit 3
+fi
+
+EXPECTED_JOB_RUN_ROOT="${RUN_ROOT}/job${ARRAY_JOB_ID}"
+if [[ -e "${TASK_DIR}" ]]; then
+  case "${TASK_DIR}" in
+    "${EXPECTED_JOB_RUN_ROOT}"/*) ;;
+    *) echo "ERROR: refusing to clean task directory outside job run root: ${TASK_DIR}" >&2; exit 3 ;;
+  esac
+  if [[ "${EV_GNN_DIAGNOSTIC_SMOKE_CLEAN_EXISTING_TASK_DIR:-0}" != "1" ]]; then
+    echo "ERROR: task directory already exists: ${TASK_DIR}" >&2
+    echo "Set EV_GNN_DIAGNOSTIC_SMOKE_CLEAN_EXISTING_TASK_DIR=1 to delete and recreate it." >&2
+    exit 3
+  fi
+  rm -rf "${TASK_DIR}"
 fi
 
 mkdir -p \
@@ -288,7 +350,10 @@ PY
   echo "formal_package_root=${FORMAL_PACKAGE_ROOT}"
   echo "formal_complete_bundle=${FORMAL_COMPLETE_BUNDLE}"
 } > "${METADATA_DIR}/source_package.env"
-sha256sum "${FORMAL_PACKAGE_PATH}" > "${METADATA_DIR}/source_package.sha256"
+write_single_hash \
+  "${FORMAL_PACKAGE_PATH}" \
+  "$(basename "${FORMAL_PACKAGE_PATH}")" \
+  "${METADATA_DIR}/source_package.sha256"
 
 python "${REPO_ROOT}/scripts/validate_infrastructure_diagnostic_smoke.py" \
   validate-formal-package \
@@ -296,6 +361,17 @@ python "${REPO_ROOT}/scripts/validate_infrastructure_diagnostic_smoke.py" \
   --package "${FORMAL_PACKAGE_PATH}" \
   --extract-dir "${FORMAL_EXTRACT_DIR}" \
   > "${METADATA_DIR}/formal_package_validation.json"
+
+MAX_EPISODE_STEPS="$(
+  python - "${METADATA_DIR}/formal_package_validation.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+print(payload["simulation_length"])
+PY
+)"
 
 FORMAL_CONFIG="${FORMAL_EXTRACT_DIR}/${FORMAL_CONFIG_MEMBER}"
 FORMAL_CANONICAL_CSV="${FORMAL_EXTRACT_DIR}/${FORMAL_CANONICAL_MEMBER}"
@@ -314,13 +390,13 @@ cp "${FORMAL_EXTRACT_DIR}/${FORMAL_TRAIN_DIR}/model.best_critic" "${CHECKPOINT_P
 cp "${FORMAL_EXTRACT_DIR}/${FORMAL_TRAIN_DIR}/model.best_critic_optimizer" "${CHECKPOINT_PREFIX}_critic_optimizer"
 cp "${FORMAL_EXTRACT_DIR}/${FORMAL_TRAIN_DIR}/kwargs.yaml" "${CHECKPOINT_STAGING_DIR}/kwargs.yaml"
 
-sha256sum \
-  "${CHECKPOINT_PREFIX}_actor" \
-  "${CHECKPOINT_PREFIX}_actor_optimizer" \
-  "${CHECKPOINT_PREFIX}_critic" \
-  "${CHECKPOINT_PREFIX}_critic_optimizer" \
-  "${CHECKPOINT_STAGING_DIR}/kwargs.yaml" \
-  > "${METADATA_DIR}/checkpoint_member_hashes.sha256"
+write_checkpoint_hashes \
+  "${METADATA_DIR}/checkpoint_member_hashes.sha256" \
+  "${CHECKPOINT_PREFIX}_actor" "${FORMAL_TRAIN_DIR}/model.best_actor" \
+  "${CHECKPOINT_PREFIX}_actor_optimizer" "${FORMAL_TRAIN_DIR}/model.best_actor_optimizer" \
+  "${CHECKPOINT_PREFIX}_critic" "${FORMAL_TRAIN_DIR}/model.best_critic" \
+  "${CHECKPOINT_PREFIX}_critic_optimizer" "${FORMAL_TRAIN_DIR}/model.best_critic_optimizer" \
+  "${CHECKPOINT_STAGING_DIR}/kwargs.yaml" "${FORMAL_TRAIN_DIR}/kwargs.yaml"
 cp "${FORMAL_EXTRACT_DIR}/runtime_metadata/source_manifest.sha256" "${METADATA_DIR}/original_source_manifest.sha256"
 cp "${FORMAL_EXTRACT_DIR}/runtime_metadata/task_runtime_metadata.env" "${METADATA_DIR}/original_task_runtime_metadata.env"
 
@@ -358,7 +434,8 @@ python "${REPO_ROOT}/scripts/validate_infrastructure_diagnostic_smoke.py" \
   validate-diagnostics \
   --task-id "${TASK_ID}" \
   --diagnostic-dir "${DIAGNOSTIC_DIR}" \
-  --validation-dir "${VALIDATION_DIR}"
+  --validation-dir "${VALIDATION_DIR}" \
+  --matrix-job-id "${ARRAY_JOB_ID}"
 
 python "${REPO_ROOT}/scripts/validate_infrastructure_diagnostic_smoke.py" \
   reconcile-canonical \

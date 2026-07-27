@@ -4,13 +4,20 @@ import csv
 import hashlib
 import json
 import math
+import re
+import shutil
 import sys
 import tarfile
+import tempfile
+from argparse import Namespace
 from pathlib import Path, PurePosixPath
+
+import yaml
 
 
 FORMAL_JOB_ID = "58513929"
 SCHEMA_VERSION = "3"
+HEX_SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
 
 TASKS = {
     0: {
@@ -110,6 +117,104 @@ FLOAT_RECONCILIATION = [
     ("nonzero_action_count_mean_all_slots", "active_action_count_mean", 1e-6, 0.0),
 ]
 
+EXACT_RECONCILIATION = [
+    ("algorithm", "algorithm", "algorithm", "string"),
+    ("training seed", "seed", "training_seed", "integer"),
+    ("episode index", "episode_index", "episode_index", "integer"),
+    ("episode seed", "episode_seed", "episode_seed", "integer"),
+    ("episode steps", "episode_steps", "episode_steps", "integer"),
+    ("done", "done", "done", "boolean"),
+    ("total_ev_served", "total_ev_served", "total_ev_served", "integer"),
+]
+
+EPISODE_REQUIRED_COLUMNS = {
+    "matrix_job_id",
+    "scale",
+    "algorithm",
+    "training_seed",
+    "episode_index",
+    "episode_seed",
+    "episode_steps",
+    "done",
+    "episode_reward",
+    "v2g_enabled",
+    "active_action_decision_count",
+    "active_action_below_environment_low_count",
+    "global_positive_action_fraction_active",
+    "global_zero_action_fraction_active",
+    "global_negative_action_fraction_active",
+    "inactive_nonzero_action_count",
+    "global_action_mean_all_slots",
+    "global_action_fraction_at_max_all_slots",
+    "nonzero_action_count_mean_all_slots",
+    "total_transformer_overload",
+    "power_tracker_violation",
+    "tracking_error",
+    "energy_tracking_error",
+    "total_ev_served",
+    "total_energy_charged",
+    "total_energy_discharged",
+    "average_user_satisfaction",
+    "energy_user_satisfaction",
+    "diagnostic_schema_version",
+}
+
+SEED_SUMMARY_REQUIRED_COLUMNS = {
+    "matrix_job_id",
+    "scale",
+    "algorithm",
+    "training_seed",
+    "n_eval_episodes",
+    "active_action_below_environment_low_count",
+    "global_negative_action_fraction_active_mean",
+    "inactive_nonzero_action_count_mean",
+    "v2g_enabled",
+    "diagnostic_schema_version",
+}
+
+CHARGER_REQUIRED_COLUMNS = {
+    "matrix_job_id",
+    "scale",
+    "algorithm",
+    "training_seed",
+    "episode_index",
+    "episode_seed",
+    "charger_id",
+    "transformer_id",
+    "n_active_ev_decisions",
+    "positive_action_fraction_active",
+    "zero_action_fraction_active",
+    "negative_action_fraction_active",
+    "served_ev_count",
+    "energy_charged_kwh",
+    "energy_discharged_kwh",
+    "user_satisfaction_sum",
+    "user_satisfaction_observation_count",
+    "user_satisfaction_source",
+    "diagnostic_schema_version",
+}
+
+TRANSFORMER_REQUIRED_COLUMNS = {
+    "matrix_job_id",
+    "scale",
+    "algorithm",
+    "training_seed",
+    "episode_index",
+    "episode_seed",
+    "transformer_id",
+    "n_active_ev_decisions",
+    "positive_action_fraction_active",
+    "zero_action_fraction_active",
+    "negative_action_fraction_active",
+    "served_ev_count",
+    "energy_charged_kwh",
+    "energy_discharged_kwh",
+    "user_satisfaction_sum",
+    "user_satisfaction_observation_count",
+    "user_satisfaction_source",
+    "diagnostic_schema_version",
+}
+
 
 class ValidationError(Exception):
     pass
@@ -161,25 +266,24 @@ def required_formal_members(mapping):
 
 
 def normalise_member_name(name):
-    path = PurePosixPath(str(name))
-    if str(name).startswith("/") or path.is_absolute():
+    raw = str(name)
+    path = PurePosixPath(raw)
+    if raw.startswith("/") or path.is_absolute():
         raise ValidationError(f"unsafe absolute tar member path: {name}")
     if any(part == ".." for part in path.parts):
         raise ValidationError(f"unsafe tar member path contains '..': {name}")
-    if str(path) in {"", "."}:
+    clean_parts = [part for part in path.parts if part not in {"", "."}]
+    if not clean_parts:
         raise ValidationError(f"unsafe empty tar member path: {name}")
-    return path.as_posix()
+    return PurePosixPath(*clean_parts).as_posix()
 
 
 def reject_unsafe_tar_member(member):
     normalise_member_name(member.name)
     if member.issym() or member.islnk():
-        link_target = PurePosixPath(member.linkname)
-        if str(member.linkname).startswith("/") or link_target.is_absolute():
-            raise ValidationError(f"unsafe tar link target: {member.name} -> {member.linkname}")
-        if any(part == ".." for part in link_target.parts):
-            raise ValidationError(f"unsafe tar link target: {member.name} -> {member.linkname}")
         raise ValidationError(f"tar links are not allowed in smoke evidence: {member.name}")
+    if not (member.isfile() or member.isdir()):
+        raise ValidationError(f"unsupported special tar member: {member.name}")
 
 
 def open_tar(path):
@@ -191,8 +295,13 @@ def open_tar(path):
 
 def safe_tar_members(tar):
     members = tar.getmembers()
+    seen = set()
     for member in members:
         reject_unsafe_tar_member(member)
+        normalised = normalise_member_name(member.name)
+        if normalised in seen:
+            raise ValidationError(f"duplicate normalized tar member path: {normalised}")
+        seen.add(normalised)
     return members
 
 
@@ -203,10 +312,19 @@ def safe_extract_tar(package_path, extract_dir):
     with open_tar(package_path) as tar:
         members = safe_tar_members(tar)
         for member in members:
-            target = (root / normalise_member_name(member.name)).resolve()
+            normalised = normalise_member_name(member.name)
+            target = (root / normalised).resolve()
             if root not in [target, *target.parents]:
                 raise ValidationError(f"unsafe tar extraction target: {member.name}")
-            tar.extract(member, path=root)
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            payload = tar.extractfile(member)
+            if payload is None:
+                raise ValidationError(f"cannot read package member: {normalised}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("wb") as output:
+                shutil.copyfileobj(payload, output)
     return root
 
 
@@ -224,6 +342,7 @@ def sha256_file(path):
 
 def parse_manifest_text(text):
     entries = []
+    seen_paths = set()
     for line in text.splitlines():
         stripped = line.strip()
         if not stripped:
@@ -232,16 +351,32 @@ def parse_manifest_text(text):
             digest, relative = stripped.split(None, 1)
         except ValueError as exc:
             raise ValidationError(f"invalid checksum manifest line: {line!r}") from exc
-        entries.append((digest, relative.strip()))
+        if not HEX_SHA256.fullmatch(digest):
+            raise ValidationError(f"invalid checksum digest syntax: {digest!r}")
+        normalised = normalise_member_name(relative.strip())
+        if normalised in seen_paths:
+            raise ValidationError(f"duplicate checksum manifest path: {normalised}")
+        seen_paths.add(normalised)
+        entries.append((digest.lower(), normalised))
     return entries
 
 
-def verify_extracted_manifest(root, manifest_path):
+def verify_manifest_coverage(covered_paths, required_paths, context):
+    missing = sorted(set(required_paths) - set(covered_paths))
+    if missing:
+        raise ValidationError(
+            f"checksum coverage missing required {context} file(s): {', '.join(missing)}"
+        )
+
+
+def verify_extracted_manifest(root, manifest_path, required_coverage=()):
     manifest = Path(root) / manifest_path
     if not manifest.is_file() or manifest.stat().st_size == 0:
         raise ValidationError(f"missing required checksum manifest: {manifest_path}")
-    for expected_digest, relative_path in parse_manifest_text(manifest.read_text(encoding="utf-8")):
-        normalised = normalise_member_name(relative_path)
+    entries = parse_manifest_text(manifest.read_text(encoding="utf-8"))
+    covered = set()
+    for expected_digest, normalised in entries:
+        covered.add(normalised)
         path = Path(root) / normalised
         if normalised == manifest_path:
             continue
@@ -252,9 +387,11 @@ def verify_extracted_manifest(root, manifest_path):
             raise ValidationError(
                 f"checksum mismatch for {normalised}: {actual_digest} != {expected_digest}"
             )
+    verify_manifest_coverage(covered, required_coverage, "formal package")
+    return covered
 
 
-def verify_tar_manifest(package_path, manifest_member):
+def verify_tar_manifest(package_path, manifest_member, required_coverage=(), require_all_files=False):
     with open_tar(package_path) as tar:
         members = safe_tar_members(tar)
         member_by_name = {normalise_member_name(member.name): member for member in members if member.isfile()}
@@ -264,8 +401,9 @@ def verify_tar_manifest(package_path, manifest_member):
         if manifest_file is None:
             raise ValidationError(f"cannot read checksum manifest: {manifest_member}")
         entries = parse_manifest_text(manifest_file.read().decode("utf-8"))
-        for expected_digest, relative_path in entries:
-            normalised = normalise_member_name(relative_path)
+        covered = set()
+        for expected_digest, normalised in entries:
+            covered.add(normalised)
             if normalised == manifest_member:
                 continue
             if normalised not in member_by_name:
@@ -278,6 +416,17 @@ def verify_tar_manifest(package_path, manifest_member):
                 raise ValidationError(
                     f"checksum mismatch for {normalised}: {actual_digest} != {expected_digest}"
                 )
+        verify_manifest_coverage(covered, required_coverage, "package")
+        if require_all_files:
+            expected_coverage = set(member_by_name) - {manifest_member}
+            missing = sorted(expected_coverage - covered)
+            extra = sorted(covered - set(member_by_name))
+            if missing or extra:
+                raise ValidationError(
+                    "checksum coverage mismatch for package file(s): "
+                    f"missing={missing}, extra={extra}"
+                )
+        return covered
 
 
 def require_files(root, relative_paths):
@@ -290,6 +439,42 @@ def require_files(root, relative_paths):
         raise ValidationError(f"missing required file(s): {', '.join(missing)}")
 
 
+def validate_formal_config(config_path, mapping):
+    with Path(config_path).open("r", encoding="utf-8") as handle:
+        config = yaml.safe_load(handle)
+    if not isinstance(config, dict):
+        raise ValidationError(f"formal config did not parse as a YAML mapping: {config_path}")
+
+    simulation_length = integer_value(config.get("simulation_length"), "simulation_length")
+    if simulation_length != 112:
+        raise ValidationError(f"simulation_length must equal 112, got {simulation_length}")
+
+    v2g_enabled = parse_bool(config.get("v2g_enabled"), "v2g_enabled")
+    if v2g_enabled:
+        raise ValidationError("v2g_enabled must be false in the extracted formal config")
+
+    charger_count = integer_value(config.get("number_of_charging_stations"), "number_of_charging_stations")
+    if charger_count != mapping["expected_charger_rows"]:
+        raise ValidationError(
+            "number_of_charging_stations mismatch: "
+            f"{charger_count} != {mapping['expected_charger_rows']}"
+        )
+
+    transformer_count = integer_value(config.get("number_of_transformers"), "number_of_transformers")
+    if transformer_count != mapping["expected_transformer_rows"]:
+        raise ValidationError(
+            "number_of_transformers mismatch: "
+            f"{transformer_count} != {mapping['expected_transformer_rows']}"
+        )
+
+    return {
+        "simulation_length": simulation_length,
+        "v2g_enabled": v2g_enabled,
+        "number_of_charging_stations": charger_count,
+        "number_of_transformers": transformer_count,
+    }
+
+
 def read_rows(path):
     path = Path(path)
     if not path.is_file() or path.stat().st_size == 0:
@@ -299,6 +484,12 @@ def read_rows(path):
         if reader.fieldnames is None:
             raise ValidationError(f"CSV has no header: {path}")
         return list(reader), list(reader.fieldnames)
+
+
+def require_columns(fieldnames, required_columns, label):
+    missing = sorted(set(required_columns) - set(fieldnames))
+    if missing:
+        raise ValidationError(f"{label} missing required column(s): {', '.join(missing)}")
 
 
 def numeric(value, field):
@@ -313,18 +504,37 @@ def numeric(value, field):
     return parsed
 
 
-def optional_numeric(value):
+def integer_value(value, field):
+    parsed = numeric(value, field)
+    if not parsed.is_integer():
+        raise ValidationError(f"{field} must be an integral value: {value!r}")
+    return int(parsed)
+
+
+def nonnegative_integer(value, field):
+    parsed = integer_value(value, field)
+    if parsed < 0:
+        raise ValidationError(f"{field} must be non-negative: {value!r}")
+    return parsed
+
+
+def optional_numeric(value, field):
     if value in ("", None):
         return None
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if math.isfinite(parsed) else None
+    return numeric(value, field)
 
 
 def bool_value(value):
     return str(value).strip().lower() in {"true", "1", "yes"}
+
+
+def parse_bool(value, field):
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes"}:
+        return True
+    if text in {"false", "0", "no"}:
+        return False
+    raise ValidationError(f"invalid boolean value for {field}: {value!r}")
 
 
 def assert_close(label, observed, expected, absolute_tolerance=1e-6, relative_tolerance=1e-12):
@@ -347,18 +557,42 @@ def sum_available(rows, field):
     return total
 
 
+def sum_integer(rows, field):
+    total = 0
+    for row in rows:
+        total += nonnegative_integer(row.get(field), field)
+    return total
+
+
+def require_unique_nonnegative_ids(rows, field):
+    seen = set()
+    for row in rows:
+        value = nonnegative_integer(row.get(field), field)
+        if value in seen:
+            raise ValidationError(f"{field} values must be unique")
+        seen.add(value)
+    return seen
+
+
 def validate_signed_rows(rows, label):
     for index, row in enumerate(rows):
-        active = optional_numeric(row.get("active_action_decision_count", row.get("n_active_ev_decisions", "")))
-        if active is not None and active <= 0:
+        active_field = "active_action_decision_count" if "active_action_decision_count" in row else "n_active_ev_decisions"
+        active = nonnegative_integer(row.get(active_field), active_field)
+        if active <= 0:
             continue
-        fractions = [
-            optional_numeric(row.get("global_positive_action_fraction_active", row.get("positive_action_fraction_active", ""))),
-            optional_numeric(row.get("global_zero_action_fraction_active", row.get("zero_action_fraction_active", ""))),
-            optional_numeric(row.get("global_negative_action_fraction_active", row.get("negative_action_fraction_active", ""))),
+        fraction_fields = [
+            "global_positive_action_fraction_active" if "global_positive_action_fraction_active" in row else "positive_action_fraction_active",
+            "global_zero_action_fraction_active" if "global_zero_action_fraction_active" in row else "zero_action_fraction_active",
+            "global_negative_action_fraction_active" if "global_negative_action_fraction_active" in row else "negative_action_fraction_active",
         ]
-        if any(value is None for value in fractions):
-            continue
+        fractions = []
+        for field in fraction_fields:
+            if field not in row or row.get(field) in {"", None}:
+                raise ValidationError(f"{label} row {index} missing signed fraction field: {field}")
+            value = numeric(row.get(field), field)
+            if value < 0.0 or value > 1.0:
+                raise ValidationError(f"{label} row {index} signed fraction out of range for {field}: {value}")
+            fractions.append(value)
         if abs(sum(fractions) - 1.0) > 1e-6:
             raise ValidationError(f"signed fraction invariant failed for {label} row {index}")
 
@@ -374,9 +608,16 @@ def validate_no_hierarchical_negative(mapping, episode_rows, seed_rows, charger_
     ]
     for field, rows in fields_and_rows:
         for row in rows:
-            value = optional_numeric(row.get(field, ""))
+            value = optional_numeric(row.get(field, ""), field)
             if value is not None and abs(value) > 1e-6:
                 raise ValidationError(f"hierarchical negative action fraction is non-zero: {field}={value}")
+    for field, rows in [
+        ("active_action_below_environment_low_count", episode_rows),
+        ("active_action_below_environment_low_count", seed_rows),
+    ]:
+        for row in rows:
+            if nonnegative_integer(row.get(field), field) != 0:
+                raise ValidationError(f"hierarchical below-environment-low count is non-zero: {field}")
 
 
 def validate_diagnostic_identity(mapping, episode_row, seed_row):
@@ -390,13 +631,13 @@ def validate_diagnostic_identity(mapping, episode_row, seed_row):
             raise ValidationError(f"diagnostic identity mismatch for {field}")
         if str(seed_row.get(field)) != str(expected):
             raise ValidationError(f"seed summary identity mismatch for {field}")
-    if str(episode_row.get("episode_index")) != "0":
+    if integer_value(episode_row.get("episode_index"), "episode_index") != 0:
         raise ValidationError("diagnostic episode_index must be 0")
-    if int(float(episode_row.get("episode_seed", "-1"))) != int(mapping["episode_seed"]):
+    if integer_value(episode_row.get("episode_seed"), "episode_seed") != int(mapping["episode_seed"]):
         raise ValidationError("diagnostic episode_seed mismatch")
-    if int(float(episode_row.get("episode_steps", "-1"))) != 112:
+    if integer_value(episode_row.get("episode_steps"), "episode_steps") != 112:
         raise ValidationError("diagnostic episode_steps mismatch")
-    if not bool_value(episode_row.get("done")):
+    if not parse_bool(episode_row.get("done"), "done"):
         raise ValidationError("diagnostic episode done must be true")
 
 
@@ -408,16 +649,44 @@ def validate_schema(rows, label):
 
 def validate_v2g_false(rows):
     for row in rows:
-        if "v2g_enabled" in row and str(row.get("v2g_enabled")).strip().lower() not in {"false", "0"}:
+        if "v2g_enabled" not in row:
+            continue
+        if row.get("v2g_enabled") in {"", None}:
+            raise ValidationError("v2g_enabled column/value is required")
+        if parse_bool(row.get("v2g_enabled"), "v2g_enabled"):
             raise ValidationError("v2g_enabled must be false for PublicPST formal diagnostics")
 
 
 def validate_service_reconciliation(episode_row, charger_rows, transformer_rows):
-    served_episode = numeric(episode_row.get("total_ev_served"), "total_ev_served")
+    served_episode = nonnegative_integer(episode_row.get("total_ev_served"), "total_ev_served")
     charged_episode = numeric(episode_row.get("total_energy_charged"), "total_energy_charged")
     discharged_episode = numeric(episode_row.get("total_energy_discharged"), "total_energy_discharged")
-    assert_close("charger served_ev_count", sum_available(charger_rows, "served_ev_count"), served_episode)
-    assert_close("transformer served_ev_count", sum_available(transformer_rows, "served_ev_count"), served_episode)
+
+    charger_ids = require_unique_nonnegative_ids(charger_rows, "charger_id")
+    transformer_ids = require_unique_nonnegative_ids(transformer_rows, "transformer_id")
+    if len(charger_ids) != len(charger_rows) or len(transformer_ids) != len(transformer_rows):
+        raise ValidationError("infrastructure IDs must be unique")
+    for row in charger_rows:
+        transformer_id = nonnegative_integer(row.get("transformer_id"), "transformer_id")
+        if transformer_id not in transformer_ids:
+            raise ValidationError(f"charger references unknown transformer_id: {transformer_id}")
+
+    charger_served = sum_integer(charger_rows, "served_ev_count")
+    transformer_served = sum_integer(transformer_rows, "served_ev_count")
+    charger_satisfaction_count = sum_integer(charger_rows, "user_satisfaction_observation_count")
+    transformer_satisfaction_count = sum_integer(transformer_rows, "user_satisfaction_observation_count")
+
+    if charger_served != transformer_served or charger_served != served_episode:
+        raise ValidationError(
+            "reconciliation mismatch for served_ev_count: "
+            f"charger={charger_served}, transformer={transformer_served}, episode={served_episode}"
+        )
+    if charger_satisfaction_count != transformer_satisfaction_count or charger_satisfaction_count != served_episode:
+        raise ValidationError(
+            "reconciliation mismatch for satisfaction observation count: "
+            f"charger={charger_satisfaction_count}, transformer={transformer_satisfaction_count}, episode={served_episode}"
+        )
+
     assert_close("charger energy_charged_kwh", sum_available(charger_rows, "energy_charged_kwh"), charged_episode)
     assert_close("transformer energy_charged_kwh", sum_available(transformer_rows, "energy_charged_kwh"), charged_episode)
     assert_close(
@@ -432,34 +701,56 @@ def validate_service_reconciliation(episode_row, charger_rows, transformer_rows)
     )
 
     for row in charger_rows + transformer_rows:
-        if numeric(row.get("served_ev_count"), "served_ev_count") > 0 and not row.get("user_satisfaction_source"):
-            raise ValidationError("explicit satisfaction source is required when served count > 0")
+        served_count = nonnegative_integer(row.get("served_ev_count"), "served_ev_count")
+        satisfaction_count = nonnegative_integer(
+            row.get("user_satisfaction_observation_count"),
+            "user_satisfaction_observation_count",
+        )
+        if served_count > 0:
+            if satisfaction_count <= 0:
+                raise ValidationError("satisfaction observation count must be positive when served count > 0")
+            if not row.get("user_satisfaction_source"):
+                raise ValidationError("explicit satisfaction source is required when served count > 0")
 
     chargers_by_transformer = {}
     for row in charger_rows:
-        chargers_by_transformer.setdefault(str(row.get("transformer_id")), []).append(row)
+        chargers_by_transformer.setdefault(nonnegative_integer(row.get("transformer_id"), "transformer_id"), []).append(row)
     for transformer_row in transformer_rows:
-        transformer_id = str(transformer_row.get("transformer_id"))
+        transformer_id = nonnegative_integer(transformer_row.get("transformer_id"), "transformer_id")
         chargers = chargers_by_transformer.get(transformer_id, [])
+        transformer_served = nonnegative_integer(transformer_row.get("served_ev_count"), "served_ev_count")
+        transformer_satisfaction_count = nonnegative_integer(
+            transformer_row.get("user_satisfaction_observation_count"),
+            "user_satisfaction_observation_count",
+        )
+        if sum_integer(chargers, "served_ev_count") != transformer_served:
+            raise ValidationError(f"reconciliation mismatch for transformer {transformer_id} served_ev_count")
+        assert_close(
+            f"transformer {transformer_id} energy_charged_kwh",
+            sum_available(chargers, "energy_charged_kwh"),
+            numeric(transformer_row.get("energy_charged_kwh"), "energy_charged_kwh"),
+        )
+        assert_close(
+            f"transformer {transformer_id} energy_discharged_kwh",
+            sum_available(chargers, "energy_discharged_kwh"),
+            numeric(transformer_row.get("energy_discharged_kwh"), "energy_discharged_kwh"),
+        )
         assert_close(
             f"transformer {transformer_id} satisfaction sum",
             sum_available(chargers, "user_satisfaction_sum"),
             numeric(transformer_row.get("user_satisfaction_sum"), "user_satisfaction_sum"),
         )
-        assert_close(
-            f"transformer {transformer_id} satisfaction count",
-            sum_available(chargers, "user_satisfaction_observation_count"),
-            numeric(transformer_row.get("user_satisfaction_observation_count"), "user_satisfaction_observation_count"),
-        )
+        if sum_integer(chargers, "user_satisfaction_observation_count") != transformer_satisfaction_count:
+            raise ValidationError(f"reconciliation mismatch for transformer {transformer_id} satisfaction count")
 
 
 def validate_diagnostics(args):
     mapping = task_mapping(args.task_id)
     diagnostic_dir = Path(args.diagnostic_dir)
-    episode_rows, _ = read_rows(diagnostic_dir / "episode_diagnostics.csv")
-    seed_rows, _ = read_rows(diagnostic_dir / "seed_summary_diagnostics.csv")
-    transformer_rows, _ = read_rows(diagnostic_dir / "transformer_diagnostics.csv")
-    charger_rows, _ = read_rows(diagnostic_dir / "charger_diagnostics.csv")
+    episode_rows, episode_columns = read_rows(diagnostic_dir / "episode_diagnostics.csv")
+    seed_rows, seed_columns = read_rows(diagnostic_dir / "seed_summary_diagnostics.csv")
+    transformer_rows, transformer_columns = read_rows(diagnostic_dir / "transformer_diagnostics.csv")
+    charger_rows, charger_columns = read_rows(diagnostic_dir / "charger_diagnostics.csv")
 
     if len(episode_rows) != 1:
         raise ValidationError(f"expected 1 episode row, got {len(episode_rows)}")
@@ -474,6 +765,11 @@ def validate_diagnostics(args):
             f"expected {mapping['expected_transformer_rows']} transformer rows, got {len(transformer_rows)}"
         )
 
+    require_columns(episode_columns, EPISODE_REQUIRED_COLUMNS, "episode diagnostics")
+    require_columns(seed_columns, SEED_SUMMARY_REQUIRED_COLUMNS, "seed summary diagnostics")
+    require_columns(charger_columns, CHARGER_REQUIRED_COLUMNS, "charger diagnostics")
+    require_columns(transformer_columns, TRANSFORMER_REQUIRED_COLUMNS, "transformer diagnostics")
+
     all_rows = episode_rows + seed_rows + charger_rows + transformer_rows
     validate_schema(episode_rows, "episode")
     validate_schema(seed_rows, "seed summary")
@@ -481,13 +777,27 @@ def validate_diagnostics(args):
     validate_schema(transformer_rows, "transformer")
     validate_v2g_false(all_rows)
     validate_diagnostic_identity(mapping, episode_rows[0], seed_rows[0])
+    if integer_value(seed_rows[0].get("n_eval_episodes"), "n_eval_episodes") != 1:
+        raise ValidationError("seed summary n_eval_episodes must equal 1")
+    matrix_job_id = getattr(args, "matrix_job_id", None)
+    if matrix_job_id:
+        for index, row in enumerate(all_rows):
+            if str(row.get("matrix_job_id")) != str(matrix_job_id):
+                raise ValidationError(
+                    f"matrix_job_id mismatch for row {index}: {row.get('matrix_job_id')} != {matrix_job_id}"
+                )
+    for row in charger_rows + transformer_rows:
+        if integer_value(row.get("episode_index"), "episode_index") != 0:
+            raise ValidationError("infrastructure diagnostic episode_index must be 0")
+        if integer_value(row.get("episode_seed"), "episode_seed") != int(mapping["episode_seed"]):
+            raise ValidationError("infrastructure diagnostic episode_seed mismatch")
     validate_signed_rows(episode_rows, "episode")
     validate_signed_rows(charger_rows, "charger")
     validate_signed_rows(transformer_rows, "transformer")
-    if numeric(episode_rows[0].get("inactive_nonzero_action_count"), "inactive_nonzero_action_count") != 0:
+    if nonnegative_integer(episode_rows[0].get("inactive_nonzero_action_count"), "inactive_nonzero_action_count") != 0:
         raise ValidationError("inactive non-zero action count must equal zero")
-    inactive_mean = optional_numeric(seed_rows[0].get("inactive_nonzero_action_count_mean", ""))
-    if inactive_mean is not None and inactive_mean != 0:
+    inactive_mean = numeric(seed_rows[0].get("inactive_nonzero_action_count_mean"), "inactive_nonzero_action_count_mean")
+    if inactive_mean != 0:
         raise ValidationError("inactive non-zero action count mean must equal zero")
     validate_no_hierarchical_negative(mapping, episode_rows, seed_rows, charger_rows, transformer_rows)
     validate_service_reconciliation(episode_rows[0], charger_rows, transformer_rows)
@@ -505,6 +815,8 @@ def validate_diagnostics(args):
         "transformer_rows": len(transformer_rows),
         "status": "ok",
     }
+    if matrix_job_id:
+        validation["matrix_job_id"] = str(matrix_job_id)
     validation_dir = Path(args.validation_dir)
     validation_dir.mkdir(parents=True, exist_ok=True)
     (validation_dir / "task_validation.json").write_text(
@@ -520,8 +832,10 @@ def resolve_package(args):
     individual_root = Path(args.individual_package_root)
     individual_path = individual_root / expected_name
     if individual_path.is_file():
+        with open_tar(individual_path) as tar:
+            safe_tar_members(tar)
         payload = {
-            "source_mode": "individual",
+            "source_mode": "individual_task_package",
             "package_path": str(individual_path),
             "expected_package_name": expected_name,
         }
@@ -537,11 +851,14 @@ def resolve_package(args):
         members = safe_tar_members(tar)
         for member in members:
             member_name = normalise_member_name(member.name)
-            if member.isfile() and Path(member_name).name == expected_name:
+            parts = PurePosixPath(member_name).parts
+            under_task_packages = "task_packages" in parts[:-1]
+            if member.isfile() and Path(member_name).name == expected_name and under_task_packages:
                 matches.append(member)
         if len(matches) != 1:
             raise ValidationError(
-                f"expected exactly one nested task package named {expected_name}, found {len(matches)}"
+                "expected exactly one nested task package under task_packages/ "
+                f"named {expected_name}, found {len(matches)}"
             )
         staging_dir = Path(args.staging_dir)
         staging_dir.mkdir(parents=True, exist_ok=True)
@@ -549,13 +866,14 @@ def resolve_package(args):
         payload = tar.extractfile(matches[0])
         if payload is None:
             raise ValidationError(f"cannot read nested package: {matches[0].name}")
-        output_path.write_bytes(payload.read())
+        with output_path.open("wb") as output:
+            shutil.copyfileobj(payload, output)
     with open_tar(output_path) as nested_tar:
         safe_tar_members(nested_tar)
     print(
         json.dumps(
             {
-                "source_mode": "complete_bundle",
+                "source_mode": "complete_bundle_nested_task_package",
                 "package_path": str(output_path),
                 "bundle_member": matches[0].name,
                 "expected_package_name": expected_name,
@@ -570,7 +888,17 @@ def validate_formal_package(args):
     extract_root = safe_extract_tar(args.package, args.extract_dir)
     required = required_formal_members(mapping)
     require_files(extract_root, required)
-    verify_extracted_manifest(extract_root, "runtime_metadata/package_file_checksums.sha256")
+    checksum_required = [
+        member
+        for member in required
+        if member != "runtime_metadata/package_file_checksums.sha256"
+    ]
+    verify_extracted_manifest(
+        extract_root,
+        "runtime_metadata/package_file_checksums.sha256",
+        required_coverage=checksum_required,
+    )
+    config_values = validate_formal_config(extract_root / config_member(mapping), mapping)
     payload = {
         "task_id": mapping["task_id"],
         "scale": mapping["scale"],
@@ -581,6 +909,7 @@ def validate_formal_package(args):
         "canonical_member": canonical_member(mapping),
         "checkpoint_prefix_member": f"train/{run_name(mapping)}/model.best",
         "status": "ok",
+        **config_values,
     }
     print(json.dumps(payload, sort_keys=True))
 
@@ -601,7 +930,7 @@ def relative_difference(observed, expected):
     return abs(float(observed) - float(expected)) / denominator
 
 
-def reconciliation_row(field, canonical_value, diagnostic_value, absolute_tolerance, relative_tolerance):
+def floating_reconciliation_row(field, canonical_value, diagnostic_value, absolute_tolerance, relative_tolerance):
     canonical_number = float(canonical_value)
     diagnostic_number = float(diagnostic_value)
     absolute_difference = abs(diagnostic_number - canonical_number)
@@ -611,12 +940,53 @@ def reconciliation_row(field, canonical_value, diagnostic_value, absolute_tolera
         passed = relative <= relative_tolerance
     return {
         "field": field,
-        "canonical value": canonical_value,
-        "diagnostic value": diagnostic_value,
-        "absolute difference": absolute_difference,
-        "relative difference": relative,
-        "absolute tolerance": absolute_tolerance,
-        "relative tolerance": relative_tolerance,
+        "comparison_type": "floating",
+        "canonical_value": canonical_value,
+        "diagnostic_value": diagnostic_value,
+        "absolute_difference": absolute_difference,
+        "relative_difference": relative,
+        "absolute_tolerance": absolute_tolerance,
+        "relative_tolerance": relative_tolerance,
+        "pass": str(bool(passed)),
+    }
+
+
+def exact_reconciliation_row(field, canonical_value, diagnostic_value, value_type):
+    passed = False
+    absolute_difference = ""
+    relative = ""
+    canonical_normalized = canonical_value
+    diagnostic_normalized = diagnostic_value
+    try:
+        if value_type == "integer":
+            canonical_normalized = integer_value(canonical_value, field)
+            diagnostic_normalized = integer_value(diagnostic_value, field)
+            absolute_difference = abs(diagnostic_normalized - canonical_normalized)
+            relative = relative_difference(diagnostic_normalized, canonical_normalized)
+            passed = canonical_normalized == diagnostic_normalized
+        elif value_type == "boolean":
+            canonical_normalized = parse_bool(canonical_value, field)
+            diagnostic_normalized = parse_bool(diagnostic_value, field)
+            absolute_difference = 0 if canonical_normalized == diagnostic_normalized else 1
+            relative = absolute_difference
+            passed = canonical_normalized == diagnostic_normalized
+        else:
+            passed = str(canonical_value) == str(diagnostic_value)
+            absolute_difference = 0 if passed else 1
+            relative = absolute_difference
+    except ValidationError:
+        absolute_difference = "invalid"
+        relative = "invalid"
+        passed = False
+    return {
+        "field": field,
+        "comparison_type": "exact",
+        "canonical_value": str(canonical_normalized),
+        "diagnostic_value": str(diagnostic_normalized),
+        "absolute_difference": absolute_difference,
+        "relative_difference": relative,
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0,
         "pass": str(bool(passed)),
     }
 
@@ -629,28 +999,19 @@ def reconcile_canonical(args):
     diagnostic = diagnostic_rows[0]
     canonical = canonical_episode_row(args.canonical_csv, 0)
 
-    exact_checks = [
-        ("algorithm", canonical.get("algorithm"), diagnostic.get("algorithm")),
-        ("training seed", canonical.get("seed"), diagnostic.get("training_seed")),
-        ("episode index", canonical.get("episode_index"), diagnostic.get("episode_index")),
-        ("episode seed", canonical.get("episode_seed"), diagnostic.get("episode_seed")),
-        ("episode steps", canonical.get("episode_steps"), diagnostic.get("episode_steps")),
-        ("done", str(bool_value(canonical.get("done"))), str(bool_value(diagnostic.get("done")))),
-        ("total_ev_served", str(int(float(canonical.get("total_ev_served")))), str(int(float(diagnostic.get("total_ev_served"))))),
-    ]
-    failures = []
-    for field, canonical_value, diagnostic_value in exact_checks:
-        if str(canonical_value) != str(diagnostic_value):
-            failures.append(f"{field}: {diagnostic_value} != {canonical_value}")
-    if diagnostic.get("algorithm") != mapping["algorithm"]:
-        failures.append("diagnostic algorithm does not match task mapping")
-    if int(float(diagnostic.get("episode_seed"))) != mapping["episode_seed"]:
-        failures.append("diagnostic episode seed does not match task mapping")
-
     rows = []
+    for field, canonical_field, diagnostic_field, value_type in EXACT_RECONCILIATION:
+        rows.append(
+            exact_reconciliation_row(
+                field,
+                canonical.get(canonical_field),
+                diagnostic.get(diagnostic_field),
+                value_type,
+            )
+        )
     for diagnostic_field, canonical_field, absolute_tolerance, relative_tolerance in FLOAT_RECONCILIATION:
         rows.append(
-            reconciliation_row(
+            floating_reconciliation_row(
                 diagnostic_field,
                 canonical.get(canonical_field),
                 diagnostic.get(diagnostic_field),
@@ -664,18 +1025,26 @@ def reconcile_canonical(args):
     with output_csv.open("w", newline="", encoding="utf-8") as handle:
         fieldnames = [
             "field",
-            "canonical value",
-            "diagnostic value",
-            "absolute difference",
-            "relative difference",
-            "absolute tolerance",
-            "relative tolerance",
+            "comparison_type",
+            "canonical_value",
+            "diagnostic_value",
+            "absolute_difference",
+            "relative_difference",
+            "absolute_tolerance",
+            "relative_tolerance",
             "pass",
         ]
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
-    failures.extend(row["field"] for row in rows if row["pass"] != "True")
+    failures = [row["field"] for row in rows if row["pass"] != "True"]
+    if diagnostic.get("algorithm") != mapping["algorithm"]:
+        failures.append("diagnostic algorithm does not match task mapping")
+    try:
+        if integer_value(diagnostic.get("episode_seed"), "episode_seed") != mapping["episode_seed"]:
+            failures.append("diagnostic episode seed does not match task mapping")
+    except ValidationError as error:
+        failures.append(str(error))
     if failures:
         raise ValidationError("canonical reconciliation failed: " + ", ".join(failures))
     print(json.dumps({"status": "ok", "rows": len(rows), "output_csv": str(output_csv)}, sort_keys=True))
@@ -694,6 +1063,72 @@ def is_checkpoint_leak(member_name):
     if basename.endswith("_optimizer"):
         return True
     return False
+
+
+def read_package_file_list(extract_root):
+    path = Path(extract_root) / "runtime_metadata/package_file_list.txt"
+    if not path.is_file():
+        raise ValidationError("missing runtime_metadata/package_file_list.txt")
+    listed = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped:
+            listed.append(normalise_member_name(stripped))
+    if len(listed) != len(set(listed)):
+        raise ValidationError("package_file_list.txt contains duplicate member paths")
+    return sorted(listed)
+
+
+def load_task_validation(extract_root, mapping):
+    path = Path(extract_root) / "validation/task_validation.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValidationError("task_validation.json is not valid JSON") from exc
+    if not isinstance(payload, dict) or not payload:
+        raise ValidationError("task_validation.json must contain a non-empty JSON object")
+    if payload.get("status") != "ok":
+        raise ValidationError("task_validation.json status must be ok")
+    expected = {
+        "task_id": mapping["task_id"],
+        "scale": mapping["scale"],
+        "algorithm": mapping["algorithm"],
+        "formal_task_id": mapping["formal_task_id"],
+        "episode_seed": mapping["episode_seed"],
+        "schema_version": SCHEMA_VERSION,
+        "episode_rows": 1,
+        "seed_summary_rows": 1,
+        "charger_rows": mapping["expected_charger_rows"],
+        "transformer_rows": mapping["expected_transformer_rows"],
+    }
+    for field, expected_value in expected.items():
+        if str(payload.get(field)) != str(expected_value):
+            raise ValidationError(
+                f"task_validation.json identity mismatch for {field}: {payload.get(field)} != {expected_value}"
+            )
+    return payload
+
+
+def validate_packaged_reconciliation(extract_root):
+    path = Path(extract_root) / "validation/canonical_reconciliation.csv"
+    rows, fieldnames = read_rows(path)
+    required = {
+        "field",
+        "comparison_type",
+        "canonical_value",
+        "diagnostic_value",
+        "absolute_difference",
+        "relative_difference",
+        "absolute_tolerance",
+        "relative_tolerance",
+        "pass",
+    }
+    require_columns(fieldnames, required, "canonical reconciliation")
+    if not rows:
+        raise ValidationError("canonical_reconciliation.csv must contain reconciliation rows")
+    failed = [row.get("field", "<unknown>") for row in rows if row.get("pass") != "True"]
+    if failed:
+        raise ValidationError(f"packaged canonical reconciliation contains failing row(s): {', '.join(failed)}")
 
 
 def validate_task_package(args):
@@ -726,18 +1161,51 @@ def validate_task_package(args):
     package_path = Path(args.package)
     with open_tar(package_path) as tar:
         members = safe_tar_members(tar)
-        member_names = {
+        member_names = sorted({
             normalise_member_name(member.name)
             for member in members
             if member.isfile()
-        }
+        })
     leaks = sorted(name for name in member_names if is_checkpoint_leak(name))
     if leaks:
         raise ValidationError(f"checkpoint bytes are forbidden in task package: {', '.join(leaks)}")
-    missing = sorted(set(required) - member_names)
+    missing = sorted(set(required) - set(member_names))
     if missing:
         raise ValidationError(f"missing required task package file(s): {', '.join(missing)}")
-    verify_tar_manifest(package_path, "runtime_metadata/package_file_checksums.sha256")
+    verify_tar_manifest(
+        package_path,
+        "runtime_metadata/package_file_checksums.sha256",
+        required_coverage=set(member_names) - {"runtime_metadata/package_file_checksums.sha256"},
+        require_all_files=True,
+    )
+    with tempfile.TemporaryDirectory(prefix="infra_diag_smoke_task_package_") as tmp_dir:
+        extract_root = safe_extract_tar(package_path, tmp_dir)
+        listed = read_package_file_list(extract_root)
+        if listed != member_names:
+            raise ValidationError(
+                "package_file_list.txt does not exactly match package members: "
+                f"listed={listed}, members={member_names}"
+            )
+        task_validation = load_task_validation(extract_root, mapping)
+        validate_packaged_reconciliation(extract_root)
+        matrix_job_id = task_validation.get("matrix_job_id")
+        revalidation_dir = Path(tmp_dir) / "revalidation"
+        validate_diagnostics(
+            Namespace(
+                task_id=args.task_id,
+                diagnostic_dir=str(Path(extract_root) / "diagnostics"),
+                validation_dir=str(revalidation_dir),
+                matrix_job_id=matrix_job_id,
+            )
+        )
+        reconcile_canonical(
+            Namespace(
+                task_id=args.task_id,
+                episode_diagnostics=str(Path(extract_root) / "diagnostics/episode_diagnostics.csv"),
+                canonical_csv=str(Path(extract_root) / "canonical/complete_eval30.csv"),
+                validation_dir=str(revalidation_dir),
+            )
+        )
     print(json.dumps({"status": "ok", "task_id": mapping["task_id"], "package": str(package_path)}, sort_keys=True))
 
 
@@ -763,6 +1231,7 @@ def build_parser():
     diagnostics_parser.add_argument("--task-id", type=int, required=True)
     diagnostics_parser.add_argument("--diagnostic-dir", required=True)
     diagnostics_parser.add_argument("--validation-dir", required=True)
+    diagnostics_parser.add_argument("--matrix-job-id")
 
     reconcile_parser = subparsers.add_parser("reconcile-canonical")
     reconcile_parser.add_argument("--task-id", type=int, required=True)
