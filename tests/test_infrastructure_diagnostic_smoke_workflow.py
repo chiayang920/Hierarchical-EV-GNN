@@ -1219,6 +1219,28 @@ def test_package_resolution_fails_on_zero_or_multiple_fallback_matches(tmp_path,
     assert result.returncode != 0
 
 
+def test_formal_package_validation_accepts_benign_root_directory_member(tmp_path):
+    root_member = tarfile.TarInfo(".")
+    root_member.type = tarfile.DIRTYPE
+    package_path = create_tar(
+        tmp_path / package_basename(),
+        {".": root_member, **formal_members()},
+    )
+
+    result = run_validator(
+        "validate-formal-package",
+        "--task-id",
+        0,
+        "--package",
+        package_path,
+        "--extract-dir",
+        tmp_path / "extract",
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_formal_package_validation_rejects_unsafe_tar_path(tmp_path):
     package_path = create_tar(tmp_path / package_basename(), {"../evil": "bad"})
 
