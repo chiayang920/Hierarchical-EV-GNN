@@ -219,12 +219,6 @@ def main(argv=None):
             max_action=max_action,
             tolerance=args.max_action_tolerance,
         )
-        episode_row["transformer_action_fraction_at_max_active"] = _mean_action_fraction(
-            action_summary["transformers"]
-        )
-        episode_row["charger_action_fraction_at_max_active"] = _mean_action_fraction(
-            action_summary["chargers"]
-        )
         episode_rows.append(episode_row)
         charger_rows.extend(build_charger_rows(metadata, episode_index, episode_seed, action_summary))
         transformer_rows.extend(build_transformer_rows(metadata, episode_index, episode_seed, action_summary))
@@ -245,16 +239,6 @@ def main(argv=None):
     print(f"Episodes: {args.eval_episodes}")
     print(f"Output dir: {output_dir}")
     print("---------------------------------------")
-
-
-def _mean_action_fraction(infrastructure_rows):
-    values = [
-        float(row["action_fraction_at_max_active"])
-        for row in infrastructure_rows.values()
-        if row.get("n_active_ev_decisions", 0) > 0
-    ]
-    return float(np.mean(values)) if values else 0.0
-
 
 if __name__ == "__main__":
     main()

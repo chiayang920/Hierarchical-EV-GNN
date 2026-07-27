@@ -112,6 +112,65 @@ def test_active_only_denominator_excludes_inactive_slots():
     assert summary["global"]["inactive_slot_fraction_mean"] == pytest.approx(0.5)
 
 
+def test_active_nonzero_fraction_distinguishes_max_moderate_and_zero_actions():
+    from utils.infrastructure_diagnostics import aggregate_infrastructure_actions
+
+    env = fake_env([
+        fake_charger(0, 1, 0),
+        fake_charger(1, 1, 1),
+        fake_charger(2, 1, 2),
+    ])
+    summary = aggregate_infrastructure_actions(
+        mapped_actions_by_step=[np.array([1.0, 0.5, 0.0], dtype=float)],
+        active_slots_by_step=[np.array([0, 1, 2], dtype=int)],
+        slot_to_charger_id=np.array([0, 1, 2], dtype=int),
+        charger_to_transformer_id={0: 0, 1: 1, 2: 2},
+        max_action=1.0,
+        tolerance=1e-6,
+        env=env,
+    )
+
+    assert summary["global"]["action_fraction_at_max_active"] == pytest.approx(1.0 / 3.0)
+    assert summary["global"]["action_nonzero_fraction_active"] == pytest.approx(2.0 / 3.0)
+    assert summary["chargers"][0]["action_nonzero_fraction_active"] == pytest.approx(1.0)
+    assert summary["chargers"][1]["action_nonzero_fraction_active"] == pytest.approx(1.0)
+    assert summary["chargers"][2]["action_nonzero_fraction_active"] == pytest.approx(0.0)
+
+
+def test_inactive_nonzero_action_fraction_detects_nonzero_inactive_slot():
+    from utils.infrastructure_diagnostics import aggregate_infrastructure_actions
+
+    env = fake_env([fake_charger(0, 3, 0)])
+    summary = aggregate_infrastructure_actions(
+        mapped_actions_by_step=[np.array([0.5, 0.2, 0.0], dtype=float)],
+        active_slots_by_step=[np.array([0], dtype=int)],
+        slot_to_charger_id=np.array([0, 0, 0], dtype=int),
+        charger_to_transformer_id={0: 0},
+        max_action=1.0,
+        tolerance=1e-6,
+        env=env,
+    )
+
+    assert summary["global"]["inactive_nonzero_action_fraction_all_slots"] == pytest.approx(0.5)
+
+
+def test_inactive_nonzero_action_fraction_is_zero_for_valid_mapped_actions():
+    from utils.infrastructure_diagnostics import aggregate_infrastructure_actions
+
+    env = fake_env([fake_charger(0, 3, 0)])
+    summary = aggregate_infrastructure_actions(
+        mapped_actions_by_step=[np.array([0.5, 0.0, 0.0], dtype=float)],
+        active_slots_by_step=[np.array([0], dtype=int)],
+        slot_to_charger_id=np.array([0, 0, 0], dtype=int),
+        charger_to_transformer_id={0: 0},
+        max_action=1.0,
+        tolerance=1e-6,
+        env=env,
+    )
+
+    assert summary["global"]["inactive_nonzero_action_fraction_all_slots"] == pytest.approx(0.0)
+
+
 def test_all_slot_denominator_includes_every_action_slot():
     from utils.infrastructure_diagnostics import aggregate_infrastructure_actions
 
@@ -254,6 +313,88 @@ def test_allocation_concentration_handles_uniform_concentrated_and_zero_pressure
     assert zero_pressure["zero_pressure"] is True
 
 
+def test_zero_pressure_steps_do_not_reduce_positive_pressure_concentration_means():
+    from utils.infrastructure_diagnostics import aggregate_infrastructure_actions
+
+    env = fake_env([fake_charger(0, 1, 0), fake_charger(1, 1, 1)])
+    summary = aggregate_infrastructure_actions(
+        mapped_actions_by_step=[
+            np.array([1.0, 0.0], dtype=float),
+            np.array([0.0, 0.0], dtype=float),
+        ],
+        active_slots_by_step=[
+            np.array([0, 1], dtype=int),
+            np.array([0, 1], dtype=int),
+        ],
+        slot_to_charger_id=np.array([0, 1], dtype=int),
+        charger_to_transformer_id={0: 0, 1: 1},
+        max_action=1.0,
+        tolerance=1e-6,
+        env=env,
+    )
+
+    assert summary["global"]["transformer_action_hhi_mean"] == pytest.approx(1.0)
+    assert summary["global"]["transformer_action_gini_mean"] == pytest.approx(0.5)
+    assert summary["global"]["transformer_allocation_valid_step_count"] == 1
+    assert summary["global"]["transformer_allocation_zero_pressure_step_fraction"] == pytest.approx(0.5)
+    assert summary["global"]["charger_action_hhi_mean"] == pytest.approx(1.0)
+    assert summary["global"]["charger_action_gini_mean"] == pytest.approx(0.5)
+    assert summary["global"]["charger_allocation_valid_step_count"] == 1
+    assert summary["global"]["charger_allocation_zero_pressure_step_fraction"] == pytest.approx(0.5)
+
+
+def test_all_zero_pressure_episodes_have_unavailable_concentration_means_and_zero_valid_steps():
+    from utils.infrastructure_diagnostics import aggregate_infrastructure_actions
+
+    env = fake_env([fake_charger(0, 1, 0), fake_charger(1, 1, 1)])
+    summary = aggregate_infrastructure_actions(
+        mapped_actions_by_step=[np.array([0.0, 0.0], dtype=float)],
+        active_slots_by_step=[np.array([0, 1], dtype=int)],
+        slot_to_charger_id=np.array([0, 1], dtype=int),
+        charger_to_transformer_id={0: 0, 1: 1},
+        max_action=1.0,
+        tolerance=1e-6,
+        env=env,
+    )
+
+    assert summary["global"]["transformer_action_hhi_mean"] == ""
+    assert summary["global"]["transformer_action_gini_mean"] == ""
+    assert summary["global"]["transformer_allocation_valid_step_count"] == 0
+    assert summary["global"]["transformer_allocation_zero_pressure_step_fraction"] == pytest.approx(1.0)
+    assert summary["global"]["charger_action_hhi_mean"] == ""
+    assert summary["global"]["charger_action_gini_mean"] == ""
+    assert summary["global"]["charger_allocation_valid_step_count"] == 0
+    assert summary["global"]["charger_allocation_zero_pressure_step_fraction"] == pytest.approx(1.0)
+
+
+def test_zero_pressure_fraction_counts_only_zero_pressure_steps():
+    from utils.infrastructure_diagnostics import aggregate_infrastructure_actions
+
+    env = fake_env([fake_charger(0, 1, 0), fake_charger(1, 1, 1)])
+    summary = aggregate_infrastructure_actions(
+        mapped_actions_by_step=[
+            np.array([0.5, 0.5], dtype=float),
+            np.array([0.0, 0.0], dtype=float),
+            np.array([0.1, 0.0], dtype=float),
+        ],
+        active_slots_by_step=[
+            np.array([0, 1], dtype=int),
+            np.array([0, 1], dtype=int),
+            np.array([0, 1], dtype=int),
+        ],
+        slot_to_charger_id=np.array([0, 1], dtype=int),
+        charger_to_transformer_id={0: 0, 1: 1},
+        max_action=1.0,
+        tolerance=1e-6,
+        env=env,
+    )
+
+    assert summary["global"]["transformer_allocation_zero_pressure_step_fraction"] == pytest.approx(1.0 / 3.0)
+    assert summary["global"]["transformer_allocation_valid_step_count"] == 2
+    assert summary["global"]["charger_allocation_zero_pressure_step_fraction"] == pytest.approx(1.0 / 3.0)
+    assert summary["global"]["charger_allocation_valid_step_count"] == 2
+
+
 def test_per_charger_aggregation_matches_hand_computed_toy_example():
     from utils.infrastructure_diagnostics import aggregate_infrastructure_actions
 
@@ -320,6 +461,76 @@ def test_per_transformer_aggregation_matches_hand_computed_toy_example():
     assert transformer_one["action_fraction_at_max_active"] == pytest.approx(1.0)
 
 
+def test_per_transformer_charger_concentration_reports_zero_pressure_fraction_and_valid_count():
+    from utils.infrastructure_diagnostics import aggregate_infrastructure_actions
+
+    env = fake_env([
+        fake_charger(0, 1, 0),
+        fake_charger(1, 1, 0),
+    ])
+    summary = aggregate_infrastructure_actions(
+        mapped_actions_by_step=[
+            np.array([1.0, 0.0], dtype=float),
+            np.array([0.0, 0.0], dtype=float),
+        ],
+        active_slots_by_step=[
+            np.array([0, 1], dtype=int),
+            np.array([0, 1], dtype=int),
+        ],
+        slot_to_charger_id=np.array([0, 1], dtype=int),
+        charger_to_transformer_id={0: 0, 1: 0},
+        max_action=1.0,
+        tolerance=1e-6,
+        env=env,
+    )
+
+    transformer_zero = summary["transformers"][0]
+    assert transformer_zero["charger_action_hhi_mean"] == pytest.approx(1.0)
+    assert transformer_zero["charger_action_gini_mean"] == pytest.approx(0.5)
+    assert transformer_zero["charger_allocation_zero_pressure_step_fraction"] == pytest.approx(0.5)
+    assert transformer_zero["charger_allocation_valid_step_count"] == 1
+
+
+def test_episode_row_distinguishes_macro_infrastructure_mean_from_global_pooled_active_fraction():
+    from utils.infrastructure_diagnostics import aggregate_infrastructure_actions, build_episode_row
+
+    env = fake_env([
+        fake_charger(0, 3, 0),
+        fake_charger(1, 1, 1),
+    ])
+    action_summary = aggregate_infrastructure_actions(
+        mapped_actions_by_step=[np.array([1.0, 1.0, 1.0, 0.0], dtype=float)],
+        active_slots_by_step=[np.array([0, 1, 2, 3], dtype=int)],
+        slot_to_charger_id=np.array([0, 0, 0, 1], dtype=int),
+        charger_to_transformer_id={0: 0, 1: 1},
+        max_action=1.0,
+        tolerance=1e-6,
+        env=env,
+    )
+    episode_row = build_episode_row(
+        metadata={
+            "matrix_job_id": "58513929",
+            "scale": "25cp",
+            "algorithm": "hierarchical",
+            "training_seed": 0,
+            "config": "config_files/PublicPST_25cp.yaml",
+            "checkpoint_prefix": "models/hierarchical_seed0",
+            "run_name": "diagnostic",
+        },
+        episode_index=0,
+        episode_seed=710000,
+        episode_record={"episode_steps": 1, "done": True, "episode_reward": 0.0},
+        action_summary=action_summary,
+        stats={},
+        max_action=1.0,
+        tolerance=1e-6,
+    )
+
+    assert episode_row["global_action_fraction_at_max_active"] == pytest.approx(0.75)
+    assert episode_row["transformer_action_fraction_at_max_active_macro_mean"] == pytest.approx(0.5)
+    assert episode_row["charger_action_fraction_at_max_active_macro_mean"] == pytest.approx(0.5)
+
+
 def test_seed_summary_averages_episode_diagnostics():
     from utils.infrastructure_diagnostics import build_seed_summary_row
 
@@ -334,10 +545,20 @@ def test_seed_summary_averages_episode_diagnostics():
             {
                 "global_action_fraction_at_max_active": 0.2,
                 "global_action_fraction_at_max_all_slots": 0.1,
+                "global_action_nonzero_fraction_active": 0.6,
+                "inactive_nonzero_action_fraction_all_slots": 0.0,
+                "transformer_action_fraction_at_max_active_macro_mean": 0.3,
+                "charger_action_fraction_at_max_active_macro_mean": 0.4,
+                "transformer_action_nonzero_fraction_active_macro_mean": 0.5,
+                "charger_action_nonzero_fraction_active_macro_mean": 0.7,
                 "transformer_action_hhi_mean": 0.5,
                 "transformer_action_gini_mean": 0.0,
+                "transformer_allocation_zero_pressure_step_fraction": 0.25,
+                "transformer_allocation_valid_step_count": 3,
                 "charger_action_hhi_mean": 0.6,
                 "charger_action_gini_mean": 0.1,
+                "charger_allocation_zero_pressure_step_fraction": 0.5,
+                "charger_allocation_valid_step_count": 2,
                 "total_transformer_overload": 4.0,
                 "power_tracker_violation": 8.0,
                 "tracking_error": 12.0,
@@ -350,10 +571,20 @@ def test_seed_summary_averages_episode_diagnostics():
             {
                 "global_action_fraction_at_max_active": 0.4,
                 "global_action_fraction_at_max_all_slots": 0.3,
+                "global_action_nonzero_fraction_active": 0.8,
+                "inactive_nonzero_action_fraction_all_slots": 0.1,
+                "transformer_action_fraction_at_max_active_macro_mean": 0.5,
+                "charger_action_fraction_at_max_active_macro_mean": 0.6,
+                "transformer_action_nonzero_fraction_active_macro_mean": 0.7,
+                "charger_action_nonzero_fraction_active_macro_mean": 0.9,
                 "transformer_action_hhi_mean": 0.7,
                 "transformer_action_gini_mean": 0.2,
+                "transformer_allocation_zero_pressure_step_fraction": 0.75,
+                "transformer_allocation_valid_step_count": 1,
                 "charger_action_hhi_mean": 0.8,
                 "charger_action_gini_mean": 0.3,
+                "charger_allocation_zero_pressure_step_fraction": 0.0,
+                "charger_allocation_valid_step_count": 4,
                 "total_transformer_overload": 6.0,
                 "power_tracker_violation": 10.0,
                 "tracking_error": 14.0,
@@ -368,9 +599,43 @@ def test_seed_summary_averages_episode_diagnostics():
 
     assert seed_row["n_eval_episodes"] == 2
     assert seed_row["global_action_fraction_at_max_active_mean"] == pytest.approx(0.3)
+    assert seed_row["global_action_nonzero_fraction_active_mean"] == pytest.approx(0.7)
+    assert seed_row["inactive_nonzero_action_fraction_all_slots_mean"] == pytest.approx(0.05)
+    assert seed_row["transformer_action_fraction_at_max_active_macro_mean"] == pytest.approx(0.4)
+    assert seed_row["charger_action_fraction_at_max_active_macro_mean"] == pytest.approx(0.5)
+    assert seed_row["transformer_action_nonzero_fraction_active_macro_mean"] == pytest.approx(0.6)
+    assert seed_row["charger_action_nonzero_fraction_active_macro_mean"] == pytest.approx(0.8)
+    assert seed_row["transformer_allocation_zero_pressure_step_fraction_mean"] == pytest.approx(0.5)
+    assert seed_row["transformer_allocation_valid_step_count_mean"] == pytest.approx(2.0)
+    assert seed_row["charger_allocation_zero_pressure_step_fraction_mean"] == pytest.approx(0.25)
+    assert seed_row["charger_allocation_valid_step_count_mean"] == pytest.approx(3.0)
     assert seed_row["total_transformer_overload_mean"] == pytest.approx(5.0)
     assert seed_row["total_energy_charged_mean"] == pytest.approx(25.0)
     assert seed_row["energy_user_satisfaction_mean"] == pytest.approx(96.0)
+
+
+def test_schema_columns_use_explicit_macro_and_action_contract_names():
+    from utils.infrastructure_diagnostics import (
+        CHARGER_DIAGNOSTIC_COLUMNS,
+        EPISODE_DIAGNOSTIC_COLUMNS,
+        SEED_SUMMARY_DIAGNOSTIC_COLUMNS,
+        TRANSFORMER_DIAGNOSTIC_COLUMNS,
+    )
+
+    assert "global_action_nonzero_fraction_active" in EPISODE_DIAGNOSTIC_COLUMNS
+    assert "inactive_nonzero_action_fraction_all_slots" in EPISODE_DIAGNOSTIC_COLUMNS
+    assert "transformer_action_fraction_at_max_active_macro_mean" in EPISODE_DIAGNOSTIC_COLUMNS
+    assert "charger_action_fraction_at_max_active_macro_mean" in EPISODE_DIAGNOSTIC_COLUMNS
+    assert "transformer_action_fraction_at_max_active_mean" not in EPISODE_DIAGNOSTIC_COLUMNS
+    assert "charger_action_fraction_at_max_active_mean" not in EPISODE_DIAGNOSTIC_COLUMNS
+    assert "action_nonzero_fraction_active" in TRANSFORMER_DIAGNOSTIC_COLUMNS
+    assert "action_nonzero_fraction_active" in CHARGER_DIAGNOSTIC_COLUMNS
+    assert "charger_allocation_zero_pressure_step_fraction" in TRANSFORMER_DIAGNOSTIC_COLUMNS
+    assert "charger_allocation_valid_step_count" in TRANSFORMER_DIAGNOSTIC_COLUMNS
+    assert "transformer_action_fraction_at_max_active_macro_mean" in SEED_SUMMARY_DIAGNOSTIC_COLUMNS
+    assert "charger_action_fraction_at_max_active_macro_mean" in SEED_SUMMARY_DIAGNOSTIC_COLUMNS
+    assert "transformer_action_fraction_at_max_active_mean" not in SEED_SUMMARY_DIAGNOSTIC_COLUMNS
+    assert "charger_action_fraction_at_max_active_mean" not in SEED_SUMMARY_DIAGNOSTIC_COLUMNS
 
 
 def test_diagnostic_evaluator_help_works():

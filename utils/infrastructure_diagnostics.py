@@ -3,7 +3,7 @@ from collections import defaultdict
 import numpy as np
 
 
-DIAGNOSTIC_SCHEMA_VERSION = "1"
+DIAGNOSTIC_SCHEMA_VERSION = "2"
 UNAVAILABLE = ""
 
 EPISODE_DIAGNOSTIC_COLUMNS = [
@@ -23,16 +23,26 @@ EPISODE_DIAGNOSTIC_COLUMNS = [
     "max_action_tolerance",
     "global_action_fraction_at_max_all_slots",
     "global_action_fraction_at_max_active",
+    "global_action_nonzero_fraction_active",
     "global_action_mean_all_slots",
     "global_action_mean_active",
     "global_action_sum_active",
     "active_slot_count_mean",
     "nonzero_action_count_mean_all_slots",
     "inactive_slot_fraction_mean",
+    "inactive_nonzero_action_fraction_all_slots",
+    "transformer_action_fraction_at_max_active_macro_mean",
+    "charger_action_fraction_at_max_active_macro_mean",
+    "transformer_action_nonzero_fraction_active_macro_mean",
+    "charger_action_nonzero_fraction_active_macro_mean",
     "transformer_action_hhi_mean",
     "transformer_action_gini_mean",
+    "transformer_allocation_zero_pressure_step_fraction",
+    "transformer_allocation_valid_step_count",
     "charger_action_hhi_mean",
     "charger_action_gini_mean",
+    "charger_allocation_zero_pressure_step_fraction",
+    "charger_allocation_valid_step_count",
     "total_transformer_overload",
     "power_tracker_violation",
     "tracking_error",
@@ -60,12 +70,15 @@ TRANSFORMER_DIAGNOSTIC_COLUMNS = [
     "action_mean_active",
     "action_max_active",
     "action_fraction_at_max_active",
+    "action_nonzero_fraction_active",
     "action_sum_all_slots",
     "action_mean_all_slots",
     "action_max_all_slots",
     "action_fraction_at_max_all_slots",
     "charger_action_hhi_mean",
     "charger_action_gini_mean",
+    "charger_allocation_zero_pressure_step_fraction",
+    "charger_allocation_valid_step_count",
     "overload_magnitude_sum",
     "overload_magnitude_max",
     "overload_frequency_steps",
@@ -92,6 +105,7 @@ CHARGER_DIAGNOSTIC_COLUMNS = [
     "action_mean_active",
     "action_max_active",
     "action_fraction_at_max_active",
+    "action_nonzero_fraction_active",
     "action_sum_all_slots",
     "action_mean_all_slots",
     "action_max_all_slots",
@@ -113,12 +127,20 @@ SEED_SUMMARY_DIAGNOSTIC_COLUMNS = [
     "n_eval_episodes",
     "global_action_fraction_at_max_active_mean",
     "global_action_fraction_at_max_all_slots_mean",
-    "transformer_action_fraction_at_max_active_mean",
-    "charger_action_fraction_at_max_active_mean",
+    "global_action_nonzero_fraction_active_mean",
+    "inactive_nonzero_action_fraction_all_slots_mean",
+    "transformer_action_fraction_at_max_active_macro_mean",
+    "charger_action_fraction_at_max_active_macro_mean",
+    "transformer_action_nonzero_fraction_active_macro_mean",
+    "charger_action_nonzero_fraction_active_macro_mean",
     "transformer_action_hhi_mean",
     "transformer_action_gini_mean",
+    "transformer_allocation_zero_pressure_step_fraction_mean",
+    "transformer_allocation_valid_step_count_mean",
     "charger_action_hhi_mean",
     "charger_action_gini_mean",
+    "charger_allocation_zero_pressure_step_fraction_mean",
+    "charger_allocation_valid_step_count_mean",
     "total_transformer_overload_mean",
     "power_tracker_violation_mean",
     "tracking_error_mean",
@@ -358,16 +380,44 @@ def build_episode_row(
         "max_action_tolerance": float(tolerance),
         "global_action_fraction_at_max_all_slots": global_summary["action_fraction_at_max_all_slots"],
         "global_action_fraction_at_max_active": global_summary["action_fraction_at_max_active"],
+        "global_action_nonzero_fraction_active": global_summary["action_nonzero_fraction_active"],
         "global_action_mean_all_slots": global_summary["action_mean_all_slots"],
         "global_action_mean_active": global_summary["action_mean_active"],
         "global_action_sum_active": global_summary["action_sum_active"],
         "active_slot_count_mean": global_summary["active_slot_count_mean"],
         "nonzero_action_count_mean_all_slots": global_summary["nonzero_action_count_mean_all_slots"],
         "inactive_slot_fraction_mean": global_summary["inactive_slot_fraction_mean"],
+        "inactive_nonzero_action_fraction_all_slots": global_summary[
+            "inactive_nonzero_action_fraction_all_slots"
+        ],
+        "transformer_action_fraction_at_max_active_macro_mean": _mean_infrastructure_metric(
+            action_summary["transformers"], "action_fraction_at_max_active"
+        ),
+        "charger_action_fraction_at_max_active_macro_mean": _mean_infrastructure_metric(
+            action_summary["chargers"], "action_fraction_at_max_active"
+        ),
+        "transformer_action_nonzero_fraction_active_macro_mean": _mean_infrastructure_metric(
+            action_summary["transformers"], "action_nonzero_fraction_active"
+        ),
+        "charger_action_nonzero_fraction_active_macro_mean": _mean_infrastructure_metric(
+            action_summary["chargers"], "action_nonzero_fraction_active"
+        ),
         "transformer_action_hhi_mean": global_summary["transformer_action_hhi_mean"],
         "transformer_action_gini_mean": global_summary["transformer_action_gini_mean"],
+        "transformer_allocation_zero_pressure_step_fraction": global_summary[
+            "transformer_allocation_zero_pressure_step_fraction"
+        ],
+        "transformer_allocation_valid_step_count": global_summary[
+            "transformer_allocation_valid_step_count"
+        ],
         "charger_action_hhi_mean": global_summary["charger_action_hhi_mean"],
         "charger_action_gini_mean": global_summary["charger_action_gini_mean"],
+        "charger_allocation_zero_pressure_step_fraction": global_summary[
+            "charger_allocation_zero_pressure_step_fraction"
+        ],
+        "charger_allocation_valid_step_count": global_summary[
+            "charger_allocation_valid_step_count"
+        ],
         "diagnostic_schema_version": DIAGNOSTIC_SCHEMA_VERSION,
     }
     for stat_key in [
@@ -400,6 +450,7 @@ def build_charger_rows(metadata, episode_index, episode_seed, action_summary):
             "action_mean_active": charger_summary["action_mean_active"],
             "action_max_active": charger_summary["action_max_active"],
             "action_fraction_at_max_active": charger_summary["action_fraction_at_max_active"],
+            "action_nonzero_fraction_active": charger_summary["action_nonzero_fraction_active"],
             "action_sum_all_slots": charger_summary["action_sum_all_slots"],
             "action_mean_all_slots": charger_summary["action_mean_all_slots"],
             "action_max_all_slots": charger_summary["action_max_all_slots"],
@@ -431,12 +482,19 @@ def build_transformer_rows(metadata, episode_index, episode_seed, action_summary
             "action_mean_active": transformer_summary["action_mean_active"],
             "action_max_active": transformer_summary["action_max_active"],
             "action_fraction_at_max_active": transformer_summary["action_fraction_at_max_active"],
+            "action_nonzero_fraction_active": transformer_summary["action_nonzero_fraction_active"],
             "action_sum_all_slots": transformer_summary["action_sum_all_slots"],
             "action_mean_all_slots": transformer_summary["action_mean_all_slots"],
             "action_max_all_slots": transformer_summary["action_max_all_slots"],
             "action_fraction_at_max_all_slots": transformer_summary["action_fraction_at_max_all_slots"],
             "charger_action_hhi_mean": transformer_summary["charger_action_hhi_mean"],
             "charger_action_gini_mean": transformer_summary["charger_action_gini_mean"],
+            "charger_allocation_zero_pressure_step_fraction": transformer_summary[
+                "charger_allocation_zero_pressure_step_fraction"
+            ],
+            "charger_allocation_valid_step_count": transformer_summary[
+                "charger_allocation_valid_step_count"
+            ],
             "overload_magnitude_sum": transformer_summary["overload_magnitude_sum"],
             "overload_magnitude_max": transformer_summary["overload_magnitude_max"],
             "overload_frequency_steps": transformer_summary["overload_frequency_steps"],
@@ -459,16 +517,48 @@ def build_seed_summary_row(metadata, episode_rows):
         "global_action_fraction_at_max_all_slots_mean": _mean_existing(
             episode_rows, "global_action_fraction_at_max_all_slots"
         ),
-        "transformer_action_fraction_at_max_active_mean": _mean_existing(
-            episode_rows, "transformer_action_fraction_at_max_active"
+        "global_action_nonzero_fraction_active_mean": _mean_existing(
+            episode_rows, "global_action_nonzero_fraction_active"
         ),
-        "charger_action_fraction_at_max_active_mean": _mean_existing(
-            episode_rows, "charger_action_fraction_at_max_active"
+        "inactive_nonzero_action_fraction_all_slots_mean": _mean_existing(
+            episode_rows, "inactive_nonzero_action_fraction_all_slots"
         ),
-        "transformer_action_hhi_mean": _mean_existing(episode_rows, "transformer_action_hhi_mean"),
-        "transformer_action_gini_mean": _mean_existing(episode_rows, "transformer_action_gini_mean"),
-        "charger_action_hhi_mean": _mean_existing(episode_rows, "charger_action_hhi_mean"),
-        "charger_action_gini_mean": _mean_existing(episode_rows, "charger_action_gini_mean"),
+        "transformer_action_fraction_at_max_active_macro_mean": _mean_existing(
+            episode_rows, "transformer_action_fraction_at_max_active_macro_mean"
+        ),
+        "charger_action_fraction_at_max_active_macro_mean": _mean_existing(
+            episode_rows, "charger_action_fraction_at_max_active_macro_mean"
+        ),
+        "transformer_action_nonzero_fraction_active_macro_mean": _mean_existing(
+            episode_rows, "transformer_action_nonzero_fraction_active_macro_mean"
+        ),
+        "charger_action_nonzero_fraction_active_macro_mean": _mean_existing(
+            episode_rows, "charger_action_nonzero_fraction_active_macro_mean"
+        ),
+        "transformer_action_hhi_mean": _mean_existing(
+            episode_rows, "transformer_action_hhi_mean", default=UNAVAILABLE
+        ),
+        "transformer_action_gini_mean": _mean_existing(
+            episode_rows, "transformer_action_gini_mean", default=UNAVAILABLE
+        ),
+        "transformer_allocation_zero_pressure_step_fraction_mean": _mean_existing(
+            episode_rows, "transformer_allocation_zero_pressure_step_fraction"
+        ),
+        "transformer_allocation_valid_step_count_mean": _mean_existing(
+            episode_rows, "transformer_allocation_valid_step_count"
+        ),
+        "charger_action_hhi_mean": _mean_existing(
+            episode_rows, "charger_action_hhi_mean", default=UNAVAILABLE
+        ),
+        "charger_action_gini_mean": _mean_existing(
+            episode_rows, "charger_action_gini_mean", default=UNAVAILABLE
+        ),
+        "charger_allocation_zero_pressure_step_fraction_mean": _mean_existing(
+            episode_rows, "charger_allocation_zero_pressure_step_fraction"
+        ),
+        "charger_allocation_valid_step_count_mean": _mean_existing(
+            episode_rows, "charger_allocation_valid_step_count"
+        ),
         "total_transformer_overload_mean": _mean_existing(episode_rows, "total_transformer_overload"),
         "power_tracker_violation_mean": _mean_existing(episode_rows, "power_tracker_violation"),
         "tracking_error_mean": _mean_existing(episode_rows, "tracking_error"),
@@ -540,6 +630,12 @@ def _global_action_summary(
         int(np.count_nonzero(np.abs(mapped_action) > float(tolerance)))
         for mapped_action in mapped_actions
     ]
+    inactive_nonzero_action_fraction = _inactive_nonzero_action_fraction(
+        mapped_actions=mapped_actions,
+        active_slots_by_step=active_slots_by_step,
+        action_dim=action_dim,
+        tolerance=tolerance,
+    )
     inactive_slot_fractions = [
         (action_dim - active_slot_count) / action_dim
         for active_slot_count in active_slot_counts
@@ -568,16 +664,28 @@ def _global_action_summary(
     return {
         "action_fraction_at_max_all_slots": all_slot_diagnostics["action_fraction_at_max"],
         "action_fraction_at_max_active": active_diagnostics["action_fraction_at_max"],
+        "action_nonzero_fraction_active": active_diagnostics["action_nonzero_fraction"],
         "action_mean_all_slots": all_slot_diagnostics["action_mean"],
         "action_mean_active": active_diagnostics["action_mean"],
         "action_sum_active": active_diagnostics["action_sum"],
         "active_slot_count_mean": _mean_values(active_slot_counts),
         "nonzero_action_count_mean_all_slots": _mean_values(nonzero_action_counts),
         "inactive_slot_fraction_mean": _mean_values(inactive_slot_fractions),
+        "inactive_nonzero_action_fraction_all_slots": inactive_nonzero_action_fraction,
         "transformer_action_hhi_mean": _mean_concentration(transformer_concentrations, "hhi"),
         "transformer_action_gini_mean": _mean_concentration(transformer_concentrations, "gini"),
+        "transformer_allocation_zero_pressure_step_fraction": _zero_pressure_step_fraction(
+            transformer_concentrations
+        ),
+        "transformer_allocation_valid_step_count": _valid_concentration_count(
+            transformer_concentrations
+        ),
         "charger_action_hhi_mean": _mean_concentration(charger_concentrations, "hhi"),
         "charger_action_gini_mean": _mean_concentration(charger_concentrations, "gini"),
+        "charger_allocation_zero_pressure_step_fraction": _zero_pressure_step_fraction(
+            charger_concentrations
+        ),
+        "charger_allocation_valid_step_count": _valid_concentration_count(charger_concentrations),
     }
 
 
@@ -696,6 +804,10 @@ def _transformer_action_summary(
         "action_fraction_at_max_all_slots": all_diagnostics["action_fraction_at_max"],
         "charger_action_hhi_mean": _mean_concentration(charger_concentrations, "hhi"),
         "charger_action_gini_mean": _mean_concentration(charger_concentrations, "gini"),
+        "charger_allocation_zero_pressure_step_fraction": _zero_pressure_step_fraction(
+            charger_concentrations
+        ),
+        "charger_allocation_valid_step_count": _valid_concentration_count(charger_concentrations),
         "overload_magnitude_sum": overload_summary["overload_magnitude_sum"],
         "overload_magnitude_max": overload_summary["overload_magnitude_max"],
         "overload_frequency_steps": overload_summary["overload_frequency_steps"],
@@ -863,10 +975,58 @@ def _transformer_service_summary(charger_ids, charger_rows):
     }
 
 
+def _inactive_nonzero_action_fraction(mapped_actions, active_slots_by_step, action_dim, tolerance):
+    inactive_value_count = 0
+    inactive_nonzero_count = 0
+    for mapped_action, active_slots in zip(mapped_actions, active_slots_by_step):
+        inactive_slot_mask = np.ones(action_dim, dtype=bool)
+        inactive_slot_mask[active_slots] = False
+        inactive_values = mapped_action[inactive_slot_mask]
+        inactive_value_count += int(inactive_values.size)
+        inactive_nonzero_count += int(np.count_nonzero(np.abs(inactive_values) > float(tolerance)))
+
+    if inactive_value_count == 0:
+        return 0.0
+    return float(inactive_nonzero_count / inactive_value_count)
+
+
+def _valid_concentration_rows(concentration_rows):
+    return [
+        concentration
+        for concentration in concentration_rows
+        if not bool(concentration.get("zero_pressure", False))
+    ]
+
+
 def _mean_concentration(concentration_rows, key):
+    valid_concentrations = _valid_concentration_rows(concentration_rows)
+    if not valid_concentrations:
+        return UNAVAILABLE
+    return _mean_values([concentration[key] for concentration in valid_concentrations])
+
+
+def _zero_pressure_step_fraction(concentration_rows):
     if not concentration_rows:
         return 0.0
-    return _mean_values([concentration[key] for concentration in concentration_rows])
+    zero_pressure_count = sum(
+        1
+        for concentration in concentration_rows
+        if bool(concentration.get("zero_pressure", False))
+    )
+    return float(zero_pressure_count / len(concentration_rows))
+
+
+def _valid_concentration_count(concentration_rows):
+    return len(_valid_concentration_rows(concentration_rows))
+
+
+def _mean_infrastructure_metric(infrastructure_rows, metric_key):
+    values = [
+        float(row[metric_key])
+        for row in infrastructure_rows.values()
+        if row.get("n_active_ev_decisions", 0) > 0
+    ]
+    return float(np.mean(values)) if values else 0.0
 
 
 def _mean_values(values):
@@ -890,7 +1050,7 @@ def _is_available_number(value):
         return False
 
 
-def _mean_existing(rows, key):
+def _mean_existing(rows, key, default=0.0):
     values = []
     for row in rows:
         if key not in row:
@@ -901,4 +1061,4 @@ def _mean_existing(rows, key):
         numeric_value = float(value)
         if np.isfinite(numeric_value):
             values.append(numeric_value)
-    return float(np.mean(values)) if values else 0.0
+    return float(np.mean(values)) if values else default
