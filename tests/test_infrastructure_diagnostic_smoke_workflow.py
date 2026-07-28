@@ -3332,8 +3332,15 @@ def test_source_bundle_real_mode_rejects_explicit_head_mismatch(tmp_path):
     assert "does not match" in result.stderr
 
 
-@pytest.mark.parametrize("task_id", range(8))
-def test_array_script_dry_run_maps_all_tasks(task_id):
+@pytest.mark.parametrize(
+    ("task_id", "expected_scale", "expected_algorithm"),
+    [(task_id, scale, algorithm) for task_id, scale, algorithm, *_ in TASKS],
+)
+def test_array_script_dry_run_maps_all_tasks(
+    task_id,
+    expected_scale,
+    expected_algorithm,
+):
     env = {
         **os.environ,
         "EV_GNN_DIAGNOSTIC_SMOKE_DRY_RUN": "1",
@@ -3351,7 +3358,46 @@ def test_array_script_dry_run_maps_all_tasks(task_id):
 
     assert result.returncode == 0
     assert f"task_id={task_id}" in result.stdout
+    assert f"scale={expected_scale}" in result.stdout
+    assert f"algorithm={expected_algorithm}" in result.stdout
+
+    command_lines = [
+        line
+        for line in result.stdout.splitlines()
+        if line.startswith("DIAGNOSTIC_COMMAND=")
+    ]
+    assert len(command_lines) == 1
+    command = command_lines[0]
+    assert command.count("--algorithm ") == 1
+    assert f"--algorithm {expected_algorithm}" in command
+    assert command.count("--scale ") == 1
+    assert f"--scale {expected_scale}" in command
+    assert command.count("--config ") == 1
+    assert "--config <extracted_formal_config>" in command
     assert "DRY_RUN_NO_EVALUATION_OR_PACKAGING" in result.stdout
+
+
+def test_tracked_evaluator_runtime_invocation_supplies_explicit_scale_and_config():
+    script_text = ARRAY_SCRIPT.read_text(encoding="utf-8")
+    command_blocks = re.findall(
+        r"(?ms)^DIAGNOSTIC_COMMAND=\(\n(.*?)^\)\n",
+        script_text,
+    )
+
+    assert len(command_blocks) == 1
+    command_block = command_blocks[0]
+    assert command_block.count(
+        "python evaluate_td3_gnn_infrastructure_diagnostics.py"
+    ) == 1
+    assert command_block.count('--algorithm "${ALGORITHM}"') == 1
+    assert command_block.count('--scale "${SCALE}"') == 1
+    assert command_block.count('--config "${CONFIG_DIR}/formal_config.yaml"') == 1
+    assert command_block.index('--algorithm "${ALGORITHM}"') < command_block.index(
+        '--scale "${SCALE}"'
+    )
+    assert command_block.index('--scale "${SCALE}"') < command_block.index(
+        '--config "${CONFIG_DIR}/formal_config.yaml"'
+    )
 
 
 def test_array_script_requires_explicit_expected_source_commit_before_real_work(tmp_path):
