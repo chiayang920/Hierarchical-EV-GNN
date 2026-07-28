@@ -886,6 +886,20 @@ M3_SACCT_FIELDS = (
     "TotalCPU",
 )
 
+RUNTIME_SUMMARY_FIELDS = (
+    "task_id",
+    "job_id_raw",
+    "job_id",
+    "state",
+    "exit_code",
+    "elapsed_raw",
+    "alloc_cpus",
+    "max_rss",
+    "total_cpu",
+    "maxrss_source",
+    "totalcpu_source",
+)
+
 FAILED_JOB_58579309_SACCT = """\
 58579316|58579309_0|evgnn_infra_diag_smoke|FAILED|1:0|41|4||00:21.129
 58579316.batch|58579309_0.batch|batch|FAILED|1:0|41|4|927160K|00:21.129
@@ -2720,6 +2734,123 @@ def test_complete_bundle_rejects_runtime_summary_fallback_source_disagreement(tm
 
     assert validation.returncode != 0
     assert "runtime_summary" in validation.stderr
+
+
+def test_runtime_summary_has_exact_schema_and_eight_rows(tmp_path):
+    fixture = create_reducer_fixture(
+        tmp_path,
+        sacct_text=sacct_raw_text("123456", parent_resource_blanks={0}),
+    )
+    result = run_reducer_validator(fixture)
+    bundle_path = Path(json.loads(result.stdout)["bundle_path"])
+
+    reader = csv.DictReader(
+        io.StringIO(
+            read_bundle_member(bundle_path, "summaries/runtime_summary.csv")
+        )
+    )
+    rows = list(reader)
+
+    assert tuple(reader.fieldnames or ()) == RUNTIME_SUMMARY_FIELDS
+    assert len(rows) == 8
+    assert [row["task_id"] for row in rows] == [str(task_id) for task_id in range(8)]
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("job_id_raw", "999999"),
+        ("job_id", "123456_7"),
+        ("state", "FAILED"),
+        ("exit_code", "1:0"),
+        ("elapsed_raw", "999"),
+        ("alloc_cpus", "99"),
+        ("max_rss", "1K"),
+        ("total_cpu", "99:00:00"),
+        ("maxrss_source", "parent"),
+        ("totalcpu_source", "extern"),
+    ],
+)
+def test_complete_bundle_rejects_runtime_summary_field_tampering(
+    tmp_path,
+    field,
+    replacement,
+):
+    fixture = create_reducer_fixture(
+        tmp_path,
+        sacct_text=sacct_raw_text("123456", parent_resource_blanks={0}),
+    )
+    result = run_reducer_validator(fixture)
+    bundle_path = Path(json.loads(result.stdout)["bundle_path"])
+
+    def updater(fieldnames, rows):
+        assert rows[0]["maxrss_source"] == "batch"
+        assert rows[0]["totalcpu_source"] == "batch"
+        rows[0][field] = replacement
+        return fieldnames, rows
+
+    mutated = mutate_complete_bundle_csv(
+        tmp_path,
+        bundle_path,
+        "summaries/runtime_summary.csv",
+        updater,
+        name=f"tampered_runtime_summary_{field}.tar.gz",
+    )
+
+    validation = run_validator(
+        "validate-complete-bundle",
+        "--bundle",
+        mutated,
+        check=False,
+    )
+
+    assert validation.returncode != 0
+    assert "runtime_summary" in validation.stderr
+    assert field in validation.stderr
+
+
+@pytest.mark.parametrize("mutation", ["missing", "extra", "reordered"])
+def test_complete_bundle_rejects_noncanonical_runtime_summary_header(
+    tmp_path,
+    mutation,
+):
+    fixture = create_reducer_fixture(tmp_path)
+    result = run_reducer_validator(fixture)
+    bundle_path = Path(json.loads(result.stdout)["bundle_path"])
+
+    def updater(fieldnames, rows):
+        fieldnames = list(fieldnames)
+        if mutation == "missing":
+            fieldnames.remove("job_id")
+            for row in rows:
+                row.pop("job_id", None)
+        elif mutation == "extra":
+            fieldnames.append("unexpected")
+            for row in rows:
+                row["unexpected"] = "value"
+        elif mutation == "reordered":
+            fieldnames[0], fieldnames[1] = fieldnames[1], fieldnames[0]
+        else:
+            raise AssertionError(f"unsupported mutation: {mutation}")
+        return fieldnames, rows
+
+    mutated = mutate_complete_bundle_csv(
+        tmp_path,
+        bundle_path,
+        "summaries/runtime_summary.csv",
+        updater,
+        name=f"noncanonical_runtime_summary_header_{mutation}.tar.gz",
+    )
+
+    validation = run_validator(
+        "validate-complete-bundle",
+        "--bundle",
+        mutated,
+        check=False,
+    )
+
+    assert validation.returncode != 0
+    assert "runtime_summary.csv header mismatch" in validation.stderr
 
 
 def test_complete_bundle_rejects_task_inventory_duplicate_identity(tmp_path):
