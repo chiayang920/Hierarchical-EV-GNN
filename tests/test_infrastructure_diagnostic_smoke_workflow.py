@@ -722,57 +722,268 @@ def run_array_real_guard(tmp_path, extra_env=None):
     )
 
 
+def default_slurm_task_ids(array_job_id="123456"):
+    return {
+        0: "123463",
+        1: "123469",
+        2: "123475",
+        3: "123479",
+        4: "123483",
+        5: "123488",
+        6: "123500",
+        7: str(array_job_id),
+    }
+
+
+def legacy_sacct_raw_text(array_job_id="123456"):
+    rows = []
+    for task_id in range(8):
+        composite_id = f"{array_job_id}_{task_id}"
+        rows.append(
+            "|".join(
+                [
+                    composite_id,
+                    "COMPLETED",
+                    "0:0",
+                    "12",
+                    "4",
+                    "2048K",
+                    "00:00:10",
+                ]
+            )
+        )
+    return "\n".join(rows) + "\n"
+
+
 def sacct_raw_text(
     array_job_id="123456",
     missing_task_ids=(),
+    missing_batch_ids=(),
+    missing_extern_ids=(),
     state_overrides=None,
     exit_overrides=None,
     batch_state_overrides=None,
     batch_exit_overrides=None,
+    extern_state_overrides=None,
+    extern_exit_overrides=None,
     parent_resource_blanks=(),
+    parent_maxrss_blanks=(),
+    parent_totalcpu_blanks=(),
+    parent_elapsed_blanks=(),
+    parent_alloc_blanks=(),
+    batch_maxrss_blanks=(),
+    batch_totalcpu_blanks=(),
     duplicate_parent_rows=(),
+    duplicate_batch_rows=(),
+    duplicate_extern_rows=(),
+    extern_maxrss_overrides=None,
+    extern_totalcpu_overrides=None,
 ):
     state_overrides = state_overrides or {}
     exit_overrides = exit_overrides or {}
     batch_state_overrides = batch_state_overrides or {}
     batch_exit_overrides = batch_exit_overrides or {}
+    extern_state_overrides = extern_state_overrides or {}
+    extern_exit_overrides = extern_exit_overrides or {}
+    extern_maxrss_overrides = extern_maxrss_overrides or {}
+    extern_totalcpu_overrides = extern_totalcpu_overrides or {}
+
+    missing_task_ids = set(missing_task_ids)
+    missing_batch_ids = set(missing_batch_ids)
+    missing_extern_ids = set(missing_extern_ids)
+    parent_resource_blanks = set(parent_resource_blanks)
+    parent_maxrss_blanks = set(parent_maxrss_blanks)
+    parent_totalcpu_blanks = set(parent_totalcpu_blanks)
+    parent_elapsed_blanks = set(parent_elapsed_blanks)
+    parent_alloc_blanks = set(parent_alloc_blanks)
+    batch_maxrss_blanks = set(batch_maxrss_blanks)
+    batch_totalcpu_blanks = set(batch_totalcpu_blanks)
+    duplicate_parent_rows = set(duplicate_parent_rows)
+    duplicate_batch_rows = set(duplicate_batch_rows)
+    duplicate_extern_rows = set(duplicate_extern_rows)
+
     rows = []
+    numeric_ids = default_slurm_task_ids(array_job_id)
     for task_id in range(8):
-        if task_id in set(missing_task_ids):
+        if task_id in missing_task_ids:
             continue
-        job_id_raw = f"{array_job_id}_{task_id}"
-        parent_maxrss = "" if task_id in set(parent_resource_blanks) else "2048K"
-        parent_total_cpu = "" if task_id in set(parent_resource_blanks) else "00:00:10"
-        rows.append(
-            "|".join(
-                [
-                    job_id_raw,
-                    state_overrides.get(task_id, "COMPLETED"),
-                    exit_overrides.get(task_id, "0:0"),
-                    "12",
-                    "4",
-                    parent_maxrss,
-                    parent_total_cpu,
-                ]
-            )
+        job_id_raw = numeric_ids[task_id]
+        job_id = f"{array_job_id}_{task_id}"
+        parent_maxrss = (
+            ""
+            if task_id in parent_resource_blanks or task_id in parent_maxrss_blanks
+            else "2048K"
         )
-        rows.append(
-            "|".join(
+        parent_total_cpu = (
+            ""
+            if task_id in parent_resource_blanks or task_id in parent_totalcpu_blanks
+            else "00:00:10"
+        )
+        parent_row = "|".join(
+            [
+                job_id_raw,
+                job_id,
+                "evgnn_infra_diag_smoke",
+                state_overrides.get(task_id, "COMPLETED"),
+                exit_overrides.get(task_id, "0:0"),
+                "" if task_id in parent_elapsed_blanks else "12",
+                "" if task_id in parent_alloc_blanks else "4",
+                parent_maxrss,
+                parent_total_cpu,
+            ]
+        )
+        rows.append(parent_row)
+        if task_id in duplicate_parent_rows:
+            rows.append(parent_row)
+
+        if task_id not in missing_batch_ids:
+            batch_row = "|".join(
                 [
                     f"{job_id_raw}.batch",
+                    f"{job_id}.batch",
+                    "batch",
                     batch_state_overrides.get(task_id, "COMPLETED"),
                     batch_exit_overrides.get(task_id, "0:0"),
                     "12",
                     "4",
-                    "4096K",
-                    "00:00:12",
+                    "" if task_id in batch_maxrss_blanks else "4096K",
+                    "" if task_id in batch_totalcpu_blanks else "00:00:12",
                 ]
             )
-        )
-        if task_id in set(duplicate_parent_rows):
-            rows.append("|".join([job_id_raw, "FAILED", "1:0", "12", "4", "2048K", "00:00:10"]))
+            rows.append(batch_row)
+            if task_id in duplicate_batch_rows:
+                rows.append(batch_row)
+
+        if task_id not in missing_extern_ids:
+            extern_row = "|".join(
+                [
+                    f"{job_id_raw}.extern",
+                    f"{job_id}.extern",
+                    "extern",
+                    extern_state_overrides.get(task_id, "COMPLETED"),
+                    extern_exit_overrides.get(task_id, "0:0"),
+                    "12",
+                    "4",
+                    extern_maxrss_overrides.get(task_id, ""),
+                    extern_totalcpu_overrides.get(task_id, "00:00:00"),
+                ]
+            )
+            rows.append(extern_row)
+            if task_id in duplicate_extern_rows:
+                rows.append(extern_row)
     return "\n".join(rows) + "\n"
 
+
+M3_SACCT_FIELDS = (
+    "JobIDRaw",
+    "JobID",
+    "JobName",
+    "State",
+    "ExitCode",
+    "ElapsedRaw",
+    "AllocCPUS",
+    "MaxRSS",
+    "TotalCPU",
+)
+
+FAILED_JOB_58579309_SACCT = """\
+58579316|58579309_0|evgnn_infra_diag_smoke|FAILED|1:0|41|4||00:21.129
+58579316.batch|58579309_0.batch|batch|FAILED|1:0|41|4|927160K|00:21.129
+58579316.extern|58579309_0.extern|extern|COMPLETED|0:0|41|4||00:00:00
+58579322|58579309_1|evgnn_infra_diag_smoke|FAILED|1:0|29|4||00:48.102
+58579322.batch|58579309_1.batch|batch|FAILED|1:0|29|4|451612K|00:48.102
+58579322.extern|58579309_1.extern|extern|COMPLETED|0:0|29|4||00:00:00
+58579328|58579309_2|evgnn_infra_diag_smoke|FAILED|1:0|23|4||00:34.384
+58579328.batch|58579309_2.batch|batch|FAILED|1:0|23|4|450928K|00:34.384
+58579328.extern|58579309_2.extern|extern|COMPLETED|0:0|23|4||00:00:00
+58579332|58579309_3|evgnn_infra_diag_smoke|FAILED|1:0|24|4||00:38.894
+58579332.batch|58579309_3.batch|batch|FAILED|1:0|24|4|449420K|00:38.894
+58579332.extern|58579309_3.extern|extern|COMPLETED|0:0|24|4||00:00:00
+58579336|58579309_4|evgnn_infra_diag_smoke|FAILED|1:0|50|4||01:29.707
+58579336.batch|58579309_4.batch|batch|FAILED|1:0|50|4|452748K|01:29.707
+58579336.extern|58579309_4.extern|extern|COMPLETED|0:0|50|4||00:00:00
+58579341|58579309_5|evgnn_infra_diag_smoke|FAILED|1:0|32|4||00:49.294
+58579341.batch|58579309_5.batch|batch|FAILED|1:0|32|4|448620K|00:49.294
+58579341.extern|58579309_5.extern|extern|COMPLETED|0:0|32|4||00:00:00
+58579353|58579309_6|evgnn_infra_diag_smoke|FAILED|1:0|68|4||02:17.780
+58579353.batch|58579309_6.batch|batch|FAILED|1:0|68|4|461888K|02:17.780
+58579353.extern|58579309_6.extern|extern|COMPLETED|0:0|68|4||00:00:00
+58579309|58579309_7|evgnn_infra_diag_smoke|FAILED|1:0|38|4||00:55.791
+58579309.batch|58579309_7.batch|batch|FAILED|1:0|38|4|454664K|00:55.791
+58579309.extern|58579309_7.extern|extern|COMPLETED|0:0|39|4||00:00:00
+"""
+
+
+def m3_sacct_row(
+    job_id_raw,
+    job_id,
+    job_name,
+    state="COMPLETED",
+    exit_code="0:0",
+    elapsed_raw="12",
+    alloc_cpus="4",
+    max_rss="2048K",
+    total_cpu="00:00:10",
+):
+    return "|".join(
+        [
+            str(job_id_raw),
+            str(job_id),
+            str(job_name),
+            str(state),
+            str(exit_code),
+            str(elapsed_raw),
+            str(alloc_cpus),
+            str(max_rss),
+            str(total_cpu),
+        ]
+    )
+
+
+def completed_m3_sacct_text(array_job_id="58579309", include_aggregate=False):
+    numeric_ids = {
+        0: "58579316",
+        1: "58579322",
+        2: "58579328",
+        3: "58579332",
+        4: "58579336",
+        5: "58579341",
+        6: "58579353",
+        7: str(array_job_id),
+    }
+    rows = []
+    if include_aggregate:
+        rows.append(
+            m3_sacct_row(
+                array_job_id,
+                array_job_id,
+                "evgnn_infra_diag_smoke",
+                max_rss="",
+            )
+        )
+    for task_id in range(8):
+        raw_id = numeric_ids[task_id]
+        composite_id = f"{array_job_id}_{task_id}"
+        rows.extend(
+            [
+                m3_sacct_row(raw_id, composite_id, "evgnn_infra_diag_smoke"),
+                m3_sacct_row(
+                    f"{raw_id}.batch",
+                    f"{composite_id}.batch",
+                    "batch",
+                    max_rss="4096K",
+                    total_cpu="00:00:12",
+                ),
+                m3_sacct_row(
+                    f"{raw_id}.extern",
+                    f"{composite_id}.extern",
+                    "extern",
+                    max_rss="",
+                    total_cpu="00:00:00",
+                ),
+            ]
+        )
+    return "\n".join(rows) + "\n"
 
 def create_reducer_fixture(
     tmp_path,
@@ -2946,7 +3157,7 @@ def test_reducer_uses_batch_step_for_missing_parent_maxrss(tmp_path):
         "summaries/runtime_summary.csv",
     )
 
-    assert "123456_0,COMPLETED,0:0,12,4,4096K,00:00:12,batch,batch" in runtime_summary
+    assert "123463,123456_0,COMPLETED,0:0,12,4,4096K,00:00:12,batch,batch" in runtime_summary
 
 
 def test_reducer_rejects_failed_batch_step_when_used_for_resource_fallback(tmp_path):
@@ -2992,6 +3203,476 @@ def test_reducer_rejects_contradictory_accounting_rows(tmp_path):
     assert result.returncode != 0
     assert "duplicate" in result.stderr.lower() or "contradictory" in result.stderr.lower()
 
+
+
+def test_strict_sacct_exact_failed_job_rows_reach_state_gate():
+    validator = load_validator_module()
+
+    with pytest.raises(
+        validator.ValidationError,
+        match=r"must be COMPLETED, got FAILED",
+    ):
+        validator.parse_sacct_raw(FAILED_JOB_58579309_SACCT, "58579309")
+
+
+def test_strict_sacct_task7_numeric_raw_id_collision_is_unambiguous():
+    validator = load_validator_module()
+
+    rows = validator.parse_sacct_raw(completed_m3_sacct_text(), "58579309")
+    by_task = {row["task_id"]: row for row in rows}
+
+    assert sorted(by_task) == list(range(8))
+    assert by_task[7]["job_id_raw"] == "58579309"
+    assert by_task[7]["job_id"] == "58579309_7"
+
+
+def test_strict_sacct_rejects_legacy_seven_column_rows():
+    validator = load_validator_module()
+
+    with pytest.raises(validator.ValidationError, match=r"exactly 9 fields"):
+        validator.parse_sacct_raw(legacy_sacct_raw_text("58579309"), "58579309")
+
+
+def test_strict_sacct_rejects_header_rows():
+    validator = load_validator_module()
+    raw = "|".join(M3_SACCT_FIELDS) + "\n" + completed_m3_sacct_text()
+
+    with pytest.raises(validator.ValidationError, match=r"header rows are not allowed"):
+        validator.parse_sacct_raw(raw, "58579309")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "1|58579309_0|name|COMPLETED|0:0|12|4|2048K\n",
+        "1|58579309_0|name|COMPLETED|0:0|12|4|2048K|00:00:10|extra\n",
+    ],
+)
+def test_strict_sacct_requires_exactly_nine_cells(raw):
+    validator = load_validator_module()
+
+    with pytest.raises(validator.ValidationError, match=r"exactly 9 fields"):
+        validator.parse_sacct_raw(raw, "58579309")
+
+
+def test_strict_sacct_rejects_wrong_array_identity():
+    validator = load_validator_module()
+    raw = completed_m3_sacct_text().replace("58579309_0", "999999_0", 1)
+
+    with pytest.raises(validator.ValidationError, match=r"unexpected accounting JobID"):
+        validator.parse_sacct_raw(raw, "58579309")
+
+
+def test_strict_sacct_rejects_out_of_range_task_identity():
+    validator = load_validator_module()
+    raw = completed_m3_sacct_text().replace("58579309_0", "58579309_8", 1)
+
+    with pytest.raises(validator.ValidationError, match=r"unexpected accounting task ID"):
+        validator.parse_sacct_raw(raw, "58579309")
+
+
+@pytest.mark.parametrize("suffix", ["0", "interactive"])
+def test_strict_sacct_rejects_unknown_slurm_steps(suffix):
+    validator = load_validator_module()
+    raw = completed_m3_sacct_text().replace(
+        "58579309_0|evgnn_infra_diag_smoke",
+        f"58579309_0.{suffix}|evgnn_infra_diag_smoke",
+        1,
+    )
+
+    with pytest.raises(validator.ValidationError, match=r"unexpected accounting JobID"):
+        validator.parse_sacct_raw(raw, "58579309")
+
+
+def test_strict_sacct_rejects_jobidraw_jobid_suffix_contradiction():
+    validator = load_validator_module()
+    raw = completed_m3_sacct_text().replace(
+        "58579316|58579309_0|",
+        "58579316.batch|58579309_0|",
+        1,
+    )
+
+    with pytest.raises(validator.ValidationError, match=r"JobIDRaw suffix"):
+        validator.parse_sacct_raw(raw, "58579309")
+
+
+def test_strict_sacct_rejects_parent_batch_raw_base_mismatch():
+    validator = load_validator_module()
+    raw = completed_m3_sacct_text().replace(
+        "58579316.batch|58579309_0.batch|",
+        "999999.batch|58579309_0.batch|",
+        1,
+    )
+
+    with pytest.raises(validator.ValidationError, match=r"raw ID base mismatch"):
+        validator.parse_sacct_raw(raw, "58579309")
+
+
+def test_strict_sacct_rejects_parent_extern_raw_base_mismatch():
+    validator = load_validator_module()
+    raw = completed_m3_sacct_text().replace(
+        "58579316.extern|58579309_0.extern|",
+        "999999.extern|58579309_0.extern|",
+        1,
+    )
+
+    with pytest.raises(validator.ValidationError, match=r"raw ID base mismatch"):
+        validator.parse_sacct_raw(raw, "58579309")
+
+
+def test_strict_sacct_rejects_duplicate_numeric_parent_raw_id_across_tasks():
+    validator = load_validator_module()
+    raw = completed_m3_sacct_text().replace(
+        "58579322|58579309_1|",
+        "58579316|58579309_1|",
+        1,
+    )
+
+    with pytest.raises(
+        validator.ValidationError,
+        match=r"duplicate numeric parent JobIDRaw",
+    ):
+        validator.parse_sacct_raw(raw, "58579309")
+
+
+def test_strict_sacct_rejects_nonnumeric_parent_jobidraw():
+    validator = load_validator_module()
+    raw = completed_m3_sacct_text().replace(
+        "58579316|58579309_0|",
+        "not_numeric|58579309_0|",
+        1,
+    )
+
+    with pytest.raises(
+        validator.ValidationError,
+        match=r"parent JobIDRaw must contain digits only",
+    ):
+        validator.parse_sacct_raw(raw, "58579309")
+
+
+def test_strict_sacct_accepts_explicit_array_aggregate_without_confusing_task7():
+    validator = load_validator_module()
+
+    rows = validator.parse_sacct_raw(
+        completed_m3_sacct_text(include_aggregate=True),
+        "58579309",
+    )
+    by_task = {row["task_id"]: row for row in rows}
+
+    assert len(rows) == 8
+    assert by_task[7]["job_id"] == "58579309_7"
+
+
+def test_strict_sacct_rejects_missing_parent_only_for_missing_task():
+    validator = load_validator_module()
+
+    with pytest.raises(
+        validator.ValidationError,
+        match=r"required accounting unavailable for task\(s\): \[3\]",
+    ):
+        validator.parse_sacct_raw(
+            sacct_raw_text("123456", missing_task_ids={3}),
+            "123456",
+        )
+
+
+def test_strict_sacct_rejects_duplicate_parent():
+    validator = load_validator_module()
+
+    with pytest.raises(validator.ValidationError, match=r"duplicate parent"):
+        validator.parse_sacct_raw(
+            sacct_raw_text("123456", duplicate_parent_rows={2}),
+            "123456",
+        )
+
+
+def test_strict_sacct_rejects_duplicate_batch():
+    validator = load_validator_module()
+
+    with pytest.raises(validator.ValidationError, match=r"duplicate batch"):
+        validator.parse_sacct_raw(
+            sacct_raw_text("123456", duplicate_batch_rows={2}),
+            "123456",
+        )
+
+
+def test_strict_sacct_rejects_duplicate_extern():
+    validator = load_validator_module()
+
+    with pytest.raises(validator.ValidationError, match=r"duplicate extern"):
+        validator.parse_sacct_raw(
+            sacct_raw_text("123456", duplicate_extern_rows={2}),
+            "123456",
+        )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"state_overrides": {2: "FAILED"}}, r"123456_2 must be COMPLETED, got FAILED"),
+        ({"exit_overrides": {2: "1:0"}}, r"123456_2 ExitCode must be 0:0, got 1:0"),
+        (
+            {"batch_state_overrides": {2: "FAILED"}},
+            r"123456_2\.batch must be COMPLETED, got FAILED",
+        ),
+        (
+            {"batch_exit_overrides": {2: "1:0"}},
+            r"123456_2\.batch ExitCode must be 0:0, got 1:0",
+        ),
+        (
+            {"extern_state_overrides": {2: "FAILED"}},
+            r"123456_2\.extern must be COMPLETED, got FAILED",
+        ),
+        (
+            {"extern_exit_overrides": {2: "1:0"}},
+            r"123456_2\.extern ExitCode must be 0:0, got 1:0",
+        ),
+    ],
+)
+def test_strict_sacct_validates_every_present_row_state_and_exit(kwargs, message):
+    validator = load_validator_module()
+
+    with pytest.raises(validator.ValidationError, match=message):
+        validator.parse_sacct_raw(sacct_raw_text("123456", **kwargs), "123456")
+
+
+def test_strict_sacct_accepts_missing_batch_when_parent_resources_are_complete():
+    validator = load_validator_module()
+
+    rows = validator.parse_sacct_raw(
+        sacct_raw_text("123456", missing_batch_ids={0}),
+        "123456",
+    )
+
+    assert rows[0]["maxrss_source"] == "parent"
+    assert rows[0]["totalcpu_source"] == "parent"
+
+
+def test_strict_sacct_accepts_missing_extern():
+    validator = load_validator_module()
+
+    rows = validator.parse_sacct_raw(
+        sacct_raw_text("123456", missing_extern_ids={0}),
+        "123456",
+    )
+
+    assert len(rows) == 8
+
+
+def test_strict_sacct_uses_parent_resources_when_available():
+    validator = load_validator_module()
+
+    rows = validator.parse_sacct_raw(sacct_raw_text("123456"), "123456")
+    row = {item["task_id"]: item for item in rows}[0]
+
+    assert row["max_rss"] == "2048K"
+    assert row["total_cpu"] == "00:00:10"
+    assert row["maxrss_source"] == "parent"
+    assert row["totalcpu_source"] == "parent"
+
+
+def test_strict_sacct_falls_back_only_for_missing_parent_maxrss():
+    validator = load_validator_module()
+
+    rows = validator.parse_sacct_raw(
+        sacct_raw_text("123456", parent_maxrss_blanks={0}),
+        "123456",
+    )
+    row = {item["task_id"]: item for item in rows}[0]
+
+    assert row["max_rss"] == "4096K"
+    assert row["total_cpu"] == "00:00:10"
+    assert row["maxrss_source"] == "batch"
+    assert row["totalcpu_source"] == "parent"
+
+
+def test_strict_sacct_falls_back_only_for_missing_parent_totalcpu():
+    validator = load_validator_module()
+
+    rows = validator.parse_sacct_raw(
+        sacct_raw_text("123456", parent_totalcpu_blanks={0}),
+        "123456",
+    )
+    row = {item["task_id"]: item for item in rows}[0]
+
+    assert row["max_rss"] == "2048K"
+    assert row["total_cpu"] == "00:00:12"
+    assert row["maxrss_source"] == "parent"
+    assert row["totalcpu_source"] == "batch"
+
+
+def test_strict_sacct_falls_back_for_both_missing_parent_resources():
+    validator = load_validator_module()
+
+    rows = validator.parse_sacct_raw(
+        sacct_raw_text("123456", parent_resource_blanks={0}),
+        "123456",
+    )
+    row = {item["task_id"]: item for item in rows}[0]
+
+    assert row["max_rss"] == "4096K"
+    assert row["total_cpu"] == "00:00:12"
+    assert row["maxrss_source"] == "batch"
+    assert row["totalcpu_source"] == "batch"
+
+
+def test_strict_sacct_rejects_missing_batch_when_fallback_is_required():
+    validator = load_validator_module()
+
+    with pytest.raises(
+        validator.ValidationError,
+        match=r"required \.batch accounting unavailable for Slurm task 123456_0",
+    ):
+        validator.parse_sacct_raw(
+            sacct_raw_text(
+                "123456",
+                parent_resource_blanks={0},
+                missing_batch_ids={0},
+            ),
+            "123456",
+        )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        (
+            {"parent_maxrss_blanks": {0}, "batch_maxrss_blanks": {0}},
+            r"MaxRSS unavailable for Slurm task 123456_0",
+        ),
+        (
+            {"parent_totalcpu_blanks": {0}, "batch_totalcpu_blanks": {0}},
+            r"TotalCPU unavailable for Slurm task 123456_0",
+        ),
+    ],
+)
+def test_strict_sacct_rejects_unavailable_required_batch_resource(kwargs, message):
+    validator = load_validator_module()
+
+    with pytest.raises(validator.ValidationError, match=message):
+        validator.parse_sacct_raw(sacct_raw_text("123456", **kwargs), "123456")
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"parent_elapsed_blanks": {0}}, r"ElapsedRaw unavailable for Slurm task 123456_0"),
+        ({"parent_alloc_blanks": {0}}, r"AllocCPUS unavailable for Slurm task 123456_0"),
+    ],
+)
+def test_strict_sacct_requires_parent_elapsed_and_alloc_cpus(kwargs, message):
+    validator = load_validator_module()
+
+    with pytest.raises(validator.ValidationError, match=message):
+        validator.parse_sacct_raw(sacct_raw_text("123456", **kwargs), "123456")
+
+
+def test_strict_sacct_never_uses_extern_resources():
+    validator = load_validator_module()
+
+    rows = validator.parse_sacct_raw(
+        sacct_raw_text(
+            "123456",
+            extern_maxrss_overrides={0: "999999K"},
+            extern_totalcpu_overrides={0: "99:59:59"},
+        ),
+        "123456",
+    )
+    row = {item["task_id"]: item for item in rows}[0]
+
+    assert row["max_rss"] == "2048K"
+    assert row["total_cpu"] == "00:00:10"
+    assert row["maxrss_source"] == "parent"
+    assert row["totalcpu_source"] == "parent"
+
+
+def test_strict_sacct_collect_command_is_scoped_to_explicit_array_id(tmp_path):
+    validator = load_validator_module()
+    capture_path = tmp_path / "argv.json"
+    fake_sacct = tmp_path / "fake_sacct.py"
+    expected_raw = completed_m3_sacct_text(array_job_id="123456")
+    fake_sacct.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "import pathlib\n"
+        "import sys\n"
+        f"pathlib.Path({str(capture_path)!r}).write_text("
+        "json.dumps(sys.argv[1:]), encoding='utf-8')\n"
+        f"print({expected_raw!r}, end='')\n",
+        encoding="utf-8",
+    )
+    fake_sacct.chmod(0o755)
+    args = argparse.Namespace(
+        sacct_raw_file=None,
+        sacct_command=str(fake_sacct),
+        sacct_attempts=1,
+        sacct_delay_seconds=0,
+        array_job_id="123456",
+    )
+
+    observed_raw = validator.collect_sacct_raw(args)
+
+    assert observed_raw == expected_raw
+    assert json.loads(capture_path.read_text(encoding="utf-8")) == [
+        "-j",
+        "123456",
+        "--parsable2",
+        "--noheader",
+        "--format=JobIDRaw,JobID,JobName,State,ExitCode,ElapsedRaw,AllocCPUS,MaxRSS,TotalCPU",
+    ]
+
+
+def test_strict_array_job_id_accepts_numeric_value():
+    validator = load_validator_module()
+
+    assert validator.validate_array_job_id("58579309") == "58579309"
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["", "123_0", "latest", "123;cluster", "../123", " 123 "],
+)
+def test_strict_array_job_id_rejects_non_numeric_values(value):
+    validator = load_validator_module()
+
+    with pytest.raises(
+        validator.ValidationError,
+        match=r"array job ID must contain digits only",
+    ):
+        validator.validate_array_job_id(value)
+
+
+def test_strict_array_job_id_fails_before_output_creation():
+    validator = load_validator_module()
+    output_root = Path("must_not_be_created_for_invalid_array_id")
+    if output_root.exists():
+        shutil.rmtree(output_root)
+    args = argparse.Namespace(
+        array_job_id="latest",
+        source_commit_sha=DYNAMIC_SHA,
+        output_root=str(output_root),
+        task_package_root="unused",
+        slurm_log_root="unused",
+        work_root="unused",
+        reducer_job_id="unused",
+        sacct_raw_file=None,
+        sacct_command="sacct",
+        sacct_attempts=1,
+        sacct_delay_seconds=0,
+        reducer_stdout_log="unused",
+        reducer_stderr_log="unused",
+    )
+
+    try:
+        with pytest.raises(
+            validator.ValidationError,
+            match=r"array job ID must contain digits only",
+        ):
+            validator.reduce_bundle(args)
+        assert not output_root.exists()
+    finally:
+        if output_root.exists():
+            shutil.rmtree(output_root)
 
 def test_reducer_refuses_to_overwrite_final_bundle(tmp_path):
     fixture = create_reducer_fixture(tmp_path)
