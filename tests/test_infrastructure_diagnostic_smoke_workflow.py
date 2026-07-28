@@ -4031,6 +4031,67 @@ def test_submit_helper_rejects_non_numeric_sbatch_job_id(tmp_path):
     assert "sbatch" in result.stderr.lower()
 
 
+def test_task8_submit_helper_dry_run_prints_exact_scoped_sacct_command():
+    env = {
+        **os.environ,
+        "EV_GNN_DIAGNOSTIC_SMOKE_SUBMIT_DRY_RUN": "1",
+        "EV_GNN_DIAGNOSTIC_SMOKE_EXPECTED_SOURCE_COMMIT": DYNAMIC_SHA,
+    }
+    result = subprocess.run(
+        ["bash", str(SUBMIT_SCRIPT)],
+        cwd=PROJECT_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        check=False,
+    )
+
+    expected = (
+        "SACCT_COMMAND=sacct -j <array_job_id> --parsable2 --noheader "
+        f"--format={','.join(M3_SACCT_FIELDS)}"
+    )
+    sacct_lines = [
+        line for line in result.stdout.splitlines()
+        if line.startswith("SACCT_COMMAND=")
+    ]
+
+    assert result.returncode == 0, result.stderr
+    assert sacct_lines == [expected]
+
+
+def test_task8_submit_helper_real_prints_exact_current_array_sacct_command(tmp_path):
+    result, _calls = run_submit_real_with_fake_sbatch(
+        tmp_path,
+        ["123456;cluster-name", "789012;cluster-name"],
+    )
+
+    expected = (
+        "SACCT_COMMAND=sacct -j 123456 --parsable2 --noheader "
+        f"--format={','.join(M3_SACCT_FIELDS)}"
+    )
+    sacct_lines = [
+        line for line in result.stdout.splitlines()
+        if line.startswith("SACCT_COMMAND=")
+    ]
+
+    assert result.returncode == 0, result.stderr
+    assert sacct_lines == [expected]
+
+
+def test_task8_protocol_documents_explicit_array_id_and_nine_column_accounting():
+    text = (
+        PROJECT_ROOT / "docs/infrastructure_diagnostic_smoke_protocol.md"
+    ).read_text(encoding="utf-8")
+    lower = text.lower()
+
+    assert ",".join(M3_SACCT_FIELDS) in text
+    assert "explicit array" in lower
+    assert "same array job id" in lower
+    assert "latest job" in lower
+    assert "do not use" in lower or "must not use" in lower
+
+
 def test_source_bundle_prohibited_path_rejection():
     env = {
         **os.environ,
