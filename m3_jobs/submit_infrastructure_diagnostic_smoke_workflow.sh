@@ -15,6 +15,7 @@ ARRAY_SCRIPT="${REPO_ROOT}/m3_jobs/19_infrastructure_diagnostic_smoke_eval.slurm
 REDUCER_SCRIPT="${REPO_ROOT}/m3_jobs/20_infrastructure_diagnostic_smoke_reduce_bundle.slurm"
 VALIDATOR="${REPO_ROOT}/scripts/validate_infrastructure_diagnostic_smoke.py"
 FORMAL_JOB_ID="58513929"
+SACCT_FIELDS="JobIDRaw,JobID,JobName,State,ExitCode,ElapsedRaw,AllocCPUS,MaxRSS,TotalCPU"
 
 die() {
   echo "ERROR: $*" >&2
@@ -75,7 +76,7 @@ if [[ "${EV_GNN_DIAGNOSTIC_SMOKE_SUBMIT_DRY_RUN:-0}" == "1" ]]; then
   echo "SBATCH_ARRAY_COMMAND=sbatch --parsable --export=$(array_export_vars) ${ARRAY_SCRIPT}"
   echo "SBATCH_REDUCER_COMMAND=sbatch --parsable --dependency=afterok:<array_job_id> --export=$(reducer_export_vars "<array_job_id>") ${REDUCER_SCRIPT}"
   echo "SQUEUE_COMMAND=squeue -j <array_job_id>,<reducer_job_id>"
-  echo "SACCT_COMMAND=sacct -j <array_job_id> --format=JobIDRaw,State,ExitCode,ElapsedRaw,AllocCPUS,MaxRSS,TotalCPU"
+  echo "SACCT_COMMAND=sacct -j <array_job_id> --parsable2 --noheader --format=${SACCT_FIELDS}"
   echo "M3_TAR_VALIDATION_COMMAND=python ${VALIDATOR} validate-complete-bundle --bundle ${OUTPUT_ROOT}/infrastructure_diagnostic_smoke_complete_evidence_job<array_job_id>.tar.gz"
   echo "M3_CHECKSUM_VALIDATION_COMMAND=cd ${OUTPUT_ROOT} && sha256sum -c infrastructure_diagnostic_smoke_complete_evidence_job<array_job_id>.tar.gz.sha256"
   echo "LOCAL_SCP_COMMAND=scp cche0357@m3.massive.org.au:${OUTPUT_ROOT}/infrastructure_diagnostic_smoke_complete_evidence_job<array_job_id>.tar.gz cche0357@m3.massive.org.au:${OUTPUT_ROOT}/infrastructure_diagnostic_smoke_complete_evidence_job<array_job_id>.tar.gz.sha256 ."
@@ -146,7 +147,7 @@ echo "reducer_job_id=${REDUCER_JOB_ID}"
 echo "expected_final_bundle=${FINAL_BUNDLE}"
 echo "expected_final_bundle_sha256=${FINAL_BUNDLE_SHA256}"
 echo "SQUEUE_COMMAND=squeue -j ${ARRAY_JOB_ID},${REDUCER_JOB_ID}"
-echo "SACCT_COMMAND=sacct -j ${ARRAY_JOB_ID} --format=JobIDRaw,State,ExitCode,ElapsedRaw,AllocCPUS,MaxRSS,TotalCPU"
+echo "SACCT_COMMAND=sacct -j ${ARRAY_JOB_ID} --parsable2 --noheader --format=${SACCT_FIELDS}"
 echo "M3_TAR_VALIDATION_COMMAND=python ${VALIDATOR} validate-complete-bundle --bundle ${FINAL_BUNDLE}"
 echo "M3_CHECKSUM_VALIDATION_COMMAND=cd ${OUTPUT_ROOT} && sha256sum -c $(basename "${FINAL_BUNDLE_SHA256}")"
 echo "LOCAL_SCP_COMMAND=scp cche0357@m3.massive.org.au:${FINAL_BUNDLE} cche0357@m3.massive.org.au:${FINAL_BUNDLE_SHA256} ."
