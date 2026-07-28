@@ -245,7 +245,7 @@ if [[ "${EV_GNN_DIAGNOSTIC_SMOKE_DRY_RUN:-0}" == "1" ]]; then
   echo "task_dir=${TASK_DIR}"
   echo "package_path=${PACKAGE_PATH}"
   echo "VALIDATOR_COMMAND=python ${REPO_ROOT}/scripts/validate_infrastructure_diagnostic_smoke.py task-mapping --task-id ${TASK_ID}"
-  echo "DIAGNOSTIC_COMMAND=python evaluate_td3_gnn_infrastructure_diagnostics.py --algorithm ${ALGORITHM} --seed 0 --eval_episodes 1 --checkpoint <staged_model.best> --config <extracted_formal_config> --output_dir ${DIAGNOSTIC_DIR} --device cpu --deterministic true --eval_expl_noise 0.0 --max_episode_steps <validated_simulation_length> --eval_seed_offset ${EPISODE_SEED} --matrix_job_id ${ARRAY_JOB_ID}"
+  echo "DIAGNOSTIC_COMMAND=python evaluate_td3_gnn_infrastructure_diagnostics.py --algorithm ${ALGORITHM} --scale ${SCALE} --config <extracted_formal_config> --seed 0 --eval_episodes 1 --checkpoint <staged_model.best> --output_dir ${DIAGNOSTIC_DIR} --device cpu --deterministic true --eval_expl_noise 0.0 --max_episode_steps <validated_simulation_length> --eval_seed_offset ${EPISODE_SEED} --matrix_job_id ${ARRAY_JOB_ID}"
   echo "DRY_RUN_NO_EVALUATION_OR_PACKAGING"
   exit 0
 fi
@@ -452,6 +452,7 @@ cp "${FORMAL_EXTRACT_DIR}/runtime_metadata/task_runtime_metadata.env" "${METADAT
 DIAGNOSTIC_COMMAND=(
   python evaluate_td3_gnn_infrastructure_diagnostics.py
   --algorithm "${ALGORITHM}"
+  --scale "${SCALE}"
   --config "${CONFIG_DIR}/formal_config.yaml"
   --seed 0
   --eval_episodes 1
