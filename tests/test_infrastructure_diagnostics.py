@@ -2054,8 +2054,8 @@ def test_validate_config_scale_contract_accepts_valid_pairs(
 @pytest.mark.parametrize(
     ("payload", "message"),
     [
-        ("", "top-level YAML mapping"),
-        ("- 25\n", "top-level YAML mapping"),
+        ("", r"top-level YAML.*mapping"),
+        ("- 25\n", r"top-level YAML.*mapping"),
         ("v2g_enabled: false\n", "number_of_charging_stations"),
         ("number_of_charging_stations: true\n", "exact integer"),
         ("number_of_charging_stations: 25.0\n", "exact integer"),
@@ -2133,8 +2133,9 @@ def test_explicit_scale_is_the_only_episode_and_summary_metadata_authority(
     captured = {}
     probe_env = SimpleNamespace(
         action_space=SimpleNamespace(
-            low=np.array([0.0], dtype=float),
-            high=np.array([1.0], dtype=float),
+            shape=(100,),
+            low=np.zeros(100, dtype=float),
+            high=np.ones(100, dtype=float),
         ),
         v2g_enabled=False,
     )
