@@ -13,6 +13,21 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 
+def diagnostic_cli_args(config_path, output_dir, scale="25cp"):
+    return [
+        "--algorithm",
+        "actiongnn",
+        "--scale",
+        scale,
+        "--config",
+        str(config_path),
+        "--checkpoint",
+        "checkpoint/model.best",
+        "--output_dir",
+        str(output_dir),
+    ]
+
+
 def fake_charger(
     charger_id,
     n_ports,
@@ -1950,6 +1965,241 @@ def test_schema_v3_keeps_existing_schema_v2_action_and_service_columns():
     assert "user_satisfaction_mean" in CHARGER_DIAGNOSTIC_COLUMNS
     assert "user_satisfaction_observation_count" in CHARGER_DIAGNOSTIC_COLUMNS
     assert "user_satisfaction_observation_count" in TRANSFORMER_DIAGNOSTIC_COLUMNS
+
+
+def test_diagnostic_scale_choices_are_exact_and_closed():
+    import evaluate_td3_gnn_infrastructure_diagnostics as evaluator
+
+    assert tuple(evaluator.SCALE_CHOICES) == ("25cp", "100cp", "500cp", "1000cp")
+
+
+@pytest.mark.parametrize("missing_flag", ["--scale", "--config"])
+def test_diagnostic_evaluator_requires_explicit_scale_and_config(
+    tmp_path,
+    capsys,
+    missing_flag,
+):
+    from evaluate_td3_gnn_infrastructure_diagnostics import parse_args
+
+    config_path = tmp_path / "formal_config.yaml"
+    config_path.write_text("number_of_charging_stations: 25\n", encoding="utf-8")
+    argv = diagnostic_cli_args(config_path, tmp_path / "out")
+    flag_index = argv.index(missing_flag)
+    del argv[flag_index : flag_index + 2]
+
+    with pytest.raises(SystemExit) as error:
+        parse_args(argv)
+
+    assert error.value.code == 2
+    stderr = capsys.readouterr().err
+    assert "required" in stderr
+    assert missing_flag in stderr
+
+
+@pytest.mark.parametrize("scale", ["25cp", "100cp", "500cp", "1000cp"])
+def test_diagnostic_evaluator_accepts_only_canonical_scale_choices(tmp_path, scale):
+    from evaluate_td3_gnn_infrastructure_diagnostics import parse_args
+
+    config_path = tmp_path / "formal_config.yaml"
+    config_path.write_text("number_of_charging_stations: 25\n", encoding="utf-8")
+    args = parse_args(diagnostic_cli_args(config_path, tmp_path / "out", scale=scale))
+
+    assert args.scale == scale
+    assert args.config == str(config_path)
+
+
+@pytest.mark.parametrize("scale", ["50cp", "25CP", "formal_config"])
+def test_diagnostic_evaluator_rejects_noncanonical_scale_values(
+    tmp_path,
+    capsys,
+    scale,
+):
+    from evaluate_td3_gnn_infrastructure_diagnostics import parse_args
+
+    config_path = tmp_path / "formal_config.yaml"
+    config_path.write_text("number_of_charging_stations: 25\n", encoding="utf-8")
+    with pytest.raises(SystemExit) as error:
+        parse_args(diagnostic_cli_args(config_path, tmp_path / "out", scale=scale))
+
+    assert error.value.code == 2
+    stderr = capsys.readouterr().err
+    assert "invalid choice" in stderr
+    assert scale in stderr
+
+
+@pytest.mark.parametrize(
+    ("scale", "station_count"),
+    [("25cp", 25), ("100cp", 100), ("500cp", 500), ("1000cp", 1000)],
+)
+def test_validate_config_scale_contract_accepts_valid_pairs(
+    tmp_path,
+    scale,
+    station_count,
+):
+    from evaluate_td3_gnn_infrastructure_diagnostics import (
+        validate_config_scale_contract,
+    )
+
+    config_path = tmp_path / "formal_config.yaml"
+    config_path.write_text(
+        f"number_of_charging_stations: {station_count}\n",
+        encoding="utf-8",
+    )
+
+    loaded = validate_config_scale_contract(config_path, scale)
+
+    assert loaded["number_of_charging_stations"] == station_count
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ("", "top-level YAML mapping"),
+        ("- 25\n", "top-level YAML mapping"),
+        ("v2g_enabled: false\n", "number_of_charging_stations"),
+        ("number_of_charging_stations: true\n", "exact integer"),
+        ("number_of_charging_stations: 25.0\n", "exact integer"),
+        ('number_of_charging_stations: "25"\n', "exact integer"),
+        ("number_of_charging_stations: 0\n", "positive"),
+        ("number_of_charging_stations: -25\n", "positive"),
+        ("number_of_charging_stations: [25\n", "valid YAML"),
+    ],
+)
+def test_validate_config_scale_contract_rejects_invalid_config(
+    tmp_path,
+    payload,
+    message,
+):
+    from evaluate_td3_gnn_infrastructure_diagnostics import (
+        validate_config_scale_contract,
+    )
+
+    config_path = tmp_path / "formal_config.yaml"
+    config_path.write_text(payload, encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        validate_config_scale_contract(config_path, "25cp")
+
+
+def test_validate_config_scale_contract_rejects_missing_config_path(tmp_path):
+    from evaluate_td3_gnn_infrastructure_diagnostics import (
+        validate_config_scale_contract,
+    )
+
+    config_path = tmp_path / "missing_formal_config.yaml"
+
+    with pytest.raises(ValueError, match="does not exist"):
+        validate_config_scale_contract(config_path, "25cp")
+
+
+def test_validate_config_scale_contract_rejects_directory_path(tmp_path):
+    from evaluate_td3_gnn_infrastructure_diagnostics import (
+        validate_config_scale_contract,
+    )
+
+    with pytest.raises(ValueError, match="regular file"):
+        validate_config_scale_contract(tmp_path, "25cp")
+
+
+def test_config_scale_mismatch_fails_before_runtime_side_effects(tmp_path, monkeypatch):
+    import evaluate_td3_gnn_infrastructure_diagnostics as evaluator
+
+    config_path = tmp_path / "formal_config.yaml"
+    config_path.write_text("number_of_charging_stations: 25\n", encoding="utf-8")
+    output_dir = tmp_path / "must_not_exist"
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("runtime side effect was reached before config-scale validation")
+
+    monkeypatch.setattr(evaluator, "resolve_device", forbidden)
+    monkeypatch.setattr(evaluator, "normalise_checkpoint_prefix", forbidden)
+    monkeypatch.setattr(evaluator, "load_checkpoint_kwargs", forbidden)
+    monkeypatch.setattr(evaluator, "make_env", forbidden)
+
+    with pytest.raises(ValueError, match=r"config=25.*expected=100"):
+        evaluator.main(diagnostic_cli_args(config_path, output_dir, scale="100cp"))
+
+    assert not output_dir.exists()
+
+
+def test_explicit_scale_is_the_only_episode_and_summary_metadata_authority(
+    tmp_path,
+    monkeypatch,
+):
+    import evaluate_td3_gnn_infrastructure_diagnostics as evaluator
+
+    config_path = tmp_path / "formal_config.yaml"
+    config_path.write_text("number_of_charging_stations: 100\n", encoding="utf-8")
+    captured = {}
+    probe_env = SimpleNamespace(
+        action_space=SimpleNamespace(
+            low=np.array([0.0], dtype=float),
+            high=np.array([1.0], dtype=float),
+        ),
+        v2g_enabled=False,
+    )
+
+    monkeypatch.setattr(evaluator, "normalise_algorithm_label", lambda _value: "actiongnn")
+    monkeypatch.setattr(evaluator, "resolve_device", lambda _value: "cpu")
+    monkeypatch.setattr(
+        evaluator,
+        "normalise_checkpoint_prefix",
+        lambda _value: Path("checkpoint/model.best"),
+    )
+    monkeypatch.setattr(evaluator, "load_checkpoint_kwargs", lambda _prefix: {})
+    monkeypatch.setattr(evaluator, "make_env", lambda *_args, **_kwargs: probe_env)
+    monkeypatch.setattr(
+        evaluator,
+        "validate_environment_action_bounds",
+        lambda *_args, **_kwargs: {"environment_action_high": 1.0},
+    )
+    monkeypatch.setattr(
+        evaluator,
+        "resolve_v2g_metadata",
+        lambda *_args, **_kwargs: {
+            "v2g_enabled": False,
+            "v2g_enabled_source": "env.v2g_enabled",
+        },
+    )
+    monkeypatch.setattr(evaluator, "create_policy", lambda **_kwargs: object())
+    monkeypatch.setattr(evaluator, "load_policy_checkpoint", lambda *_args: None)
+    monkeypatch.setattr(
+        evaluator,
+        "evaluate_diagnostic_episode",
+        lambda **_kwargs: {
+            "episode_reward": 0.0,
+            "episode_steps": 1,
+            "done": True,
+            "stats": {},
+            "reset_info": {},
+            "action_summary": {},
+        },
+    )
+
+    def capture_episode_row(metadata, **_kwargs):
+        captured["episode_scale"] = metadata["scale"]
+        return {"scale": metadata["scale"]}
+
+    def capture_summary_row(metadata, _episode_rows):
+        captured["summary_scale"] = metadata["scale"]
+        return {"scale": metadata["scale"]}
+
+    monkeypatch.setattr(evaluator, "build_episode_row", capture_episode_row)
+    monkeypatch.setattr(evaluator, "build_charger_rows", lambda *_args: [])
+    monkeypatch.setattr(evaluator, "build_transformer_rows", lambda *_args: [])
+    monkeypatch.setattr(evaluator, "validate_diagnostic_reconciliation", lambda **_kwargs: None)
+    monkeypatch.setattr(evaluator, "build_seed_summary_row", capture_summary_row)
+    monkeypatch.setattr(evaluator, "write_csv", lambda *_args, **_kwargs: None)
+
+    evaluator.main(diagnostic_cli_args(config_path, tmp_path / "out", scale="100cp"))
+
+    assert captured == {"episode_scale": "100cp", "summary_scale": "100cp"}
+
+
+def test_filename_inference_is_not_an_evaluator_identity_source():
+    import evaluate_td3_gnn_infrastructure_diagnostics as evaluator
+
+    assert not hasattr(evaluator, "infer_scale_label")
 
 
 def test_diagnostic_evaluator_help_works():
