@@ -36,6 +36,9 @@ from utils.infrastructure_diagnostics import (
 )
 
 
+SCALE_CHOICES = ("25cp", "100cp", "500cp", "1000cp")
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description=(
@@ -44,10 +47,11 @@ def parse_args(argv=None):
         )
     )
     parser.add_argument("--algorithm", required=True, choices=ALGORITHM_CHOICES)
+    parser.add_argument("--scale", required=True, choices=SCALE_CHOICES)
     parser.add_argument(
         "--config",
-        default="./config_files/PublicPST_25cp.yaml",
-        help="EV2Gym config file; CP scale is inferred from this path for diagnostics metadata.",
+        required=True,
+        help="Explicit EV2Gym config file.",
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--eval_episodes", type=int, default=1)
@@ -144,17 +148,41 @@ def evaluate_diagnostic_episode(
     }
 
 
-def infer_scale_label(config_path):
-    config_name = Path(config_path).stem.lower()
-    if "1000" in config_name:
-        return "1000cp"
-    if "500" in config_name:
-        return "500cp"
-    if "100" in config_name:
-        return "100cp"
-    if "25cp" in config_name or config_name.endswith("25"):
-        return "25cp"
-    return config_name
+def validate_config_scale_contract(config_path, scale):
+    path = Path(config_path)
+    if not path.exists():
+        raise ValueError(f"config path does not exist: {path}")
+    if not path.is_file():
+        raise ValueError(f"config path must be a readable regular file: {path}")
+
+    try:
+        with path.open("r", encoding="utf-8") as config_file:
+            config = yaml.safe_load(config_file)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"config must contain valid YAML: {path}") from exc
+    except OSError as exc:
+        raise ValueError(f"config path must be a readable regular file: {path}") from exc
+
+    if not isinstance(config, dict):
+        raise ValueError("config top-level YAML value must be a mapping")
+    if "number_of_charging_stations" not in config:
+        raise ValueError("config is missing number_of_charging_stations")
+
+    station_count = config["number_of_charging_stations"]
+    if type(station_count) is not int:
+        raise ValueError("number_of_charging_stations must be an exact integer")
+    if station_count <= 0:
+        raise ValueError("number_of_charging_stations must be positive")
+    if scale not in SCALE_CHOICES:
+        raise ValueError(f"unsupported explicit scale: {scale}")
+
+    expected_count = int(scale.removesuffix("cp"))
+    if station_count != expected_count:
+        raise ValueError(
+            "number_of_charging_stations mismatch: "
+            f"config={station_count}, explicit scale={scale}, expected={expected_count}"
+        )
+    return config
 
 
 def write_csv(output_path, fieldnames, rows):
@@ -214,6 +242,7 @@ def _normalise_bool(value):
 
 def main(argv=None):
     args = parse_args(argv)
+    validate_config_scale_contract(args.config, args.scale)
     canonical_algorithm = normalise_algorithm_label(args.algorithm)
     device = resolve_device(args.device)
     checkpoint_prefix = normalise_checkpoint_prefix(args.checkpoint)
@@ -239,7 +268,7 @@ def main(argv=None):
 
     metadata = {
         "matrix_job_id": args.matrix_job_id,
-        "scale": infer_scale_label(args.config),
+        "scale": args.scale,
         "algorithm": canonical_algorithm,
         "training_seed": args.seed,
         "config": args.config,
@@ -249,7 +278,7 @@ def main(argv=None):
     }
     summary_metadata = {
         "matrix_job_id": args.matrix_job_id,
-        "scale": infer_scale_label(args.config),
+        "scale": args.scale,
         "algorithm": canonical_algorithm,
         "training_seed": args.seed,
     }
