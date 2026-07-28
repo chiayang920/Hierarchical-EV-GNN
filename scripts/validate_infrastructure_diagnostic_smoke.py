@@ -2348,7 +2348,14 @@ def validate_complete_bundle_cross_references(extract_root, task_packages, stdou
         for field, expected in packaged[task_id]["source"].items():
             require_row_value(row, field, expected, "source provenance summary")
 
-    runtime_rows, _ = read_rows(extract_root / "summaries/runtime_summary.csv")
+    runtime_rows, runtime_fieldnames = read_rows(
+        extract_root / "summaries/runtime_summary.csv"
+    )
+    if runtime_fieldnames != list(RUNTIME_SUMMARY_FIELDS):
+        raise ValidationError(
+            "runtime_summary.csv header mismatch: "
+            f"{runtime_fieldnames} != {list(RUNTIME_SUMMARY_FIELDS)}"
+        )
     runtime_by_task = require_task_indexed_rows(runtime_rows, "runtime_summary")
     sacct_raw = (extract_root / "runtime_metadata/sacct_raw.txt").read_text(encoding="utf-8")
     parsed_runtime_by_task = {
