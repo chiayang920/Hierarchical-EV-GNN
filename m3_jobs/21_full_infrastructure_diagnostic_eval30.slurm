@@ -697,7 +697,9 @@ with manifest.open("w", encoding="utf-8") as handle:
 PY
 
 rm -f "${TEMP_PACKAGE}" "${TEMP_SIDECAR}"
-tar -czf "${TEMP_PACKAGE}" -C "${PACKAGE_STAGING}" .
+tar -czf "${TEMP_PACKAGE}" -C "${PACKAGE_STAGING}" \
+  task_metadata summaries validation checksums logs \
+  seed0 seed1 seed2 seed3 seed4
 python - "${TEMP_PACKAGE}" "${TASK_ID}" <<'PY'
 import json
 import sys
