@@ -6,6 +6,7 @@ import pytest
 
 from scripts.validate_full_infrastructure_diagnostic_eval30 import (
     EVAL_EPISODES,
+    TOPOLOGY,
     TRAINING_SEEDS,
     episode_seed,
     formal_task_id,
@@ -259,7 +260,7 @@ def build_seed_output(
         [seed_summary],
     )
 
-    def infrastructure_rows(count):
+    def infrastructure_rows(count, *, label):
         return [
             {
                 "matrix_job_id": "99999999",
@@ -277,14 +278,21 @@ def build_seed_output(
                     + training_seed
                     + episode_index
                 ),
+                f"{label}_id": str(row_index),
+                "transformer_id": str(row_index % transformer_count),
+                "served_ev_count": "1" if row_index == 0 else "0",
+                "energy_charged_kwh": "1.0" if row_index == 0 else "0.0",
+                "energy_discharged_kwh": "0.0",
+                "user_satisfaction_sum": "1.0" if row_index == 0 else "0.0",
+                "user_satisfaction_observation_count": "1" if row_index == 0 else "0",
                 "diagnostic_schema_version": "3",
             }
             for episode_index in range(30)
-            for _ in range(count)
+            for row_index in range(count)
         ]
 
-    transformer_rows = infrastructure_rows(transformer_count)
-    charger_rows = infrastructure_rows(charger_count)
+    transformer_rows = infrastructure_rows(transformer_count, label="transformer")
+    charger_rows = infrastructure_rows(charger_count, label="charger")
     write_csv(
         diagnostics / "transformer_diagnostics.csv",
         list(transformer_rows[0]),
@@ -575,12 +583,14 @@ def build_task3_package(
     tmp_path,
     *,
     task_id=0,
+    array_job_id="99999999",
+    source_commit_sha="f" * 40,
     staging_mutator=None,
     manifest_mutator=None,
     extra_members=(),
 ):
     root = tmp_path / "task_package_staging"
-    root.mkdir()
+    root.mkdir(parents=True)
     task = stage_d_task(task_id)
     scale = str(task["scale"])
     algorithm = str(task["algorithm"])
@@ -669,12 +679,36 @@ def build_task3_package(
     logs.mkdir()
     (logs / "stdout.log").write_text("TASK_OK\n", encoding="utf-8")
     (logs / "stderr.log").write_bytes(b"")
+    runtime_metadata = root / "runtime_metadata"
+    runtime_metadata.mkdir()
+    (runtime_metadata / "source_commit_sha.txt").write_text(
+        source_commit_sha + "\n",
+        encoding="utf-8",
+    )
+    (runtime_metadata / "array_job_id.txt").write_text(
+        str(array_job_id) + "\n",
+        encoding="utf-8",
+    )
 
     if staging_mutator is not None:
         staging_mutator(root)
 
+    file_list_path = root / "runtime_metadata" / "package_file_list.txt"
     manifest_path = root / "checksums" / "package_file_checksums.sha256"
     manifest_path.parent.mkdir()
+    payload_paths = sorted(
+        path
+        for path in root.rglob("*")
+        if path.is_file() and path not in {file_list_path, manifest_path}
+    )
+    file_names = [path.relative_to(root).as_posix() for path in payload_paths]
+    file_names.extend(
+        [
+            file_list_path.relative_to(root).as_posix(),
+            manifest_path.relative_to(root).as_posix(),
+        ]
+    )
+    file_list_path.write_text("\n".join(file_names) + "\n", encoding="utf-8")
     payload_paths = sorted(path for path in root.rglob("*") if path.is_file())
     manifest_path.write_text(
         "".join(
@@ -707,6 +741,8 @@ def test_task3_valid_five_seed_package_passes(tmp_path):
         "checkpoint_groups": 5,
         "episode_count": 150,
         "diagnostic_schema_version": "3",
+        "source_commit_sha": "f" * 40,
+        "array_job_id": "99999999",
     }
 
 
@@ -886,3 +922,1102 @@ def test_task3_rejects_wrong_task_metadata(tmp_path):
     package = build_task3_package(tmp_path, staging_mutator=mutate)
     with pytest.raises(ValueError, match="task metadata"):
         _task3_validate_package(package, task_id=0)
+# STAGE_D_TASK4_BATCH1_DRY_RUN_TESTS
+import os
+
+TASK4_RUNNER = (
+    PROJECT_ROOT / "m3_jobs" / "21_full_infrastructure_diagnostic_eval30.slurm"
+)
+
+
+def run_task4_dry_run(task_id, tmp_path, *, dry_run=True, extra_env=None):
+    env = {
+        **os.environ,
+        "SLURM_ARRAY_TASK_ID": str(task_id),
+        "SLURM_ARRAY_JOB_ID": "99999999",
+        "SLURM_JOB_ID": f"99999999_{task_id}",
+        "SLURM_JOB_NAME": "evgnn_full_infra_diag_eval30",
+        "EV_GNN_FULL_DIAGNOSTIC_REPO_ROOT": str(PROJECT_ROOT),
+        "EV_GNN_FULL_DIAGNOSTIC_RUN_ROOT": str(tmp_path / "runs"),
+        "EV_GNN_FULL_DIAGNOSTIC_OUTPUT_ROOT": str(tmp_path / "outputs"),
+        "EV_GNN_FULL_DIAGNOSTIC_FORMAL_PACKAGE_ROOT": "/formal",
+        "EV_GNN_FULL_DIAGNOSTIC_FORMAL_COMPLETE_BUNDLE": (
+            "/formal/controlled_multiscale_formal_complete_evidence_job58513929.tar.gz"
+        ),
+        "KMP_INIT_AT_FORK": "FALSE",
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "NUMEXPR_NUM_THREADS": "1",
+    }
+    if dry_run:
+        env["EV_GNN_FULL_DIAGNOSTIC_DRY_RUN"] = "1"
+    if extra_env:
+        env.update(extra_env)
+    return subprocess.run(
+        ["bash", str(TASK4_RUNNER)],
+        cwd=PROJECT_ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
+def test_task4_runner_has_exact_slurm_resources():
+    text = TASK4_RUNNER.read_text(encoding="utf-8")
+    assert "#SBATCH --partition=comp" in text
+    assert "#SBATCH --array=0-7" in text
+    assert "#SBATCH --cpus-per-task=4" in text
+    assert "#SBATCH --mem=32G" in text
+    assert "#SBATCH --time=06:00:00" in text
+
+
+@pytest.mark.parametrize(
+    ("task_id", "scale", "algorithm", "formal_ids", "offset"),
+    [
+        (0, "25cp", "actiongnn", "0,1,2,3,4", "710000"),
+        (1, "25cp", "hierarchical", "5,6,7,8,9", "710000"),
+        (2, "100cp", "actiongnn", "10,11,12,13,14", "720000"),
+        (3, "100cp", "hierarchical", "15,16,17,18,19", "720000"),
+        (4, "500cp", "actiongnn", "20,21,22,23,24", "730000"),
+        (5, "500cp", "hierarchical", "25,26,27,28,29", "730000"),
+        (6, "1000cp", "actiongnn", "30,31,32,33,34", "740000"),
+        (7, "1000cp", "hierarchical", "35,36,37,38,39", "740000"),
+    ],
+)
+def test_task4_runner_dry_run_exact_mapping(
+    tmp_path,
+    task_id,
+    scale,
+    algorithm,
+    formal_ids,
+    offset,
+):
+    result = run_task4_dry_run(task_id, tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert f"task_id={task_id}" in result.stdout
+    assert f"scale={scale}" in result.stdout
+    assert f"algorithm={algorithm}" in result.stdout
+    assert "training_seeds=0,1,2,3,4" in result.stdout
+    assert f"formal_task_ids={formal_ids}" in result.stdout
+    assert "eval_episodes=30" in result.stdout
+    assert f"eval_seed_offset={offset}" in result.stdout
+    assert "expected_episode_count=150" in result.stdout
+    assert result.stdout.count("EVALUATOR_COMMAND_SEED_") == 5
+    assert "DRY_RUN_NO_EVALUATION_OR_PACKAGING" in result.stdout
+
+
+def test_task4_runner_dry_run_uses_formal_eval30_contract(tmp_path):
+    result = run_task4_dry_run(0, tmp_path)
+    assert result.returncode == 0, result.stderr
+    for seed in TRAINING_SEEDS:
+        marker = f"EVALUATOR_COMMAND_SEED_{seed}="
+        command = next(
+            line.removeprefix(marker)
+            for line in result.stdout.splitlines()
+            if line.startswith(marker)
+        )
+        assert f"--seed {seed}" in command
+        assert "--eval_episodes 30" in command
+        assert "--device cpu" in command
+        assert "--deterministic true" in command
+        assert "--eval_expl_noise 0.0" in command
+        assert "--eval_seed_offset 710000" in command
+        assert f"# formal_task_id={seed}" in command
+        assert "model.best" in command
+        assert "model.last" not in command
+
+
+def test_task4_runner_dry_run_is_side_effect_free(tmp_path):
+    result = run_task4_dry_run(0, tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "runs").exists()
+    assert not (tmp_path / "outputs").exists()
+
+
+@pytest.mark.parametrize("task_id", ["invalid", "-1", "8"])
+def test_task4_runner_rejects_invalid_task_id(tmp_path, task_id):
+    result = run_task4_dry_run(task_id, tmp_path)
+    assert result.returncode != 0
+    assert "task ID" in result.stderr
+
+
+def test_task4_runner_real_mode_requires_expected_source_commit_before_side_effects(tmp_path):
+    result = run_task4_dry_run(0, tmp_path, dry_run=False)
+    assert result.returncode != 0
+    assert "EXPECTED_SOURCE_COMMIT" in result.stderr
+    assert not (tmp_path / "runs").exists()
+    assert not (tmp_path / "outputs").exists()
+
+
+def test_task4_runner_real_mode_orchestrates_synthetic_seed_evaluations(tmp_path):
+    source_root = tmp_path / "source"
+    (source_root / "scripts").mkdir(parents=True)
+    shutil.copy2(VALIDATOR, source_root / "scripts" / VALIDATOR.name)
+    source_commit = "a" * 40
+    (source_root / "SOURCE_COMMIT_SHA.txt").write_text(
+        source_commit + "\n",
+        encoding="utf-8",
+    )
+
+    formal_root = tmp_path / "formal"
+    for seed in TRAINING_SEEDS:
+        create_full_formal_package(formal_root, task_id=0, training_seed=seed)
+
+    evaluator_stub = tmp_path / "stub_evaluator.py"
+    evaluator_stub.write_text(
+        """import argparse
+import csv
+from pathlib import Path
+
+OFFSETS = {"25cp": 710000, "100cp": 720000, "500cp": 730000, "1000cp": 740000}
+TOPOLOGY = {"25cp": (25, 3), "100cp": (100, 7), "500cp": (500, 35), "1000cp": (1000, 70)}
+
+
+def write_csv(path, fieldnames, rows):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--algorithm", required=True)
+parser.add_argument("--scale", required=True)
+parser.add_argument("--config", required=True)
+parser.add_argument("--seed", required=True, type=int)
+parser.add_argument("--eval_episodes", required=True, type=int)
+parser.add_argument("--checkpoint", required=True)
+parser.add_argument("--output_dir", required=True)
+parser.add_argument("--run_name", required=True)
+parser.add_argument("--device", required=True)
+parser.add_argument("--max_episode_steps", required=True, type=int)
+parser.add_argument("--deterministic", required=True)
+parser.add_argument("--eval_expl_noise", required=True)
+parser.add_argument("--eval_seed_offset", required=True, type=int)
+parser.add_argument("--matrix_job_id", required=True)
+args = parser.parse_args()
+
+if args.eval_episodes != 30:
+    raise SystemExit("expected 30 episodes")
+if args.device != "cpu" or args.deterministic != "true" or args.eval_expl_noise != "0.0":
+    raise SystemExit("diagnostic execution contract mismatch")
+if "model.best" not in args.checkpoint or "model.last" in args.checkpoint:
+    raise SystemExit("checkpoint contract mismatch")
+if args.max_episode_steps != 112:
+    raise SystemExit("simulation length mismatch")
+
+output = Path(args.output_dir)
+episode_rows = []
+for episode_index in range(args.eval_episodes):
+    episode_rows.append(
+        {
+            "matrix_job_id": args.matrix_job_id,
+            "scale": args.scale,
+            "algorithm": args.algorithm,
+            "training_seed": str(args.seed),
+            "episode_index": str(episode_index),
+            "episode_seed": str(args.eval_seed_offset + args.seed + episode_index),
+            "episode_steps": "112",
+            "done": "True",
+            "episode_reward": "-1.0",
+            "tracking_error": "1.0",
+            "energy_tracking_error": "1.0",
+            "power_tracker_violation": "1.0",
+            "total_energy_charged": "1.0",
+            "total_energy_discharged": "0.0",
+            "average_user_satisfaction": "1.0",
+            "energy_user_satisfaction": "100.0",
+            "total_transformer_overload": "0.0",
+            "total_ev_served": "1",
+            "global_action_fraction_at_max_active": "0.5",
+            "diagnostic_schema_version": "3",
+        }
+    )
+write_csv(output / "episode_diagnostics.csv", list(episode_rows[0]), episode_rows)
+summary = {
+    "matrix_job_id": args.matrix_job_id,
+    "scale": args.scale,
+    "algorithm": args.algorithm,
+    "training_seed": str(args.seed),
+    "n_eval_episodes": "30",
+    "diagnostic_schema_version": "3",
+}
+write_csv(output / "seed_summary_diagnostics.csv", list(summary), [summary])
+
+
+def infrastructure_rows(count, label):
+    return [
+        {
+            "matrix_job_id": args.matrix_job_id,
+            "scale": args.scale,
+            "algorithm": args.algorithm,
+            "training_seed": str(args.seed),
+            "episode_index": str(episode_index),
+            "episode_seed": str(args.eval_seed_offset + args.seed + episode_index),
+            f"{label}_id": str(row_index),
+            "transformer_id": str(row_index % transformer_count),
+            "served_ev_count": "1" if row_index == 0 else "0",
+            "energy_charged_kwh": "1.0" if row_index == 0 else "0.0",
+            "energy_discharged_kwh": "0.0",
+            "user_satisfaction_sum": "1.0" if row_index == 0 else "0.0",
+            "user_satisfaction_observation_count": "1" if row_index == 0 else "0",
+            "diagnostic_schema_version": "3",
+        }
+        for episode_index in range(args.eval_episodes)
+        for row_index in range(count)
+    ]
+
+
+charger_count, transformer_count = TOPOLOGY[args.scale]
+transformer_rows = infrastructure_rows(transformer_count, "transformer")
+charger_rows = infrastructure_rows(charger_count, "charger")
+write_csv(output / "transformer_diagnostics.csv", list(transformer_rows[0]), transformer_rows)
+write_csv(output / "charger_diagnostics.csv", list(charger_rows[0]), charger_rows)
+""",
+        encoding="utf-8",
+    )
+
+    env = {
+        **os.environ,
+        "SLURM_ARRAY_TASK_ID": "0",
+        "SLURM_ARRAY_JOB_ID": "424242",
+        "SLURM_JOB_ID": "424242_0",
+        "EV_GNN_FULL_DIAGNOSTIC_REPO_ROOT": str(source_root),
+        "EV_GNN_FULL_DIAGNOSTIC_RUN_ROOT": str(tmp_path / "runs"),
+        "EV_GNN_FULL_DIAGNOSTIC_OUTPUT_ROOT": str(tmp_path / "outputs"),
+        "EV_GNN_FULL_DIAGNOSTIC_FORMAL_PACKAGE_ROOT": str(formal_root),
+        "EV_GNN_FULL_DIAGNOSTIC_FORMAL_COMPLETE_BUNDLE": str(tmp_path / "missing.tar.gz"),
+        "EV_GNN_FULL_DIAGNOSTIC_EXPECTED_SOURCE_COMMIT": source_commit,
+        "EV_GNN_FULL_DIAGNOSTIC_EVALUATOR_SCRIPT": str(evaluator_stub),
+    }
+    result = subprocess.run(
+        ["bash", str(TASK4_RUNNER)],
+        cwd=PROJECT_ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr + "\n" + result.stdout
+
+    package = tmp_path / "outputs" / task5_package_basename(0, "424242")
+    assert package.is_file()
+    assert package.with_name(package.name + ".sha256").is_file()
+    validation = _task3_validate_package(package, task_id=0)
+    assert validation["episode_count"] == 150
+    assert validation["source_commit_sha"] == source_commit
+    with tarfile.open(package, "r:gz") as archive:
+        names = [member.name for member in archive.getmembers()]
+    assert all("checkpoint/" not in name for name in names)
+    assert all("model.best" not in name for name in names)
+
+
+def test_task4_runner_has_no_ambiguous_discovery_patterns():
+    text = TASK4_RUNNER.read_text(encoding="utf-8")
+    prohibited = (
+        "squeue -n",
+        "sacct -n",
+        "find /projects",
+        "model.last",
+    )
+    for token in prohibited:
+        assert token not in text
+
+
+# STAGE_D_TASK4_TO_TASK6_FULL_WORKFLOW_TESTS
+TASK5_REDUCER = (
+    PROJECT_ROOT / "m3_jobs" / "22_full_infrastructure_diagnostic_eval30_reduce_bundle.slurm"
+)
+TASK6_SOURCE_BUNDLE = (
+    PROJECT_ROOT
+    / "m3_jobs"
+    / "create_full_infrastructure_diagnostic_eval30_source_bundle.sh"
+)
+TASK6_SUBMIT = (
+    PROJECT_ROOT / "m3_jobs" / "submit_full_infrastructure_diagnostic_eval30_workflow.sh"
+)
+SACCT_FIELDS = (
+    "JobIDRaw",
+    "JobID",
+    "JobName",
+    "State",
+    "ExitCode",
+    "ElapsedRaw",
+    "AllocCPUS",
+    "MaxRSS",
+    "TotalCPU",
+)
+
+
+def run_full_validator(*args, check=True):
+    result = subprocess.run(
+        [sys.executable, str(VALIDATOR), *map(str, args)],
+        cwd=PROJECT_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if check and result.returncode != 0:
+        raise AssertionError(
+            f"validator failed with {result.returncode}\n"
+            f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+        )
+    return result
+
+
+def full_formal_package_basename(
+    task_id=0,
+    training_seed=0,
+    *,
+    scale=None,
+    algorithm=None,
+    formal_id=None,
+):
+    task = stage_d_task(task_id)
+    scale = scale or str(task["scale"])
+    algorithm = algorithm or str(task["algorithm"])
+    formal_id = formal_task_id(task_id, training_seed) if formal_id is None else formal_id
+    return (
+        f"m3_controlled_multiscale_formal_{scale}_{algorithm}_seed{training_seed}_"
+        f"job58513929_task{formal_id}.tar.gz"
+    )
+
+
+def full_formal_config_text(
+    scale="25cp",
+    *,
+    simulation_length=112,
+    v2g_enabled=False,
+    charger_count=None,
+    transformer_count=None,
+):
+    charger_count = TOPOLOGY[scale][0] if charger_count is None else charger_count
+    transformer_count = TOPOLOGY[scale][1] if transformer_count is None else transformer_count
+    return (
+        f"simulation_length: {simulation_length}\n"
+        f"v2g_enabled: {'true' if v2g_enabled else 'false'}\n"
+        f"number_of_charging_stations: {charger_count}\n"
+        f"number_of_transformers: {transformer_count}\n"
+    )
+
+
+def full_formal_members(
+    *,
+    task_id=0,
+    training_seed=0,
+    scale=None,
+    algorithm=None,
+    config_text=None,
+    missing=(),
+    use_model_last=False,
+):
+    task = stage_d_task(task_id)
+    scale = scale or str(task["scale"])
+    algorithm = algorithm or str(task["algorithm"])
+    run_name = f"controlled_multiscale_formal_{scale}_{algorithm}_seed{training_seed}"
+    train_dir = f"train/{run_name}"
+    checkpoint_prefix = "model.last" if use_model_last else "model.best"
+    eval_seed_offset = {"25cp": 710000, "100cp": 720000, "500cp": 730000, "1000cp": 740000}[scale]
+    canonical_rows = [
+        "row_type,algorithm,seed,episode_index,episode_seed,episode_steps,done\n",
+        *[
+            (
+                f"episode,{algorithm},{training_seed},{episode_index},"
+                f"{episode_seed(scale, training_seed, episode_index)},112,True\n"
+            )
+            for episode_index in range(EVAL_EPISODES)
+        ],
+    ]
+    source_manifest_files = [
+        "train_td3_gnn.py",
+        "evaluate_td3_gnn.py",
+        f"config_files/PublicPST_{scale.replace('cp', '')}.yaml",
+    ]
+    source_manifest = "".join(
+        f"{hashlib.sha256(name.encode()).hexdigest()}  {name}\n"
+        for name in source_manifest_files
+    )
+    members = {
+        f"config/{scale}_{algorithm}_seed{training_seed}_config.yaml": (
+            config_text or full_formal_config_text(scale)
+        ),
+        f"eval/{scale}_{algorithm}_seed{training_seed}_eval30.csv": "".join(
+            canonical_rows
+        ),
+        f"{train_dir}/{checkpoint_prefix}_actor": "actor\n",
+        f"{train_dir}/{checkpoint_prefix}_actor_optimizer": "actor-opt\n",
+        f"{train_dir}/{checkpoint_prefix}_critic": "critic\n",
+        f"{train_dir}/{checkpoint_prefix}_critic_optimizer": "critic-opt\n",
+        f"{train_dir}/kwargs.yaml": "{}\n",
+        "runtime_metadata/source_manifest.sha256": source_manifest,
+        "runtime_metadata/source_manifest_files.txt": "".join(
+            f"{name}\n" for name in source_manifest_files
+        ),
+        "runtime_metadata/task_runtime_metadata.env": (
+            f"task_id={formal_task_id(task_id, training_seed)}\n"
+            "slurm_array_job_id=58513929\n"
+            f"scale={scale}\n"
+            f"algorithm={algorithm}\n"
+            f"seed={training_seed}\n"
+            f"config_path=config_files/PublicPST_{scale.replace('cp', '')}.yaml\n"
+            f"train_command=python train_td3_gnn.py --algorithm {algorithm} --seed {training_seed} --max_timesteps 50000\n"
+            f"eval_command=python evaluate_td3_gnn.py --algorithm {algorithm} --seed {training_seed} --eval_episodes 30 --checkpoint /tmp/{run_name}/model.best --max_episode_steps 112 --deterministic true --eval_expl_noise 0.0 --eval_seed_offset {eval_seed_offset}\n"
+            "training_exit_status=0\n"
+            "evaluation_exit_status=0\n"
+        ),
+    }
+    for name in list(members):
+        if name in set(missing) or Path(name).name in set(missing):
+            members.pop(name)
+    manifest = ""
+    for name, payload in sorted(members.items()):
+        manifest += f"{hashlib.sha256(str(payload).encode()).hexdigest()}  {name}\n"
+    members["runtime_metadata/package_file_checksums.sha256"] = manifest
+    if "runtime_metadata/package_file_checksums.sha256" in set(missing):
+        members.pop("runtime_metadata/package_file_checksums.sha256")
+    return members
+
+
+def create_full_formal_package(
+    directory,
+    *,
+    task_id=0,
+    training_seed=0,
+    scale=None,
+    algorithm=None,
+    formal_id=None,
+    missing=(),
+    manifest_omit=(),
+    corrupt_checksum=False,
+    config_text=None,
+    use_model_last=False,
+    extra_members=(),
+    member_mutator=None,
+):
+    members = full_formal_members(
+        task_id=task_id,
+        training_seed=training_seed,
+        scale=scale,
+        algorithm=algorithm,
+        config_text=config_text,
+        missing=missing,
+        use_model_last=use_model_last,
+    )
+    if member_mutator is not None:
+        member_mutator(members)
+        members["runtime_metadata/package_file_checksums.sha256"] = "".join(
+            f"{hashlib.sha256(str(payload).encode()).hexdigest()}  {name}\n"
+            for name, payload in sorted(members.items())
+            if name != "runtime_metadata/package_file_checksums.sha256"
+        )
+    if manifest_omit:
+        lines = []
+        for line in members["runtime_metadata/package_file_checksums.sha256"].splitlines():
+            _digest, name = line.split("  ", 1)
+            if name not in set(manifest_omit) and Path(name).name not in set(manifest_omit):
+                lines.append(line)
+        members["runtime_metadata/package_file_checksums.sha256"] = "\n".join(lines) + "\n"
+    if corrupt_checksum:
+        lines = members["runtime_metadata/package_file_checksums.sha256"].splitlines()
+        digest, name = lines[0].split("  ", 1)
+        assert digest != "0" * 64
+        lines[0] = f"{'0' * 64}  {name}"
+        members["runtime_metadata/package_file_checksums.sha256"] = "\n".join(lines) + "\n"
+    package = directory / full_formal_package_basename(
+        task_id,
+        training_seed,
+        scale=scale,
+        algorithm=algorithm,
+        formal_id=formal_id,
+    )
+    package.parent.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(package, "w:gz") as archive:
+        for name, payload in members.items():
+            info = tarfile.TarInfo(name)
+            data = str(payload).encode("utf-8")
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+        for info, payload in extra_members:
+            archive.addfile(info, None if payload is None else io.BytesIO(payload))
+    return package
+
+
+def task5_package_basename(task_id, array_job_id="777777"):
+    task = stage_d_task(task_id)
+    return (
+        "m3_full_infrastructure_diagnostic_eval30_"
+        f"{task['scale']}_{task['algorithm']}_seeds0-4_"
+        f"job{array_job_id}_task{task_id}.tar.gz"
+    )
+
+
+def write_sidecar(package):
+    sidecar = package.with_name(package.name + ".sha256")
+    sidecar.write_text(
+        f"{hashlib.sha256(package.read_bytes()).hexdigest()}  {package.name}\n",
+        encoding="utf-8",
+    )
+    return sidecar
+
+
+def full_sacct_text(array_job_id="777777", *, state_overrides=None):
+    state_overrides = state_overrides or {}
+    rows = []
+    for task_id in range(8):
+        raw = str(int(array_job_id) + task_id + 10)
+        composite = f"{array_job_id}_{task_id}"
+        for suffix, job_name, max_rss, total_cpu in [
+            ("", "evgnn_full_infra_diag_eval30", "2048K", "00:00:10"),
+            (".batch", "batch", "4096K", "00:00:12"),
+            (".extern", "extern", "", "00:00:00"),
+        ]:
+            rows.append(
+                "|".join(
+                    [
+                        raw + suffix,
+                        composite + suffix,
+                        job_name,
+                        state_overrides.get(task_id, "COMPLETED"),
+                        "0:0",
+                        "12",
+                        "4",
+                        max_rss,
+                        total_cpu,
+                    ]
+                )
+            )
+    return "\n".join(rows) + "\n"
+
+
+def create_task5_reducer_fixture(tmp_path, *, package_overrides=None, sacct_text=None):
+    package_overrides = package_overrides or {}
+    array_job_id = "777777"
+    source_commit = "f" * 40
+    package_root = tmp_path / "packages"
+    log_root = tmp_path / "logs"
+    output_root = tmp_path / "output"
+    work_root = tmp_path / "work"
+    package_root.mkdir()
+    log_root.mkdir()
+    output_root.mkdir()
+    work_root.mkdir()
+    for task_id in range(8):
+        source = build_task3_package(
+            tmp_path / f"fixture_task{task_id}",
+            task_id=task_id,
+            array_job_id=array_job_id,
+            source_commit_sha=source_commit,
+            **package_overrides.get(task_id, {}),
+        )
+        package = package_root / task5_package_basename(task_id, array_job_id)
+        shutil.copy2(source, package)
+        write_sidecar(package)
+        (log_root / f"evgnn_full_infra_diag_eval30_{array_job_id}_{task_id}.out").write_text(
+            f"task {task_id} ok\n",
+            encoding="utf-8",
+        )
+        (log_root / f"evgnn_full_infra_diag_eval30_{array_job_id}_{task_id}.err").write_text(
+            "",
+            encoding="utf-8",
+        )
+    sacct_path = tmp_path / "sacct_raw.txt"
+    sacct_path.write_text(sacct_text or full_sacct_text(array_job_id), encoding="utf-8")
+    reducer_stdout = tmp_path / "reducer_stdout.log"
+    reducer_stderr = tmp_path / "reducer_stderr.log"
+    reducer_stdout.write_text("reducer stdout\n", encoding="utf-8")
+    reducer_stderr.write_text("", encoding="utf-8")
+    return {
+        "array_job_id": array_job_id,
+        "source_commit": source_commit,
+        "package_root": package_root,
+        "log_root": log_root,
+        "output_root": output_root,
+        "work_root": work_root,
+        "sacct_path": sacct_path,
+        "reducer_stdout": reducer_stdout,
+        "reducer_stderr": reducer_stderr,
+    }
+
+
+def run_task5_reducer(fixture, *, check=False):
+    return run_full_validator(
+        "validate-complete-workflow",
+        "--array-job-id",
+        fixture["array_job_id"],
+        "--task-package-root",
+        fixture["package_root"],
+        "--slurm-log-root",
+        fixture["log_root"],
+        "--output-root",
+        fixture["output_root"],
+        "--work-root",
+        fixture["work_root"],
+        "--source-commit-sha",
+        fixture["source_commit"],
+        "--reducer-job-id",
+        "888888",
+        "--sacct-raw-file",
+        fixture["sacct_path"],
+        "--reducer-stdout-log",
+        fixture["reducer_stdout"],
+        "--reducer-stderr-log",
+        fixture["reducer_stderr"],
+        check=check,
+    )
+
+
+@pytest.mark.parametrize("seed", TRAINING_SEEDS)
+def test_task4_formal_package_name_cli_is_seed_aware(seed):
+    result = run_full_validator(
+        "formal-package-name",
+        "--task-id",
+        1,
+        "--training-seed",
+        seed,
+    )
+    assert result.stdout.strip() == full_formal_package_basename(1, seed)
+
+
+def test_task4_resolve_formal_package_prefers_individual_seed_package(tmp_path):
+    individual = create_full_formal_package(tmp_path / "formal", task_id=0, training_seed=3)
+    bundle = tmp_path / "unused.tar.gz"
+    create_tar = tarfile.open
+    with create_tar(bundle, "w:gz"):
+        pass
+
+    result = run_full_validator(
+        "resolve-formal-package",
+        "--task-id",
+        0,
+        "--training-seed",
+        3,
+        "--individual-package-root",
+        individual.parent,
+        "--complete-bundle",
+        bundle,
+        "--staging-dir",
+        tmp_path / "staging",
+    )
+    payload = json.loads(result.stdout)
+    assert payload["source_mode"] == "individual_task_package"
+    assert Path(payload["package_path"]) == individual
+
+
+def test_task4_resolve_formal_package_uses_exact_complete_bundle_member(tmp_path):
+    package = create_full_formal_package(tmp_path / "formal", task_id=1, training_seed=4)
+    bundle = tmp_path / "complete.tar.gz"
+    with tarfile.open(bundle, "w:gz") as archive:
+        info = tarfile.TarInfo(f"complete/task_packages/{package.name}")
+        data = package.read_bytes()
+        info.size = len(data)
+        archive.addfile(info, io.BytesIO(data))
+
+    result = run_full_validator(
+        "resolve-formal-package",
+        "--task-id",
+        1,
+        "--training-seed",
+        4,
+        "--individual-package-root",
+        tmp_path / "missing",
+        "--complete-bundle",
+        bundle,
+        "--staging-dir",
+        tmp_path / "staging",
+    )
+    payload = json.loads(result.stdout)
+    assert payload["source_mode"] == "complete_bundle_nested_task_package"
+    assert Path(payload["package_path"]).is_file()
+    assert payload["bundle_member"] == f"complete/task_packages/{package.name}"
+
+
+@pytest.mark.parametrize("match_count", [0, 2])
+def test_task4_resolve_formal_package_rejects_zero_or_multiple_bundle_matches(
+    tmp_path,
+    match_count,
+):
+    package = create_full_formal_package(tmp_path / "formal", task_id=0, training_seed=0)
+    members = {}
+    for index in range(match_count):
+        members[f"complete/task_packages/copy{index}/{package.name}"] = package.read_bytes()
+    bundle = tmp_path / "complete.tar.gz"
+    with tarfile.open(bundle, "w:gz") as archive:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+
+    result = run_full_validator(
+        "resolve-formal-package",
+        "--task-id",
+        0,
+        "--training-seed",
+        0,
+        "--individual-package-root",
+        tmp_path / "missing",
+        "--complete-bundle",
+        bundle,
+        "--staging-dir",
+        tmp_path / "staging",
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "exactly one" in result.stderr
+
+
+@pytest.mark.parametrize("seed", TRAINING_SEEDS)
+def test_task4_validate_formal_package_accepts_all_training_seeds(tmp_path, seed):
+    package = create_full_formal_package(tmp_path, task_id=2, training_seed=seed)
+    result = run_full_validator(
+        "validate-formal-package",
+        "--task-id",
+        2,
+        "--training-seed",
+        seed,
+        "--package",
+        package,
+        "--extract-dir",
+        tmp_path / f"extract{seed}",
+    )
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "ok"
+    assert payload["training_seed"] == seed
+    assert payload["formal_task_id"] == formal_task_id(2, seed)
+    assert payload["simulation_length"] == 112
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"extra_members": [_task3_tar_member("../escape.txt")]}, "unsafe"),
+        ({"extra_members": [_task3_tar_member("./runtime_metadata/source_manifest.sha256")]}, "duplicate"),
+        (
+            {
+                "extra_members": [
+                    _task3_tar_member(
+                        "unsafe-link",
+                        member_type=tarfile.SYMTYPE,
+                        linkname="../escape",
+                    )
+                ]
+            },
+            "link or device",
+        ),
+        ({"missing": ["model.best_actor"]}, "missing"),
+        ({"use_model_last": True}, "model.best"),
+        ({"manifest_omit": ["kwargs.yaml"]}, "coverage"),
+        ({"corrupt_checksum": True}, "checksum mismatch"),
+        ({"scale": "100cp"}, "package name"),
+        ({"algorithm": "hierarchical"}, "package name"),
+        ({"formal_id": 99}, "package name"),
+        (
+            {"config_text": full_formal_config_text(simulation_length=111)},
+            "simulation_length",
+        ),
+        ({"config_text": full_formal_config_text(v2g_enabled=True)}, "v2g"),
+        ({"config_text": full_formal_config_text(charger_count=24)}, "charging"),
+        ({"config_text": full_formal_config_text(transformer_count=2)}, "transformer"),
+    ],
+)
+def test_task4_validate_formal_package_rejects_single_property_mutations(
+    tmp_path,
+    kwargs,
+    message,
+):
+    package = create_full_formal_package(tmp_path, task_id=0, training_seed=0, **kwargs)
+    result = run_full_validator(
+        "validate-formal-package",
+        "--task-id",
+        0,
+        "--training-seed",
+        0,
+        "--package",
+        package,
+        "--extract-dir",
+        tmp_path / "extract",
+        check=False,
+    )
+    assert result.returncode != 0
+    assert message.lower() in result.stderr.lower()
+
+
+def test_task4_validate_formal_package_rejects_wrong_runtime_metadata(tmp_path):
+    def mutate(members):
+        metadata = members["runtime_metadata/task_runtime_metadata.env"]
+        members["runtime_metadata/task_runtime_metadata.env"] = metadata.replace(
+            "slurm_array_job_id=58513929",
+            "slurm_array_job_id=123456",
+        )
+
+    package = create_full_formal_package(
+        tmp_path,
+        task_id=0,
+        training_seed=0,
+        member_mutator=mutate,
+    )
+    result = run_full_validator(
+        "validate-formal-package",
+        "--task-id",
+        0,
+        "--training-seed",
+        0,
+        "--package",
+        package,
+        "--extract-dir",
+        tmp_path / "extract",
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "formal task runtime metadata" in result.stderr
+
+
+def test_task4_validate_formal_package_rejects_source_manifest_coverage(tmp_path):
+    def mutate(members):
+        members["runtime_metadata/source_manifest_files.txt"] = "train_td3_gnn.py\n"
+
+    package = create_full_formal_package(
+        tmp_path,
+        task_id=0,
+        training_seed=0,
+        member_mutator=mutate,
+    )
+    result = run_full_validator(
+        "validate-formal-package",
+        "--task-id",
+        0,
+        "--training-seed",
+        0,
+        "--package",
+        package,
+        "--extract-dir",
+        tmp_path / "extract",
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "source manifest coverage" in result.stderr
+
+
+def test_task5_reducer_dry_run_prints_exact_counts_and_scoped_sacct():
+    env = {
+        **os.environ,
+        "EV_GNN_FULL_DIAGNOSTIC_REDUCER_DRY_RUN": "1",
+        "EV_GNN_FULL_DIAGNOSTIC_ARRAY_JOB_ID": "777777",
+        "SLURM_JOB_ID": "888888",
+    }
+    result = subprocess.run(
+        ["bash", str(TASK5_REDUCER)],
+        cwd=PROJECT_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "task_package_count=8" in result.stdout
+    assert "checkpoint_group_count=40" in result.stdout
+    assert "episode_count=1200" in result.stdout
+    assert "sacct -j 777777 --parsable2 --noheader" in result.stdout
+    assert "DRY_RUN_NO_REDUCTION_OR_PACKAGING" in result.stdout
+
+
+def test_task5_complete_workflow_accepts_synthetic_8_task_packages(tmp_path):
+    fixture = create_task5_reducer_fixture(tmp_path)
+    result = run_task5_reducer(fixture)
+    payload = json.loads(result.stdout)
+    bundle = Path(payload["bundle_path"])
+
+    assert payload["status"] == "ok"
+    assert payload["task_package_count"] == 8
+    assert payload["checkpoint_group_count"] == 40
+    assert payload["episode_count"] == 1200
+    assert bundle.is_file()
+    assert bundle.with_name(bundle.name + ".sha256").is_file()
+
+
+def test_task5_complete_workflow_rejects_wrong_sidecar(tmp_path):
+    fixture = create_task5_reducer_fixture(tmp_path)
+    sidecar = next(fixture["package_root"].glob("*.sha256"))
+    sidecar.write_text("0" * 64 + "  wrong.tar.gz\n", encoding="utf-8")
+
+    result = run_task5_reducer(fixture)
+    assert result.returncode != 0
+    assert "sidecar" in result.stderr.lower()
+
+
+def test_task5_complete_workflow_rejects_29_episode_checkpoint(tmp_path):
+    def mutate(root):
+        path = root / "seed2" / "diagnostics" / "episode_diagnostics.csv"
+
+        def remove_one(fieldnames, rows):
+            rows.pop()
+
+        _task3_rewrite_csv(path, remove_one)
+
+    fixture = create_task5_reducer_fixture(
+        tmp_path,
+        package_overrides={3: {"staging_mutator": mutate}},
+    )
+    result = run_task5_reducer(fixture)
+    assert result.returncode != 0
+    assert "exactly 30 rows" in result.stderr
+
+
+def test_task5_complete_workflow_rejects_failed_array_element(tmp_path):
+    fixture = create_task5_reducer_fixture(
+        tmp_path,
+        sacct_text=full_sacct_text("777777", state_overrides={4: "FAILED"}),
+    )
+    result = run_task5_reducer(fixture)
+    assert result.returncode != 0
+    assert "COMPLETED" in result.stderr
+
+
+def test_task5_complete_workflow_rejects_nonempty_slurm_stderr(tmp_path):
+    fixture = create_task5_reducer_fixture(tmp_path)
+    (
+        fixture["log_root"]
+        / f"evgnn_full_infra_diag_eval30_{fixture['array_job_id']}_3.err"
+    ).write_text("warning\n", encoding="utf-8")
+    result = run_task5_reducer(fixture)
+    assert result.returncode != 0
+    assert "stderr log must be empty" in result.stderr
+
+
+def test_task5_complete_workflow_rejects_nonempty_reducer_stderr(tmp_path):
+    fixture = create_task5_reducer_fixture(tmp_path)
+    fixture["reducer_stderr"].write_text("warning\n", encoding="utf-8")
+    result = run_task5_reducer(fixture)
+    assert result.returncode != 0
+    assert "reducer stderr snapshot" in result.stderr
+
+
+def test_task6_source_bundle_dry_run_lists_full_eval30_runtime_files():
+    env = {
+        **os.environ,
+        "EV_GNN_FULL_DIAGNOSTIC_SOURCE_DRY_RUN": "1",
+        "EV_GNN_FULL_DIAGNOSTIC_SOURCE_EXPECTED_HEAD_SHA": "f" * 40,
+    }
+    result = subprocess.run(
+        ["bash", str(TASK6_SOURCE_BUNDLE)],
+        cwd=PROJECT_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "m3_jobs/21_full_infrastructure_diagnostic_eval30.slurm" in result.stdout
+    assert "m3_jobs/22_full_infrastructure_diagnostic_eval30_reduce_bundle.slurm" in result.stdout
+    assert "scripts/validate_full_infrastructure_diagnostic_eval30.py" in result.stdout
+    assert "DRY_RUN_NO_ARCHIVE_CREATED" in result.stdout
+
+
+def test_task6_submit_default_dry_run_does_not_invoke_sbatch(tmp_path):
+    source_root = tmp_path / "source_root"
+    (source_root / "m3_jobs").mkdir(parents=True)
+    (source_root / "scripts").mkdir()
+    for script in [TASK4_RUNNER, TASK5_REDUCER, TASK6_SUBMIT]:
+        shutil.copy2(script, source_root / "m3_jobs" / script.name)
+    shutil.copy2(VALIDATOR, source_root / "scripts" / VALIDATOR.name)
+    source_commit = "f" * 40
+    (source_root / "SOURCE_COMMIT_SHA.txt").write_text(source_commit + "\n", encoding="utf-8")
+
+    source_bundle_root = tmp_path / "source_bundle_root"
+    top_level = source_bundle_root / f"EV-GNN-full-infrastructure-diagnostics-eval30-{source_commit}"
+    required_source_members = [
+        "evaluate_td3_gnn.py",
+        "evaluate_td3_gnn_infrastructure_diagnostics.py",
+        "TD3/TD3_ActionGNN_Controlled.py",
+        "TD3/TD3_HierarchicalActionGNN.py",
+        "config_files/PublicPST_25cp.yaml",
+        "config_files/PublicPST_100.yaml",
+        "config_files/PublicPST_500.yaml",
+        "config_files/PublicPST_1000.yaml",
+        "m3_jobs/21_full_infrastructure_diagnostic_eval30.slurm",
+        "m3_jobs/22_full_infrastructure_diagnostic_eval30_reduce_bundle.slurm",
+        "m3_jobs/create_full_infrastructure_diagnostic_eval30_source_bundle.sh",
+        "m3_jobs/submit_full_infrastructure_diagnostic_eval30_workflow.sh",
+        "scripts/validate_full_infrastructure_diagnostic_eval30.py",
+        "utils/ev2gym_training_utils.py",
+        "utils/infrastructure_diagnostics.py",
+        "utils/state_public_pst_gnn.py",
+    ]
+    for relative_name in required_source_members:
+        output_path = top_level / relative_name
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(PROJECT_ROOT / relative_name, output_path)
+    (top_level / "runtime_metadata").mkdir(parents=True, exist_ok=True)
+    (top_level / "SOURCE_COMMIT_SHA.txt").write_text(source_commit + "\n", encoding="utf-8")
+    source_manifest = top_level / "runtime_metadata" / "source_file_checksums.sha256"
+    source_manifest.write_text("", encoding="utf-8")
+    manifest_paths = sorted(
+        path for path in top_level.rglob("*") if path.is_file() and path != source_manifest
+    )
+    source_manifest.write_text(
+        "".join(
+            f"{hashlib.sha256(path.read_bytes()).hexdigest()}  "
+            f"{path.relative_to(top_level).as_posix()}\n"
+            for path in manifest_paths
+        ),
+        encoding="utf-8",
+    )
+    source_archive = tmp_path / "source.tar.gz"
+    with tarfile.open(source_archive, "w:gz") as archive:
+        for path in sorted(top_level.rglob("*")):
+            if path.is_file():
+                archive.add(
+                    path,
+                    arcname=path.relative_to(source_bundle_root).as_posix(),
+                )
+    source_sidecar = source_archive.with_name(source_archive.name + ".sha256")
+    source_sidecar.write_text(
+        f"{hashlib.sha256(source_archive.read_bytes()).hexdigest()}  {source_archive.name}\n",
+        encoding="utf-8",
+    )
+
+    formal_root = tmp_path / "formal"
+    for task_id in range(8):
+        for seed in TRAINING_SEEDS:
+            create_full_formal_package(formal_root, task_id=task_id, training_seed=seed)
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_sbatch = fake_bin / "sbatch"
+    fake_sbatch.write_text(
+        "#!/bin/sh\n"
+        "echo sbatch must not run >&2\n"
+        "exit 99\n",
+        encoding="utf-8",
+    )
+    fake_sbatch.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        "EV_GNN_FULL_DIAGNOSTIC_EXPECTED_SOURCE_COMMIT": source_commit,
+        "EV_GNN_FULL_DIAGNOSTIC_SOURCE_ARCHIVE": str(source_archive),
+        "EV_GNN_FULL_DIAGNOSTIC_SOURCE_ARCHIVE_SHA256": str(source_sidecar),
+        "EV_GNN_FULL_DIAGNOSTIC_FORMAL_PACKAGE_ROOT": str(formal_root),
+        "EV_GNN_FULL_DIAGNOSTIC_FORMAL_COMPLETE_BUNDLE": str(tmp_path / "unused_complete.tar.gz"),
+        "EV_GNN_FULL_DIAGNOSTIC_OUTPUT_ROOT": str(tmp_path / "output"),
+        "EV_GNN_FULL_DIAGNOSTIC_RUN_ROOT": str(tmp_path / "runs"),
+    }
+    result = subprocess.run(
+        ["bash", str(source_root / "m3_jobs" / TASK6_SUBMIT.name)],
+        cwd=source_root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "SBATCH_ARRAY_COMMAND=sbatch --parsable" in result.stdout
+    assert "--dependency=afterok:<array_job_id>" in result.stdout
+    assert "DRY_RUN_NO_SBATCH_CALLED" in result.stdout
