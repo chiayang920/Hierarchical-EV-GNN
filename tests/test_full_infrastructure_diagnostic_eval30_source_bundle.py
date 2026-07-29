@@ -61,7 +61,9 @@ def initialise_fixture_repo(tmp_path):
     script_destination = (
         repo / "m3_jobs/create_full_infrastructure_diagnostic_eval30_source_bundle.sh"
     )
-    script_destination.write_text(SOURCE_SCRIPT.read_text(encoding="utf-8"), encoding="utf-8")
+    script_destination.write_text(
+        SOURCE_SCRIPT.read_text(encoding="utf-8"), encoding="utf-8"
+    )
     script_destination.chmod(0o755)
     run(["git", "init", "-b", "main"], repo)
     run(["git", "config", "user.email", "test@example.com"], repo)
@@ -69,6 +71,18 @@ def initialise_fixture_repo(tmp_path):
     run(["git", "add", "."], repo)
     run(["git", "commit", "-m", "fixture"], repo)
     return repo, script_destination
+
+
+def source_env(repo, output):
+    head = run(["git", "rev-parse", "HEAD"], repo).stdout.strip()
+    env = os.environ.copy()
+    env.update(
+        {
+            "EV_GNN_FULL_DIAGNOSTIC_SOURCE_EXPECTED_HEAD_SHA": head,
+            "EV_GNN_FULL_DIAGNOSTIC_SOURCE_OUTPUT_ROOT": str(output),
+        }
+    )
+    return head, env
 
 
 def test_source_bundle_static_allowlist_and_prohibitions():
@@ -93,14 +107,7 @@ def test_source_bundle_static_allowlist_and_prohibitions():
 def test_source_bundle_creates_exact_safe_archive(tmp_path):
     repo, script = initialise_fixture_repo(tmp_path)
     output = tmp_path / "output"
-    head = run(["git", "rev-parse", "HEAD"], repo).stdout.strip()
-    env = os.environ.copy()
-    env.update(
-        {
-            "EV_GNN_FULL_DIAGNOSTIC_SOURCE_EXPECTED_HEAD_SHA": head,
-            "EV_GNN_FULL_DIAGNOSTIC_SOURCE_OUTPUT_ROOT": str(output),
-        }
-    )
+    head, env = source_env(repo, output)
     result = run(["bash", str(script)], repo, env=env)
     assert "SOURCE_BUNDLE_OK" in result.stdout
     archive = output / f"EV-GNN-full-infrastructure-diagnostics-eval30-{head}.tar.gz"
@@ -133,14 +140,7 @@ def test_source_bundle_creates_exact_safe_archive(tmp_path):
 def test_source_bundle_rejects_dirty_worktree(tmp_path):
     repo, script = initialise_fixture_repo(tmp_path)
     (repo / "untracked.txt").write_text("dirty\n", encoding="utf-8")
-    head = run(["git", "rev-parse", "HEAD"], repo).stdout.strip()
-    env = os.environ.copy()
-    env.update(
-        {
-            "EV_GNN_FULL_DIAGNOSTIC_SOURCE_EXPECTED_HEAD_SHA": head,
-            "EV_GNN_FULL_DIAGNOSTIC_SOURCE_OUTPUT_ROOT": str(tmp_path / "output"),
-        }
-    )
+    _, env = source_env(repo, tmp_path / "output")
     result = run(["bash", str(script)], repo, env=env, check=False)
     assert result.returncode != 0
     assert "worktree is dirty" in result.stderr
@@ -149,31 +149,37 @@ def test_source_bundle_rejects_dirty_worktree(tmp_path):
 def test_source_bundle_rejects_missing_allowlisted_path(tmp_path):
     repo, script = initialise_fixture_repo(tmp_path)
     (repo / "utils/state_public_pst_gnn.py").unlink()
-    head = run(["git", "rev-parse", "HEAD"], repo).stdout.strip()
-    env = os.environ.copy()
-    env.update(
-        {
-            "EV_GNN_FULL_DIAGNOSTIC_SOURCE_EXPECTED_HEAD_SHA": head,
-            "EV_GNN_FULL_DIAGNOSTIC_SOURCE_OUTPUT_ROOT": str(tmp_path / "output"),
-        }
-    )
+    _, env = source_env(repo, tmp_path / "output")
     result = run(["bash", str(script)], repo, env=env, check=False)
     assert result.returncode != 0
     assert "allowlisted source path is missing" in result.stderr
 
 
+def test_source_bundle_rejects_allowlisted_symlink(tmp_path):
+    repo, script = initialise_fixture_repo(tmp_path)
+    target = repo / "utils/state_public_pst_gnn.py"
+    target.unlink()
+    target.symlink_to(repo / "utils/infrastructure_diagnostics.py")
+    _, env = source_env(repo, tmp_path / "output")
+    result = run(["bash", str(script)], repo, env=env, check=False)
+    assert result.returncode != 0
+    assert "must not be a symbolic link" in result.stderr
+
+
+def test_source_bundle_rejects_wrong_expected_head(tmp_path):
+    repo, script = initialise_fixture_repo(tmp_path)
+    _, env = source_env(repo, tmp_path / "output")
+    env["EV_GNN_FULL_DIAGNOSTIC_SOURCE_EXPECTED_HEAD_SHA"] = "f" * 40
+    result = run(["bash", str(script)], repo, env=env, check=False)
+    assert result.returncode != 0
+    assert "does not match required" in result.stderr
+
+
 def test_source_bundle_dry_run_does_not_create_archive(tmp_path):
     repo, script = initialise_fixture_repo(tmp_path)
     output = tmp_path / "output"
-    head = run(["git", "rev-parse", "HEAD"], repo).stdout.strip()
-    env = os.environ.copy()
-    env.update(
-        {
-            "EV_GNN_FULL_DIAGNOSTIC_SOURCE_EXPECTED_HEAD_SHA": head,
-            "EV_GNN_FULL_DIAGNOSTIC_SOURCE_OUTPUT_ROOT": str(output),
-            "EV_GNN_FULL_DIAGNOSTIC_SOURCE_DRY_RUN": "1",
-        }
-    )
+    _, env = source_env(repo, output)
+    env["EV_GNN_FULL_DIAGNOSTIC_SOURCE_DRY_RUN"] = "1"
     result = run(["bash", str(script)], repo, env=env)
     assert "DRY_RUN_NO_ARCHIVE_CREATED" in result.stdout
     assert not output.exists()
