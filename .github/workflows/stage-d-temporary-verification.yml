@@ -1,0 +1,159 @@
+name: Stage D temporary implementation verification
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stage-d-verification-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout exact pull-request commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install runtime and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            torch==2.2.2 \
+            --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -r requirements.txt
+          python -m pip install \
+            torch-geometric==2.5.3 \
+            PyYAML==6.0.3 \
+            pytest
+          python - <<'PY'
+          import sys
+          import pytest
+          import torch
+          import torch_geometric
+          import yaml
+          print("python=" + sys.version.split()[0])
+          print("pytest=" + pytest.__version__)
+          print("torch=" + torch.__version__)
+          print("torch_geometric=" + torch_geometric.__version__)
+          print("pyyaml=" + yaml.__version__)
+          PY
+
+      - name: Verify pull-request scope and whitespace
+        run: |
+          git diff --check "${{ github.event.pull_request.base.sha }}...${{ github.sha }}"
+          git diff --name-only \
+            "${{ github.event.pull_request.base.sha }}...${{ github.sha }}" \
+            | tee /tmp/changed_files.txt
+          if grep -E '(\.tar\.gz$|\.zip$|\.log$|\.env$|\.sha256$|model\.best|model\.last|task_packages)' /tmp/changed_files.txt; then
+            echo "ERROR: raw evidence-like artefact in pull-request diff" >&2
+            exit 1
+          fi
+
+      - name: Run focused Stage D tests
+        run: |
+          python -m pytest \
+            tests/test_full_infrastructure_diagnostic_eval30_workflow.py \
+            tests/test_full_infrastructure_diagnostic_eval30_packages.py \
+            tests/test_full_infrastructure_diagnostic_eval30_slurm.py \
+            tests/test_full_infrastructure_diagnostic_eval30_reducer.py \
+            tests/test_full_infrastructure_diagnostic_eval30_submit.py \
+            tests/test_full_infrastructure_diagnostic_eval30_source_bundle.py \
+            tests/test_full_infrastructure_diagnostic_eval30_protocol.py \
+            -q \
+            -p no:cacheprovider
+
+      - name: Run complete repository tests
+        run: python -m pytest tests -q -p no:cacheprovider
+
+      - name: Compile Python sources
+        run: |
+          python -m compileall -q \
+            scripts \
+            tests \
+            evaluate_td3_gnn.py \
+            evaluate_td3_gnn_infrastructure_diagnostics.py \
+            utils
+
+      - name: Validate shell syntax
+        run: |
+          bash -n \
+            m3_jobs/21_full_infrastructure_diagnostic_eval30.slurm \
+            m3_jobs/22_full_infrastructure_diagnostic_reduce_bundle.slurm \
+            m3_jobs/submit_full_infrastructure_diagnostic_eval30_workflow.sh \
+            m3_jobs/create_full_infrastructure_diagnostic_eval30_source_bundle.sh
+
+      - name: Run all eight array dry-runs
+        run: |
+          DRY_ROOT="$(mktemp -d)"
+          for task_id in 0 1 2 3 4 5 6 7; do
+            output="$(
+              SLURM_ARRAY_TASK_ID="${task_id}" \
+              SLURM_ARRAY_JOB_ID="99999999" \
+              SLURM_JOB_ID="9999999${task_id}" \
+              EV_GNN_FULL_DIAGNOSTIC_DRY_RUN=1 \
+              EV_GNN_FULL_DIAGNOSTIC_REPO_ROOT="$(pwd -P)" \
+              EV_GNN_FULL_DIAGNOSTIC_EXPECTED_SOURCE_COMMIT="${GITHUB_SHA}" \
+              EV_GNN_FULL_DIAGNOSTIC_FORMAL_JOB_ID="58513929" \
+              EV_GNN_FULL_DIAGNOSTIC_FORMAL_PACKAGE_ROOT="/formal" \
+              EV_GNN_FULL_DIAGNOSTIC_FORMAL_COMPLETE_BUNDLE="/formal/complete.tar.gz" \
+              EV_GNN_FULL_DIAGNOSTIC_OUTPUT_ROOT="${DRY_ROOT}/output" \
+              EV_GNN_FULL_DIAGNOSTIC_RUN_ROOT="${DRY_ROOT}/run" \
+              bash m3_jobs/21_full_infrastructure_diagnostic_eval30.slurm
+            )"
+            grep -qx "task_id=${task_id}" <<< "${output}"
+            grep -qx "expected_episode_count=150" <<< "${output}"
+            grep -qx "DRY_RUN_NO_EVALUATION_OR_PACKAGING" <<< "${output}"
+            test "$(grep -c '^EVALUATOR_COMMAND_SEED_' <<< "${output}")" -eq 5
+          done
+          rm -rf "${DRY_ROOT}"
+
+      - name: Run reducer and source-bundle dry-runs
+        run: |
+          DRY_ROOT="$(mktemp -d)"
+          reducer_output="$(
+            SLURM_JOB_ID="99999998" \
+            EV_GNN_FULL_DIAGNOSTIC_REDUCER_DRY_RUN=1 \
+            EV_GNN_FULL_DIAGNOSTIC_ARRAY_JOB_ID="99999999" \
+            EV_GNN_FULL_DIAGNOSTIC_REPO_ROOT="$(pwd -P)" \
+            EV_GNN_FULL_DIAGNOSTIC_EXPECTED_SOURCE_COMMIT="${GITHUB_SHA}" \
+            EV_GNN_FULL_DIAGNOSTIC_TASK_PACKAGE_ROOT="${DRY_ROOT}/packages" \
+            EV_GNN_FULL_DIAGNOSTIC_OUTPUT_ROOT="${DRY_ROOT}/output" \
+            bash m3_jobs/22_full_infrastructure_diagnostic_reduce_bundle.slurm
+          )"
+          grep -qx "expected_task_packages=8" <<< "${reducer_output}"
+          grep -qx "expected_checkpoint_groups=40" <<< "${reducer_output}"
+          grep -qx "expected_episode_count=1200" <<< "${reducer_output}"
+          grep -qx "DRY_RUN_NO_ACCOUNTING_OR_PACKAGING" <<< "${reducer_output}"
+
+          source_output="$(
+            EV_GNN_FULL_DIAGNOSTIC_SOURCE_EXPECTED_HEAD_SHA="${GITHUB_SHA}" \
+            EV_GNN_FULL_DIAGNOSTIC_SOURCE_OUTPUT_ROOT="${DRY_ROOT}/source" \
+            EV_GNN_FULL_DIAGNOSTIC_SOURCE_DRY_RUN=1 \
+            bash m3_jobs/create_full_infrastructure_diagnostic_eval30_source_bundle.sh
+          )"
+          grep -qx "DRY_RUN_NO_ARCHIVE_CREATED" <<< "${source_output}"
+          test ! -e "${DRY_ROOT}/source"
+          rm -rf "${DRY_ROOT}"
+
+      - name: Verify clean worktree
+        run: |
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
