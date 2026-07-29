@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.validate_full_infrastructure_diagnostic_eval30 import (
+from scripts.full_infrastructure_diagnostic_eval30_accounting import (
     SACCT_FIELDS,
     parse_stage_d_sacct,
 )
@@ -122,7 +122,11 @@ def test_parse_stage_d_sacct_rejects_wrong_array_job_id():
 @pytest.mark.parametrize("suffix", ["", ".batch", ".extern"])
 def test_parse_stage_d_sacct_rejects_missing_required_identity(suffix):
     target = f"{ARRAY_JOB_ID}_3{suffix}"
-    lines = [line for line in valid_sacct_text().splitlines() if line.split("|")[1] != target]
+    lines = [
+        line
+        for line in valid_sacct_text().splitlines()
+        if line.split("|")[1] != target
+    ]
     with pytest.raises(ValueError, match="missing"):
         parse_stage_d_sacct("\n".join(lines) + "\n", ARRAY_JOB_ID)
 
@@ -173,8 +177,14 @@ def test_reducer_slurm_resources_and_exact_accounting_contract():
         "JobIDRaw,JobID,JobName,State,ExitCode,ElapsedRaw,AllocCPUS,MaxRSS,TotalCPU"
         in text
     )
-    assert "full_infrastructure_diagnostic_eval30_task${task_id}_job${ARRAY_JOB_ID}.tar.gz" in text
-    assert "full_infrastructure_diagnostics_complete_evidence_job${ARRAY_JOB_ID}.tar.gz" in text
+    assert (
+        "full_infrastructure_diagnostic_eval30_task${task_id}_job${ARRAY_JOB_ID}.tar.gz"
+        in text
+    )
+    assert (
+        "full_infrastructure_diagnostics_complete_evidence_job${ARRAY_JOB_ID}.tar.gz"
+        in text
+    )
     assert ".tmp.${SLURM_JOB_ID}" in text
     assert "validate_stage_d_complete_bundle" in text
 
