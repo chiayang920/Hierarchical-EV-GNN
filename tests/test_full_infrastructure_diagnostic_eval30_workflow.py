@@ -529,3 +529,360 @@ def test_validate_seed_output_cli(tmp_path):
     payload = json.loads(result.stdout)
     assert payload["status"] == "ok"
     assert payload["episode_count"] == 30
+
+# STAGE_D_TASK3_MINIMAL_PACKAGE_CONTRACT_TESTS
+import hashlib
+import io
+import shutil
+import tarfile
+
+import scripts.validate_full_infrastructure_diagnostic_eval30 as task3_validator_module
+
+
+def _task3_validate_package(package, task_id):
+    return task3_validator_module.validate_stage_d_task_package(package, task_id)
+
+
+def _task3_write_json(path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _task3_read_csv(path):
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        return list(reader.fieldnames or []), list(reader)
+
+
+def _task3_rewrite_csv(path, mutator):
+    fieldnames, rows = _task3_read_csv(path)
+    mutator(fieldnames, rows)
+    write_csv(path, fieldnames, rows)
+
+
+def _task3_tar_member(name, payload=b"x", *, member_type=None, linkname=""):
+    info = tarfile.TarInfo(name)
+    if member_type is not None:
+        info.type = member_type
+        info.linkname = linkname
+        info.size = 0
+        return info, None
+    info.size = len(payload)
+    return info, payload
+
+
+def build_task3_package(
+    tmp_path,
+    *,
+    task_id=0,
+    staging_mutator=None,
+    manifest_mutator=None,
+    extra_members=(),
+):
+    root = tmp_path / "task_package_staging"
+    root.mkdir()
+    task = stage_d_task(task_id)
+    scale = str(task["scale"])
+    algorithm = str(task["algorithm"])
+
+    for seed in TRAINING_SEEDS:
+        build_seed_output(root / f"seed{seed}", task_id=task_id, training_seed=seed)
+
+    _task3_write_json(
+        root / "task_metadata" / "task.json",
+        {
+            "task_id": task_id,
+            "scale": scale,
+            "algorithm": algorithm,
+            "formal_job_id": "58513929",
+            "training_seeds": list(TRAINING_SEEDS),
+            "formal_task_ids": [formal_task_id(task_id, seed) for seed in TRAINING_SEEDS],
+            "eval_episodes_per_seed": EVAL_EPISODES,
+            "diagnostic_schema_version": "3",
+        },
+    )
+
+    checkpoint_rows = [
+        {
+            "task_id": str(task_id),
+            "scale": scale,
+            "algorithm": algorithm,
+            "training_seed": str(seed),
+            "formal_task_id": str(formal_task_id(task_id, seed)),
+            "diagnostic_schema_version": "3",
+        }
+        for seed in TRAINING_SEEDS
+    ]
+    write_csv(
+        root / "summaries" / "checkpoint_inventory.csv",
+        list(checkpoint_rows[0]),
+        checkpoint_rows,
+    )
+
+    episode_rows = [
+        {
+            "scale": scale,
+            "algorithm": algorithm,
+            "training_seed": str(seed),
+            "episode_index": str(episode_index),
+            "episode_seed": str(episode_seed(scale, seed, episode_index)),
+            "diagnostic_schema_version": "3",
+        }
+        for seed in TRAINING_SEEDS
+        for episode_index in range(EVAL_EPISODES)
+    ]
+    write_csv(
+        root / "summaries" / "episode_inventory.csv",
+        list(episode_rows[0]),
+        episode_rows,
+    )
+
+    runtime_rows = [
+        {
+            "task_id": str(task_id),
+            "scale": scale,
+            "algorithm": algorithm,
+            "training_seed": str(seed),
+            "formal_task_id": str(formal_task_id(task_id, seed)),
+            "status": "ok",
+            "episode_count": str(EVAL_EPISODES),
+        }
+        for seed in TRAINING_SEEDS
+    ]
+    write_csv(
+        root / "summaries" / "runtime_summary.csv",
+        list(runtime_rows[0]),
+        runtime_rows,
+    )
+
+    _task3_write_json(
+        root / "validation" / "task_validation.json",
+        {
+            "status": "ok",
+            "task_id": task_id,
+            "checkpoint_groups": 5,
+            "episode_count": 150,
+            "diagnostic_schema_version": "3",
+        },
+    )
+    logs = root / "logs"
+    logs.mkdir()
+    (logs / "stdout.log").write_text("TASK_OK\n", encoding="utf-8")
+    (logs / "stderr.log").write_bytes(b"")
+
+    if staging_mutator is not None:
+        staging_mutator(root)
+
+    manifest_path = root / "checksums" / "package_file_checksums.sha256"
+    manifest_path.parent.mkdir()
+    payload_paths = sorted(path for path in root.rglob("*") if path.is_file())
+    manifest_path.write_text(
+        "".join(
+            f"{hashlib.sha256(path.read_bytes()).hexdigest()}  "
+            f"{path.relative_to(root).as_posix()}\n"
+            for path in payload_paths
+        ),
+        encoding="utf-8",
+    )
+    if manifest_mutator is not None:
+        manifest_mutator(manifest_path)
+
+    package = tmp_path / "task0.tar.gz"
+    with tarfile.open(package, "w:gz") as archive:
+        for path in sorted(item for item in root.rglob("*") if item.is_file()):
+            archive.add(path, arcname=path.relative_to(root).as_posix(), recursive=False)
+        for info, payload in extra_members:
+            archive.addfile(info, None if payload is None else io.BytesIO(payload))
+    return package
+
+
+def test_task3_valid_five_seed_package_passes(tmp_path):
+    package = build_task3_package(tmp_path)
+    result = _task3_validate_package(package, task_id=0)
+    assert result == {
+        "status": "ok",
+        "task_id": 0,
+        "scale": "25cp",
+        "algorithm": "actiongnn",
+        "checkpoint_groups": 5,
+        "episode_count": 150,
+        "diagnostic_schema_version": "3",
+    }
+
+
+def test_task3_package_cli(tmp_path):
+    package = build_task3_package(tmp_path)
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(VALIDATOR),
+            "validate-task-package",
+            "--package",
+            str(package),
+            "--task-id",
+            "0",
+        ],
+        cwd=PROJECT_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["episode_count"] == 150
+
+
+def test_task3_rejects_missing_seed_group(tmp_path):
+    def mutate(root):
+        shutil.rmtree(root / "seed4")
+
+    package = build_task3_package(tmp_path, staging_mutator=mutate)
+    with pytest.raises(ValueError, match="file set mismatch"):
+        _task3_validate_package(package, task_id=0)
+
+
+def test_task3_rejects_duplicate_checkpoint_seed(tmp_path):
+    def mutate(root):
+        path = root / "summaries" / "checkpoint_inventory.csv"
+
+        def duplicate(fieldnames, rows):
+            rows[1]["training_seed"] = rows[0]["training_seed"]
+            rows[1]["formal_task_id"] = rows[0]["formal_task_id"]
+
+        _task3_rewrite_csv(path, duplicate)
+
+    package = build_task3_package(tmp_path, staging_mutator=mutate)
+    with pytest.raises(ValueError, match="checkpoint inventory"):
+        _task3_validate_package(package, task_id=0)
+
+
+def test_task3_rejects_wrong_formal_task_id(tmp_path):
+    def mutate(root):
+        path = root / "summaries" / "checkpoint_inventory.csv"
+
+        def wrong_id(fieldnames, rows):
+            rows[2]["formal_task_id"] = "999"
+
+        _task3_rewrite_csv(path, wrong_id)
+
+    package = build_task3_package(tmp_path, staging_mutator=mutate)
+    with pytest.raises(ValueError, match="checkpoint inventory"):
+        _task3_validate_package(package, task_id=0)
+
+
+def test_task3_rejects_missing_aggregate_episode_key(tmp_path):
+    def mutate(root):
+        path = root / "summaries" / "episode_inventory.csv"
+
+        def remove(fieldnames, rows):
+            rows.pop()
+
+        _task3_rewrite_csv(path, remove)
+
+    package = build_task3_package(tmp_path, staging_mutator=mutate)
+    with pytest.raises(ValueError, match="episode inventory"):
+        _task3_validate_package(package, task_id=0)
+
+
+def test_task3_rejects_failed_seed_contract(tmp_path):
+    def mutate(root):
+        (root / "seed2" / "logs" / "stderr.log").write_text(
+            "Traceback", encoding="utf-8"
+        )
+
+    package = build_task3_package(tmp_path, staging_mutator=mutate)
+    with pytest.raises(ValueError, match="stderr log must be empty"):
+        _task3_validate_package(package, task_id=0)
+
+
+def test_task3_rejects_nonempty_task_stderr(tmp_path):
+    def mutate(root):
+        (root / "logs" / "stderr.log").write_text("failure", encoding="utf-8")
+
+    package = build_task3_package(tmp_path, staging_mutator=mutate)
+    with pytest.raises(ValueError, match="task stderr"):
+        _task3_validate_package(package, task_id=0)
+
+
+def test_task3_rejects_manifest_coverage_gap(tmp_path):
+    def mutate(path):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        path.write_text("\n".join(lines[1:]) + "\n", encoding="utf-8")
+
+    package = build_task3_package(tmp_path, manifest_mutator=mutate)
+    with pytest.raises(ValueError, match="manifest coverage"):
+        _task3_validate_package(package, task_id=0)
+
+
+def test_task3_rejects_checksum_mismatch(tmp_path):
+    def mutate(path):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        _, name = lines[0].split("  ", 1)
+        lines[0] = f"{'0' * 64}  {name}"
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    package = build_task3_package(tmp_path, manifest_mutator=mutate)
+    with pytest.raises(ValueError, match="checksum mismatch"):
+        _task3_validate_package(package, task_id=0)
+
+
+def test_task3_rejects_unsafe_tar_path(tmp_path):
+    package = build_task3_package(
+        tmp_path,
+        extra_members=[_task3_tar_member("../escape.txt")],
+    )
+    with pytest.raises(ValueError, match="unsafe tar path"):
+        _task3_validate_package(package, task_id=0)
+
+
+def test_task3_rejects_duplicate_tar_member(tmp_path):
+    package = build_task3_package(
+        tmp_path,
+        extra_members=[_task3_tar_member("logs/stdout.log", b"duplicate")],
+    )
+    with pytest.raises(ValueError, match="duplicate tar member"):
+        _task3_validate_package(package, task_id=0)
+
+
+@pytest.mark.parametrize(
+    ("member_type", "linkname"),
+    [
+        (tarfile.SYMTYPE, "logs/stdout.log"),
+        (tarfile.LNKTYPE, "logs/stdout.log"),
+        (tarfile.CHRTYPE, ""),
+    ],
+)
+def test_task3_rejects_links_and_devices(tmp_path, member_type, linkname):
+    package = build_task3_package(
+        tmp_path,
+        extra_members=[
+            _task3_tar_member(
+                "unsafe-member",
+                member_type=member_type,
+                linkname=linkname,
+            )
+        ],
+    )
+    with pytest.raises(ValueError, match="link or device"):
+        _task3_validate_package(package, task_id=0)
+
+
+def test_task3_rejects_checkpoint_leakage(tmp_path):
+    package = build_task3_package(
+        tmp_path,
+        extra_members=[_task3_tar_member("seed0/checkpoint/model.best_actor")],
+    )
+    with pytest.raises(ValueError, match="checkpoint artefact"):
+        _task3_validate_package(package, task_id=0)
+
+
+def test_task3_rejects_wrong_task_metadata(tmp_path):
+    def mutate(root):
+        path = root / "task_metadata" / "task.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["algorithm"] = "hierarchical"
+        _task3_write_json(path, payload)
+
+    package = build_task3_package(tmp_path, staging_mutator=mutate)
+    with pytest.raises(ValueError, match="task metadata"):
+        _task3_validate_package(package, task_id=0)
