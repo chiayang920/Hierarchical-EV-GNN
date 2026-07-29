@@ -107,7 +107,6 @@ validate_archive() {
   local archive="$1"
   local expected_root="$2"
   python - "${archive}" "${expected_root}" "${RECORDED_HEAD_SHA}" "${ALLOWLIST[@]}" <<'PY'
-import hashlib
 import sys
 import tarfile
 from pathlib import PurePosixPath
@@ -175,7 +174,7 @@ print_transfer_commands() {
 validate_allowlist
 
 if [[ "${EV_GNN_FULL_DIAGNOSTIC_SOURCE_DRY_RUN:-0}" == "1" ]]; then
-  RECORDED_HEAD_SHA="${SOURCE_EXPECTED_HEAD_SHA:-$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || printf "DRY_RUN_HEAD_UNKNOWN")}" 
+  RECORDED_HEAD_SHA="${SOURCE_EXPECTED_HEAD_SHA:-$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || printf "DRY_RUN_HEAD_UNKNOWN")}"
   set_archive_paths
   echo "FULL_INFRASTRUCTURE_DIAGNOSTIC_SOURCE_DRY_RUN"
   echo "repo_root=${REPO_ROOT}"
