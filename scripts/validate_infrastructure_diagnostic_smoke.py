@@ -25,6 +25,32 @@ SCHEMA_VERSION = "3"
 HEX_SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
 HEX_SHA1 = re.compile(r"^[0-9a-f]{40}$")
 
+SACCT_FIELDS = (
+    "JobIDRaw",
+    "JobID",
+    "JobName",
+    "State",
+    "ExitCode",
+    "ElapsedRaw",
+    "AllocCPUS",
+    "MaxRSS",
+    "TotalCPU",
+)
+
+RUNTIME_SUMMARY_FIELDS = (
+    "task_id",
+    "job_id_raw",
+    "job_id",
+    "state",
+    "exit_code",
+    "elapsed_raw",
+    "alloc_cpus",
+    "max_rss",
+    "total_cpu",
+    "maxrss_source",
+    "totalcpu_source",
+)
+
 TASKS = {
     0: {
         "task_id": 0,
@@ -1653,94 +1679,188 @@ def is_available_accounting_value(value):
     return str(value or "").strip() not in {"", "Unknown", "N/A", "None"}
 
 
+def validate_array_job_id(value):
+    cleaned = str(value)
+    if not re.fullmatch(r"[0-9]+", cleaned):
+        raise ValidationError(f"array job ID must contain digits only: {value!r}")
+    return cleaned
+
+
+def _validate_accounting_row_status(row):
+    job_id = row["JobID"]
+    if row["State"] != "COMPLETED":
+        raise ValidationError(
+            f"Slurm accounting task {job_id} must be COMPLETED, got {row['State']}"
+        )
+    if row["ExitCode"] != "0:0":
+        raise ValidationError(
+            f"Slurm accounting task {job_id} ExitCode must be 0:0, "
+            f"got {row['ExitCode']}"
+        )
+
+
+def _accounting_raw_base(row, step):
+    job_id_raw = row["JobIDRaw"]
+    if step == "parent":
+        if re.fullmatch(r"[0-9]+", job_id_raw):
+            return job_id_raw
+        if re.fullmatch(r"[0-9]+\.(?:batch|extern)", job_id_raw):
+            raise ValidationError(
+                f"parent JobIDRaw suffix must be absent: {job_id_raw}"
+            )
+        raise ValidationError(
+            f"parent JobIDRaw must contain digits only: {job_id_raw}"
+        )
+
+    suffix = f".{step}"
+    match = re.fullmatch(rf"([0-9]+){re.escape(suffix)}", job_id_raw)
+    if match is None:
+        raise ValidationError(
+            f"{step} JobIDRaw suffix must be {suffix}: {job_id_raw}"
+        )
+    if row["JobName"] != step:
+        raise ValidationError(
+            f"{step} JobName must be {step}: {row['JobName']}"
+        )
+    return match.group(1)
+
+
 def parse_sacct_raw(raw_text, array_job_id):
+    array_job_id = validate_array_job_id(array_job_id)
     parents = {}
     batches = {}
-    for line in raw_text.splitlines():
-        stripped = line.strip()
-        if not stripped:
+    externs = {}
+    parent_raw_ids = {}
+
+    for line_number, line in enumerate(raw_text.splitlines(), start=1):
+        if not line.strip():
             continue
-        if stripped.startswith("JobIDRaw|"):
+        cells = line.split("|")
+        if len(cells) != len(SACCT_FIELDS):
+            raise ValidationError(
+                f"sacct row {line_number} must contain exactly "
+                f"{len(SACCT_FIELDS)} fields, got {len(cells)}"
+            )
+        if cells[0] == "JobIDRaw":
+            raise ValidationError(
+                "sacct header rows are not allowed with --noheader"
+            )
+        row = dict(zip(SACCT_FIELDS, cells))
+
+        if row["JobIDRaw"] == array_job_id and row["JobID"] == array_job_id:
             continue
-        cells = stripped.split("|")
-        if len(cells) < 7:
-            raise ValidationError(f"invalid sacct row: {line!r}")
-        row = {
-            "JobIDRaw": cells[0],
-            "State": cells[1],
-            "ExitCode": cells[2],
-            "ElapsedRaw": cells[3],
-            "AllocCPUS": cells[4],
-            "MaxRSS": cells[5],
-            "TotalCPU": cells[6],
-        }
-        parent_match = re.fullmatch(rf"{re.escape(str(array_job_id))}_([0-9]+)", row["JobIDRaw"])
-        batch_match = re.fullmatch(rf"{re.escape(str(array_job_id))}_([0-9]+)\.batch", row["JobIDRaw"])
-        if parent_match:
-            task_id = int(parent_match.group(1))
-            if task_id not in TASKS:
-                raise ValidationError(f"unexpected accounting task identity: {row['JobIDRaw']}")
+
+        identity = re.fullmatch(
+            rf"{re.escape(array_job_id)}_([0-9]+)(?:\.(batch|extern))?",
+            row["JobID"],
+        )
+        if identity is None:
+            raise ValidationError(
+                f"unexpected accounting JobID: {row['JobID']}"
+            )
+        task_id = int(identity.group(1))
+        if task_id not in TASKS:
+            raise ValidationError(
+                f"unexpected accounting task ID: {task_id}"
+            )
+        step = identity.group(2) or "parent"
+        raw_base = _accounting_raw_base(row, step)
+        row["_raw_base"] = raw_base
+
+        if step == "parent":
             if task_id in parents:
-                raise ValidationError(f"duplicate or contradictory accounting row for {row['JobIDRaw']}")
+                raise ValidationError(
+                    f"duplicate parent accounting row for task {task_id}"
+                )
+            previous_task = parent_raw_ids.get(raw_base)
+            if previous_task is not None:
+                raise ValidationError(
+                    "duplicate numeric parent JobIDRaw "
+                    f"{raw_base} for tasks {previous_task} and {task_id}"
+                )
+            parent_raw_ids[raw_base] = task_id
             parents[task_id] = row
-            continue
-        if batch_match:
-            task_id = int(batch_match.group(1))
-            if task_id not in TASKS:
-                raise ValidationError(f"unexpected accounting batch task identity: {row['JobIDRaw']}")
+        elif step == "batch":
             if task_id in batches:
-                raise ValidationError(f"duplicate or contradictory accounting row for {row['JobIDRaw']}")
+                raise ValidationError(
+                    f"duplicate batch accounting row for task {task_id}"
+                )
             batches[task_id] = row
+        else:
+            if task_id in externs:
+                raise ValidationError(
+                    f"duplicate extern accounting row for task {task_id}"
+                )
+            externs[task_id] = row
 
     missing = sorted(set(TASKS) - set(parents))
     if missing:
-        raise ValidationError(f"required accounting unavailable for task(s): {missing}")
+        raise ValidationError(
+            f"required accounting unavailable for task(s): {missing}"
+        )
+
+    for records in (parents, batches, externs):
+        for row in records.values():
+            _validate_accounting_row_status(row)
+
+    for task_id, parent in parents.items():
+        parent_base = parent["_raw_base"]
+        for step, records in (("batch", batches), ("extern", externs)):
+            row = records.get(task_id)
+            if row is not None and row["_raw_base"] != parent_base:
+                raise ValidationError(
+                    f"{step} raw ID base mismatch for Slurm task "
+                    f"{array_job_id}_{task_id}: {row['_raw_base']} != {parent_base}"
+                )
 
     runtime_rows = []
     for task_id in sorted(TASKS):
         parent = parents[task_id]
-        if parent["State"] != "COMPLETED":
+        task_job_id = parent["JobID"]
+        if not is_available_accounting_value(parent["ElapsedRaw"]):
             raise ValidationError(
-                f"Slurm accounting task {array_job_id}_{task_id} must be COMPLETED, got {parent['State']}"
+                f"ElapsedRaw unavailable for Slurm task {task_job_id}"
             )
-        if parent["ExitCode"] != "0:0":
+        if not is_available_accounting_value(parent["AllocCPUS"]):
             raise ValidationError(
-                f"Slurm accounting task {array_job_id}_{task_id} ExitCode must be 0:0, got {parent['ExitCode']}"
+                f"AllocCPUS unavailable for Slurm task {task_job_id}"
             )
-        batch = batches.get(task_id, {})
-        maxrss_source = "parent"
-        totalcpu_source = "parent"
+
+        batch = batches.get(task_id)
         maxrss = parent["MaxRSS"]
         totalcpu = parent["TotalCPU"]
-        needs_batch_resource = (
+        maxrss_source = "parent"
+        totalcpu_source = "parent"
+
+        if (
             not is_available_accounting_value(maxrss)
             or not is_available_accounting_value(totalcpu)
-        )
-        if needs_batch_resource:
-            if not batch:
-                raise ValidationError(f"required .batch accounting unavailable for Slurm task {array_job_id}_{task_id}")
-            if batch.get("State") != "COMPLETED":
-                raise ValidationError(
-                    f"Slurm accounting task {array_job_id}_{task_id}.batch must be COMPLETED, got {batch.get('State')}"
-                )
-            if batch.get("ExitCode") != "0:0":
-                raise ValidationError(
-                    f"Slurm accounting task {array_job_id}_{task_id}.batch ExitCode must be 0:0, got {batch.get('ExitCode')}"
-                )
+        ) and batch is None:
+            raise ValidationError(
+                "required .batch accounting unavailable for Slurm task "
+                f"{task_job_id}"
+            )
+
         if not is_available_accounting_value(maxrss):
-            maxrss = batch.get("MaxRSS", "")
+            maxrss = batch["MaxRSS"]
             maxrss_source = "batch"
         if not is_available_accounting_value(totalcpu):
-            totalcpu = batch.get("TotalCPU", "")
+            totalcpu = batch["TotalCPU"]
             totalcpu_source = "batch"
         if not is_available_accounting_value(maxrss):
-            raise ValidationError(f"MaxRSS unavailable for Slurm task {array_job_id}_{task_id}")
+            raise ValidationError(
+                f"MaxRSS unavailable for Slurm task {task_job_id}"
+            )
         if not is_available_accounting_value(totalcpu):
-            raise ValidationError(f"TotalCPU unavailable for Slurm task {array_job_id}_{task_id}")
+            raise ValidationError(
+                f"TotalCPU unavailable for Slurm task {task_job_id}"
+            )
+
         runtime_rows.append(
             {
                 "task_id": task_id,
                 "job_id_raw": parent["JobIDRaw"],
+                "job_id": parent["JobID"],
                 "state": parent["State"],
                 "exit_code": parent["ExitCode"],
                 "elapsed_raw": parent["ElapsedRaw"],
@@ -1755,6 +1875,7 @@ def parse_sacct_raw(raw_text, array_job_id):
 
 
 def collect_sacct_raw(args):
+    array_job_id = validate_array_job_id(args.array_job_id)
     if getattr(args, "sacct_raw_file", None):
         return Path(args.sacct_raw_file).read_text(encoding="utf-8")
 
@@ -1764,10 +1885,10 @@ def collect_sacct_raw(args):
     command = [
         str(args.sacct_command),
         "-j",
-        str(args.array_job_id),
+        array_job_id,
         "--parsable2",
         "--noheader",
-        "--format=JobIDRaw,State,ExitCode,ElapsedRaw,AllocCPUS,MaxRSS,TotalCPU",
+        "--format=" + ",".join(SACCT_FIELDS),
     ]
     for attempt in range(1, attempts + 1):
         completed = subprocess.run(
@@ -1779,18 +1900,21 @@ def collect_sacct_raw(args):
         )
         if completed.returncode != 0:
             last_error = ValidationError(
-                f"sacct command failed on attempt {attempt}: {completed.stderr.strip()}"
+                f"sacct command failed on attempt {attempt}: "
+                f"{completed.stderr.strip()}"
             )
         else:
             raw_text = completed.stdout
             try:
-                parse_sacct_raw(raw_text, args.array_job_id)
+                parse_sacct_raw(raw_text, array_job_id)
                 return raw_text
             except ValidationError as exc:
                 last_error = exc
         if attempt < attempts:
             time.sleep(float(args.sacct_delay_seconds))
-    raise ValidationError(f"Slurm accounting unavailable after {attempts} attempt(s): {last_error}")
+    raise ValidationError(
+        f"Slurm accounting unavailable after {attempts} attempt(s): {last_error}"
+    )
 
 
 def validate_expected_paths(paths, expected_paths, label):
@@ -2224,7 +2348,14 @@ def validate_complete_bundle_cross_references(extract_root, task_packages, stdou
         for field, expected in packaged[task_id]["source"].items():
             require_row_value(row, field, expected, "source provenance summary")
 
-    runtime_rows, _ = read_rows(extract_root / "summaries/runtime_summary.csv")
+    runtime_rows, runtime_fieldnames = read_rows(
+        extract_root / "summaries/runtime_summary.csv"
+    )
+    if runtime_fieldnames != list(RUNTIME_SUMMARY_FIELDS):
+        raise ValidationError(
+            "runtime_summary.csv header mismatch: "
+            f"{runtime_fieldnames} != {list(RUNTIME_SUMMARY_FIELDS)}"
+        )
     runtime_by_task = require_task_indexed_rows(runtime_rows, "runtime_summary")
     sacct_raw = (extract_root / "runtime_metadata/sacct_raw.txt").read_text(encoding="utf-8")
     parsed_runtime_by_task = {
@@ -2234,6 +2365,7 @@ def validate_complete_bundle_cross_references(extract_root, task_packages, stdou
     for task_id, row in runtime_by_task.items():
         for field in [
             "job_id_raw",
+            "job_id",
             "state",
             "exit_code",
             "elapsed_raw",
@@ -2370,7 +2502,7 @@ def final_complete_bundle_path(output_root, array_job_id):
 
 
 def reduce_bundle(args):
-    array_job_id = str(args.array_job_id)
+    array_job_id = validate_array_job_id(args.array_job_id)
     expected_source_commit = str(args.source_commit_sha).strip()
     output_root = Path(args.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -2474,18 +2606,7 @@ def reduce_bundle(args):
     )
     write_csv_rows(
         staging_root / "summaries/runtime_summary.csv",
-        [
-            "task_id",
-            "job_id_raw",
-            "state",
-            "exit_code",
-            "elapsed_raw",
-            "alloc_cpus",
-            "max_rss",
-            "total_cpu",
-            "maxrss_source",
-            "totalcpu_source",
-        ],
+        RUNTIME_SUMMARY_FIELDS,
         runtime_rows,
     )
     write_csv_rows(

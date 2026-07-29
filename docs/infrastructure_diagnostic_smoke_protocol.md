@@ -106,7 +106,15 @@ Then the helper submits the array job and the reducer job with `afterok:<array_j
 
 ## Monitoring
 
-Use the printed `squeue` command while jobs are active. Use the printed `sacct` command after completion to inspect `JobIDRaw`, `State`, `ExitCode`, `ElapsedRaw`, `AllocCPUS`, `MaxRSS`, and `TotalCPU`.
+Use the printed `squeue` command while jobs are active. The array job ID printed by the current submit-helper invocation is the explicit array identity for all subsequent monitoring, accounting, reducer recovery, filenames, and provenance checks.
+
+Use this exact accounting command after completion:
+
+```bash
+sacct -j <explicit_array_job_id> --parsable2 --noheader --format=JobIDRaw,JobID,JobName,State,ExitCode,ElapsedRaw,AllocCPUS,MaxRSS,TotalCPU
+```
+
+Do not use the latest job, job-name searches, `squeue` discovery, or an unscoped `sacct` query to select a different array. If accounting records are delayed, wait and rerun the reducer against the same array job ID. Manual reducer recovery must reuse that same explicit numeric array job ID; changing the ID invalidates the evidence provenance.
 
 The reducer retries boundedly because accounting records may be delayed.
 
