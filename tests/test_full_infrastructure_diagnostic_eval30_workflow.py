@@ -3523,6 +3523,127 @@ def test_task5_complete_workflow_accepts_synthetic_8_task_packages(tmp_path):
     assert bundle.with_name(bundle.name + ".sha256").is_file()
 
 
+def test_reducer_emits_all_three_reconciliation_summaries(tmp_path):
+    fixture = create_task5_reducer_fixture(tmp_path)
+    result = run_task5_reducer(fixture)
+    payload = json.loads(result.stdout)
+    bundle = Path(payload["bundle_path"])
+
+    with tarfile.open(bundle, "r:gz") as archive:
+        names = {member.name for member in archive.getmembers() if member.isfile()}
+
+    assert "summaries/same_pass_canonical_reconciliation_summary.csv" in names
+    assert "summaries/historical_canonical_drift_summary.csv" in names
+    assert "summaries/reconciliation_summary_inventory.csv" in names
+
+    extract_dir = tmp_path / "bundle_extract"
+    with tarfile.open(bundle, "r:gz") as archive:
+        archive.extractall(extract_dir)
+    _, same_pass_rows = read_csv_rows(
+        extract_dir / "summaries" / "same_pass_canonical_reconciliation_summary.csv"
+    )
+    _, drift_rows = read_csv_rows(
+        extract_dir / "summaries" / "historical_canonical_drift_summary.csv"
+    )
+    _, inventory_rows = read_csv_rows(
+        extract_dir / "summaries" / "reconciliation_summary_inventory.csv"
+    )
+
+    assert len(inventory_rows) == 40
+    assert {row["reconciliation_contract_version"] for row in inventory_rows} == {"2"}
+    assert same_pass_rows
+    assert drift_rows
+
+
+def test_complete_bundle_validation_requires_reconciliation_summaries(tmp_path):
+    fixture = create_task5_reducer_fixture(tmp_path)
+    result = run_task5_reducer(fixture)
+    bundle = Path(json.loads(result.stdout)["bundle_path"])
+    broken = tmp_path / "broken_bundle.tar.gz"
+    with tarfile.open(bundle, "r:gz") as source, tarfile.open(broken, "w:gz") as target:
+        for member in source.getmembers():
+            if member.name == "summaries/historical_canonical_drift_summary.csv":
+                continue
+            payload = source.extractfile(member).read() if member.isfile() else None
+            target.addfile(member, None if payload is None else io.BytesIO(payload))
+
+    result = run_full_validator("validate-complete-bundle", "--bundle", broken, check=False)
+
+    assert result.returncode != 0
+    assert "historical_canonical_drift_summary" in result.stderr
+
+
+def rewrite_bundle_csv_member(source_bundle, target_bundle, member_name, row_mutator):
+    with tarfile.open(source_bundle, "r:gz") as source, tarfile.open(target_bundle, "w:gz") as target:
+        for member in source.getmembers():
+            if not member.isfile():
+                target.addfile(member)
+                continue
+            payload = source.extractfile(member).read()
+            if member.name == member_name:
+                text = payload.decode("utf-8")
+                reader = csv.DictReader(io.StringIO(text))
+                fieldnames = list(reader.fieldnames or [])
+                rows = list(reader)
+                row_mutator(fieldnames, rows)
+                buffer = io.StringIO()
+                writer = csv.DictWriter(buffer, fieldnames=fieldnames, lineterminator="\n")
+                writer.writeheader()
+                writer.writerows(rows)
+                payload = buffer.getvalue().encode("utf-8")
+                member = tarfile.TarInfo(member.name)
+                member.size = len(payload)
+            target.addfile(member, io.BytesIO(payload))
+
+
+@pytest.mark.parametrize(
+    ("member_name", "row_mutator", "expected_error"),
+    [
+        (
+            "summaries/same_pass_canonical_reconciliation_summary.csv",
+            lambda _fields, rows: rows.pop(),
+            "same-pass reconciliation summary row count",
+        ),
+        (
+            "summaries/historical_canonical_drift_summary.csv",
+            lambda _fields, rows: rows.append(dict(rows[-1])),
+            "duplicate historical drift summary key",
+        ),
+        (
+            "summaries/reconciliation_summary_inventory.csv",
+            lambda _fields, rows: rows[0].update({"reconciliation_contract_version": "1"}),
+            "reconciliation contract version",
+        ),
+        (
+            "summaries/reconciliation_summary_inventory.csv",
+            lambda _fields, rows: rows[0].update({"same_pass_reconciliation_rows": "1"}),
+            "inventory count mismatch",
+        ),
+        (
+            "summaries/reconciliation_summary_inventory.csv",
+            lambda _fields, rows: rows[0].update({"stage_d_source_commit_sha": "b" * 40}),
+            "Stage D source commit mismatch",
+        ),
+    ],
+)
+def test_complete_bundle_validation_rejects_corrupt_reconciliation_summaries(
+    tmp_path,
+    member_name,
+    row_mutator,
+    expected_error,
+):
+    fixture = create_task5_reducer_fixture(tmp_path)
+    result = run_task5_reducer(fixture)
+    bundle = Path(json.loads(result.stdout)["bundle_path"])
+    broken = tmp_path / f"broken_{Path(member_name).name}.tar.gz"
+    rewrite_bundle_csv_member(bundle, broken, member_name, row_mutator)
+
+    result = run_full_validator("validate-complete-bundle", "--bundle", broken, check=False)
+
+    assert result.returncode != 0
+    assert expected_error in result.stderr
+
+
 def test_task5_complete_workflow_rejects_wrong_sidecar(tmp_path):
     fixture = create_task5_reducer_fixture(tmp_path)
     sidecar = next(fixture["package_root"].glob("*.sha256"))
