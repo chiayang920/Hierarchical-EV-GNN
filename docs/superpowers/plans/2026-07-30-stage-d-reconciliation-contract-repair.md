@@ -4,7 +4,7 @@
 
 **Goal:** Repair the Stage D reconciliation contract so fresh schema-v3 diagnostics are the authoritative Stage D metrics, same-pass canonical rows are generated from the same policy execution, historical formal eval30 remains immutable provenance and audit input, and no failed job `58656380` output is reused as scientific evidence.
 
-**Architecture:** The diagnostic evaluator will retain the mapped-action stream from each episode and write a canonical-compatible same-pass CSV through the existing canonical helpers in `evaluate_td3_gnn.py`. The validator will split reconciliation into exact same-pass hard gates, exact historical identity hard gates, and historical floating/saturation drift audit rows, then atomically write all evidence before raising any post-read hard-gate failure. Package, reducer, Slurm, source-bundle, and submit-helper contracts will be migrated to require reconciliation contract version `2` while preserving diagnostic schema version `3` and the exact `8/40/1200` workload.
+**Architecture:** The diagnostic evaluator will retain the mapped-action stream from each episode, compute the three overlapping action metrics exactly once with the canonical float32 helper path, inject those identical Python values into both the same-pass canonical record and the schema-v3 diagnostic action summary before CSV serialization, and write a canonical-compatible same-pass CSV through the existing canonical helpers in `evaluate_td3_gnn.py`. The validator will split reconciliation into exact same-pass hard gates, exact historical identity/provenance hard gates, and historical floating/saturation drift audit rows, then atomically write all evidence before raising any post-read hard-gate failure. Package, reducer, Slurm, source-bundle, and submit-helper contracts will be migrated to require reconciliation contract version `2` while preserving diagnostic schema version `3` and the exact `8/40/1200` workload.
 
 **Tech Stack:** Python 3.11, pytest, NumPy, PyYAML, CSV/JSON standard libraries, tarfile, hashlib, Bash 3.2-compatible shell, Slurm dry-run scripts, existing TD3 EV-GNN evaluator helpers.
 
@@ -24,6 +24,7 @@
 - Add exact `reconciliation_contract_version=2`.
 - Do not tune tolerances to job `58656380`; the repair removes the incorrect historical floating hard gate.
 - Same-pass metric disagreement is a hard failure with `failure_category=same_pass_metric_mismatch`.
+- Same-pass overlapping action metrics are computed once and injected into both outputs before serialization; `utils.infrastructure_diagnostics.aggregate_infrastructure_actions()` may still compute infrastructure-specific values, but it must not independently define the three overlapping fields that are hard-compared to the same-pass canonical CSV.
 - Historical floating and historical saturation differences are mandatory audit evidence only.
 - Missing or malformed required inputs fail before complete evidence fabrication with `input_contract_mismatch`; the all-evidence-write guarantee begins only after historical canonical, same-pass canonical, and diagnostic inputs are readable and schema-readable.
 - Use synthetic CSV/package fixtures for local tests. No local test may invoke `sbatch`, `sacct` without a fixture file, network access, retraining, or heavy ML evaluation.
@@ -33,7 +34,7 @@
 ## Current File Map
 
 - `evaluate_td3_gnn.py:19-43` defines canonical action and required CSV columns. `evaluate_td3_gnn.py:140-163` defines `action_diagnostics_from_actions()`, `evaluate_td3_gnn.py:209-214` defines `scalar_stats()`, and `evaluate_td3_gnn.py:217-272` defines `build_csv_rows()`. These are the only canonical formulas the diagnostic evaluator may use.
-- `evaluate_td3_gnn_infrastructure_diagnostics.py:8-36` imports evaluator and diagnostic helpers. `evaluate_td3_gnn_infrastructure_diagnostics.py:83-148` runs one diagnostic episode and currently discards the mapped-action stream after building `action_summary`. `evaluate_td3_gnn_infrastructure_diagnostics.py:243-342` runs the eval loop and writes the four schema-v3 diagnostic CSVs.
+- `evaluate_td3_gnn_infrastructure_diagnostics.py:8-36` imports evaluator and diagnostic helpers. `evaluate_td3_gnn_infrastructure_diagnostics.py:83-148` runs one diagnostic episode and currently discards the mapped-action stream after building `action_summary`. `evaluate_td3_gnn_infrastructure_diagnostics.py:243-342` runs the eval loop and writes the four schema-v3 diagnostic CSVs. `evaluate_td3_gnn_infrastructure_diagnostics.py:303-311` calls `build_episode_row()`, which reads overlapping diagnostic action fields from `action_summary["global"]`.
 - `utils/infrastructure_diagnostics.py:6-222` freezes `DIAGNOSTIC_SCHEMA_VERSION = "3"` and all schema-v3 diagnostic headers. `utils/infrastructure_diagnostics.py:485-583` aggregates per-infrastructure action summaries. `utils/infrastructure_diagnostics.py:585-705` builds each schema-v3 episode row. `utils/infrastructure_diagnostics.py:1229-1364` computes global action summaries.
 - `scripts/validate_full_infrastructure_diagnostic_eval30.py:29-83` defines Stage D seed schedule and task mapping. `scripts/validate_full_infrastructure_diagnostic_eval30.py:157-180` currently defines the incorrect historical canonical-vs-diagnostic floating hard gate. `scripts/validate_full_infrastructure_diagnostic_eval30.py:437-584` validates seed output directories. `scripts/validate_full_infrastructure_diagnostic_eval30.py:605-614` defines seed package members. `scripts/validate_full_infrastructure_diagnostic_eval30.py:1443-1553` builds service reconciliation rows but raises before callers can write evidence. `scripts/validate_full_infrastructure_diagnostic_eval30.py:1619-1778` prepares seed validation and currently raises before writing `validation/canonical_reconciliation.csv` on canonical mismatch. `scripts/validate_full_infrastructure_diagnostic_eval30.py:2301-2343` extracts task package details for reduction. `scripts/validate_full_infrastructure_diagnostic_eval30.py:2470-2724` builds the complete bundle.
 - `m3_jobs/21_full_infrastructure_diagnostic_eval30.slurm:126-158` is the array dry-run. `m3_jobs/21_full_infrastructure_diagnostic_eval30.slurm:242-313` validates formal inputs, runs the evaluator, and calls `prepare-seed-validation`.
@@ -47,10 +48,11 @@
 All names in this section are exact and must be used consistently.
 
 - In `evaluate_td3_gnn_infrastructure_diagnostics.py`:
-  - `mapped_action_count_stats(mapped_actions_by_step: list[np.ndarray], max_action: float, tolerance: float) -> dict[str, int]`
-  - `build_same_pass_canonical_episode_record(episode_record: dict[str, object], mapped_actions_by_step: list[np.ndarray], max_action: float, max_action_tolerance: float) -> dict[str, object]`
+  - `canonical_overlapping_action_metrics(mapped_actions_by_step: list[np.ndarray], max_action: float, tolerance: float) -> dict[str, float | int]`
+  - `build_same_pass_canonical_episode_record(episode_record: dict[str, object], overlapping_action_metrics: dict[str, float | int]) -> dict[str, object]`
+  - `inject_canonical_overlapping_action_metrics(action_summary: dict[str, object], overlapping_metrics: dict[str, float | int]) -> None`
   - `write_same_pass_canonical_eval30(output_dir: Path, metadata: dict[str, object], episode_records: list[dict[str, object]]) -> Path`
-  - `evaluate_diagnostic_episode(...) -> dict[str, object]` will keep its current parameters and add these return keys: `mapped_actions_by_step`, `mapped_action_dimension`, and `same_pass_canonical_episode_record`.
+  - `evaluate_diagnostic_episode(policy, env, seed, max_action, max_action_tolerance, max_episode_steps=None, deterministic=True, eval_expl_noise=0.0) -> dict[str, object]` will keep its current parameters and add these return keys: `mapped_actions_by_step`, `mapped_action_dimension`, `same_pass_overlapping_action_metrics`, and `same_pass_canonical_episode_record`.
 - In `scripts/validate_full_infrastructure_diagnostic_eval30.py`:
   - `RECONCILIATION_CONTRACT_VERSION: Final[int] = 2`
   - `SAME_PASS_CANONICAL_FILENAME: Final[str] = "same_pass_canonical_eval30.csv"`
@@ -62,15 +64,17 @@ All names in this section are exact and must be used consistently.
   - `SAME_PASS_FIELD_MAP: Final[tuple[tuple[str, str, str], ...]]`
   - `HISTORICAL_IDENTITY_FIELDS: Final[tuple[tuple[str, str, str, str], ...]]`
   - `HISTORICAL_FLOAT_FIELDS: Final[tuple[tuple[str, str], ...]]`
+  - `PROVENANCE_IDENTITY_FIELDS: Final[tuple[str, ...]]`
   - `SATURATION_RECONSTRUCTION_RESIDUAL_LIMIT: Final[Decimal] = Decimal("1e-9")`
   - `SeedReconciliationInputs` dataclass with fields `diagnostic_rows`, `transformer_rows`, `charger_rows`, `historical_canonical_rows`, `same_pass_canonical_rows`, `formal_validation`, `scale`, `algorithm`, `task_id`, `training_seed`, `stage_d_source_commit_sha`, `config_path`, and `checkpoint_prefix`.
-  - `load_seed_reconciliation_inputs(...) -> SeedReconciliationInputs`
+  - `load_seed_reconciliation_inputs(*, diagnostic_dir: Path, historical_canonical_csv: Path, validation_dir: Path, task_id: int, training_seed: int, require_historical: bool = True, formal_validation_json: Path | None = None, stage_d_source_commit_sha: str = "", config_path: Path | None = None, checkpoint_prefix: Path | None = None) -> SeedReconciliationInputs`
   - `build_same_pass_reconciliation_rows(inputs: SeedReconciliationInputs) -> list[dict[str, object]]`
+  - `build_historical_provenance_identity_rows(inputs: SeedReconciliationInputs) -> list[dict[str, object]]`
   - `build_historical_canonical_drift_rows(inputs: SeedReconciliationInputs) -> list[dict[str, object]]`
   - `build_service_reconciliation_rows(episode_rows: list[dict[str, str]], transformer_rows: list[dict[str, str]], charger_rows: list[dict[str, str]]) -> list[dict[str, object]]`
   - `evaluate_service_reconciliation_rows(rows: list[dict[str, object]]) -> int`
   - `build_mapping_validation_payload(inputs: SeedReconciliationInputs, transformer_rows: list[dict[str, str]], charger_rows: list[dict[str, str]]) -> dict[str, object]`
-  - `build_reconciliation_summary_payload(...) -> dict[str, object]`
+  - `build_reconciliation_summary_payload(*, inputs: SeedReconciliationInputs, same_pass_rows: list[dict[str, object]], historical_rows: list[dict[str, object]], service_rows: list[dict[str, object]], mapping_payload: dict[str, object]) -> dict[str, object]`
   - `atomic_write_text(path: Path, text: str) -> None`
   - `atomic_write_csv_rows(path: Path, fieldnames: list[str] | tuple[str, ...], rows: list[dict[str, object]]) -> None`
   - `atomic_write_json(path: Path, payload: dict[str, object]) -> None`
@@ -98,11 +102,13 @@ SAME_PASS_FIELD_MAP: Final[tuple[tuple[str, str, str], ...]] = (
 )
 ```
 
-Same-pass `float_exact` means both values parse as finite Python floats and `canonical_float == diagnostic_float`. This is deterministic, not configurable, and is valid because the values are generated from one in-memory execution. Same-pass `fraction_count_exact` also requires exact reconstructed count equality using `same_pass_at_max_count`, `diagnostic_count`, and `total_action_decision_denominator`; disagreement sets `failure_category=same_pass_metric_mismatch`.
+Same-pass `float_exact` means both values parse as finite Python floats and `canonical_float == diagnostic_float`. This is deterministic, not configurable, and is valid for overlapping action fields because `action_mean`, `action_fraction_at_max`, and `active_action_count_mean` are generated once by `canonical_overlapping_action_metrics()` and injected into both output row builders before either CSV is serialized. Same-pass `fraction_count_exact` also requires exact reconstructed count equality using `same_pass_at_max_count`, `diagnostic_count`, and `total_action_decision_denominator`; disagreement sets `failure_category=same_pass_metric_mismatch`.
 
 ## Frozen Historical Contracts
 
-`HISTORICAL_IDENTITY_FIELDS` must hard-gate exact identity for `algorithm`, `seed` to `training_seed`, `episode_index`, `episode_seed`, `episode_steps`, `done`, and `total_ev_served`. Checkpoint/config provenance must also hard-gate exact SHA-256 equality between the staged config/checkpoint files and `runtime_metadata/formal_package_validation.json`. The formal job ID must be exactly `"58513929"`. The Stage D source commit must be exact 40 lowercase hex and must match the source commit recorded in seed reconciliation summary, task package metadata, and reducer expectation.
+`HISTORICAL_IDENTITY_FIELDS` must hard-gate exact identity for `algorithm`, `seed` to `training_seed`, `episode_index`, `episode_seed`, `episode_steps`, `done`, and `total_ev_served`. Historical identity rows may only use `historical_identity_match` or `historical_identity_mismatch`; malformed required identity values are input-contract failures before evidence-read completion or hard identity failures after evidence-read completion, never audit-only `not_comparable`.
+
+`PROVENANCE_IDENTITY_FIELDS` must append blank-episode rows to `validation/historical_canonical_drift.csv` for exact provenance identity: `formal_job_id`, `task_id`, `formal_task_id`, `scale`, `algorithm`, `training_seed`, `stage_d_source_commit_sha`, `config_sha256`, and every required `checkpoint_member_sha256:<basename>` for `model.best_actor`, `model.best_actor_optimizer`, `model.best_critic`, `model.best_critic_optimizer`, and `kwargs.yaml`. Checkpoint/config provenance must hard-gate exact SHA-256 equality between the staged config/checkpoint files and `runtime_metadata/formal_package_validation.json`. The formal job ID must be exactly `"58513929"`. The Stage D source commit must be exact 40 lowercase hex and must match the source commit recorded in seed validation input, task package metadata, complete-bundle validation, and reducer expectation.
 
 `HISTORICAL_FLOAT_FIELDS` must audit, never hard-gate, these fields:
 
@@ -121,9 +127,25 @@ HISTORICAL_FLOAT_FIELDS: Final[tuple[tuple[str, str], ...]] = (
     ("action_fraction_at_max", "action_fraction_at_max"),
     ("active_action_count_mean", "active_action_count_mean"),
 )
+
+PROVENANCE_IDENTITY_FIELDS: Final[tuple[str, ...]] = (
+    "formal_job_id",
+    "task_id",
+    "formal_task_id",
+    "scale",
+    "algorithm",
+    "training_seed",
+    "stage_d_source_commit_sha",
+    "config_sha256",
+    "checkpoint_member_sha256:model.best_actor",
+    "checkpoint_member_sha256:model.best_actor_optimizer",
+    "checkpoint_member_sha256:model.best_critic",
+    "checkpoint_member_sha256:model.best_critic_optimizer",
+    "checkpoint_member_sha256:kwargs.yaml",
+)
 ```
 
-Allowed drift classifications are exactly `exact_match`, `historical_float_drift`, `historical_saturation_count_drift`, `historical_identity_match`, `historical_identity_mismatch`, and `not_comparable`.
+Allowed drift classifications are exactly `exact_match`, `historical_float_drift`, `historical_saturation_count_drift`, `historical_identity_match`, `historical_identity_mismatch`, and `not_comparable`. `not_comparable` is allowed only for audit-only historical floating and saturation rows.
 
 ## Task 1: Same-Pass Canonical Episode Record And CSV Generation
 
@@ -133,7 +155,7 @@ Allowed drift classifications are exactly `exact_match`, `historical_float_drift
 
 **Interfaces:**
 - Consumes: `evaluate_td3_gnn.action_diagnostics_from_actions(mapped_actions, max_action, tolerance=1e-6)` from `evaluate_td3_gnn.py:140-163`, `evaluate_td3_gnn.scalar_stats(stats)` from `evaluate_td3_gnn.py:209-214`, and `evaluate_td3_gnn.build_csv_rows(metadata, episode_records)` from `evaluate_td3_gnn.py:217-272`.
-- Produces: `mapped_action_count_stats()`, `build_same_pass_canonical_episode_record()`, `write_same_pass_canonical_eval30()`, and new `evaluate_diagnostic_episode()` return keys `mapped_actions_by_step`, `mapped_action_dimension`, `same_pass_canonical_episode_record`.
+- Produces: `canonical_overlapping_action_metrics()`, `inject_canonical_overlapping_action_metrics()`, `build_same_pass_canonical_episode_record()`, `write_same_pass_canonical_eval30()`, and new `evaluate_diagnostic_episode()` return keys `mapped_actions_by_step`, `mapped_action_dimension`, `same_pass_overlapping_action_metrics`, `same_pass_canonical_episode_record`.
 
 - [ ] **Step 1: Write the failing same-pass episode-record tests**
 
@@ -188,7 +210,7 @@ class SequenceActionPolicy:
 
 
 def test_diagnostic_episode_returns_same_pass_canonical_record_from_one_mapped_action_stream():
-    from evaluate_td3_gnn import action_diagnostics_from_actions
+    from evaluate_td3_gnn_infrastructure_diagnostics import canonical_overlapping_action_metrics
     from evaluate_td3_gnn_infrastructure_diagnostics import evaluate_diagnostic_episode
 
     mapped_actions = [
@@ -213,9 +235,80 @@ def test_diagnostic_episode_returns_same_pass_canonical_record_from_one_mapped_a
     assert same_pass["stats"]["mapped_action_dimension"] == 2
     assert same_pass["stats"]["same_pass_at_max_count"] == 2
     assert same_pass["stats"]["total_action_decision_denominator"] == 4
-    assert same_pass["action_fraction_at_max"] == pytest.approx(
-        action_diagnostics_from_actions(mapped_actions, max_action=1.0, tolerance=1e-6)["action_fraction_at_max"]
+    expected_metrics = canonical_overlapping_action_metrics(mapped_actions, max_action=1.0, tolerance=1e-6)
+    assert episode["same_pass_overlapping_action_metrics"] == expected_metrics
+    assert same_pass["action_mean"] == expected_metrics["action_mean"]
+    assert same_pass["action_fraction_at_max"] == expected_metrics["action_fraction_at_max"]
+    assert same_pass["active_action_count_mean"] == expected_metrics["active_action_count_mean"]
+    assert episode["action_summary"]["global"]["action_mean_all_slots"] == expected_metrics["action_mean"]
+    assert episode["action_summary"]["global"]["action_fraction_at_max_all_slots"] == expected_metrics["action_fraction_at_max"]
+    assert episode["action_summary"]["global"]["nonzero_action_count_mean_all_slots"] == expected_metrics["active_action_count_mean"]
+
+
+def test_overlapping_action_metrics_are_identical_after_same_pass_and_diagnostic_csv_roundtrip(tmp_path):
+    import csv
+    from evaluate_td3_gnn_infrastructure_diagnostics import evaluate_diagnostic_episode
+    from evaluate_td3_gnn_infrastructure_diagnostics import write_csv, write_same_pass_canonical_eval30
+    from utils.infrastructure_diagnostics import EPISODE_DIAGNOSTIC_COLUMNS, build_episode_row
+
+    mapped_actions = [
+        np.array([0.1, 0.2], dtype=np.float32),
+        np.array([0.3, 1.0], dtype=np.float32),
+    ]
+    independent_float64_mean = float(np.mean(np.asarray(mapped_actions, dtype=float)))
+    episode = evaluate_diagnostic_episode(
+        policy=SequenceActionPolicy(mapped_actions),
+        env=TwoStepDiagnosticEnv(),
+        seed=710000,
+        max_action=1.0,
+        max_action_tolerance=1e-6,
     )
+    shared_metrics = episode["same_pass_overlapping_action_metrics"]
+    assert independent_float64_mean != shared_metrics["action_mean"]
+
+    canonical_record = dict(episode["same_pass_canonical_episode_record"])
+    canonical_record["episode_index"] = 0
+    canonical_record["episode_seed"] = 710000
+    canonical_path = write_same_pass_canonical_eval30(
+        tmp_path,
+        {
+            "run_name": "same_pass_roundtrip",
+            "algorithm": "actiongnn",
+            "config": "config_files/PublicPST_25cp.yaml",
+            "seed": 0,
+            "checkpoint": "checkpoint/model.best",
+        },
+        [canonical_record],
+    )
+    diagnostic_row = build_episode_row(
+        {
+            "matrix_job_id": "same_pass",
+            "scale": "25cp",
+            "algorithm": "actiongnn",
+            "training_seed": 0,
+            "config": "config_files/PublicPST_25cp.yaml",
+            "checkpoint_prefix": "checkpoint/model.best",
+            "run_name": "same_pass_roundtrip",
+        },
+        0,
+        710000,
+        episode,
+        episode["action_summary"],
+        episode["stats"],
+        1.0,
+        1e-6,
+    )
+    diagnostic_path = tmp_path / "episode_diagnostics.csv"
+    write_csv(diagnostic_path, EPISODE_DIAGNOSTIC_COLUMNS, [diagnostic_row])
+
+    with canonical_path.open(newline="", encoding="utf-8") as handle:
+        canonical_episode = next(row for row in csv.DictReader(handle) if row["row_type"] == "episode")
+    with diagnostic_path.open(newline="", encoding="utf-8") as handle:
+        diagnostic_episode = next(csv.DictReader(handle))
+
+    assert canonical_episode["action_mean"] == diagnostic_episode["global_action_mean_all_slots"]
+    assert canonical_episode["action_fraction_at_max"] == diagnostic_episode["global_action_fraction_at_max_all_slots"]
+    assert canonical_episode["active_action_count_mean"] == diagnostic_episode["nonzero_action_count_mean_all_slots"]
 
 
 def test_same_pass_canonical_eval30_csv_uses_canonical_required_columns_and_summary(tmp_path):
@@ -280,10 +373,10 @@ def test_same_pass_canonical_eval30_csv_uses_canonical_required_columns_and_summ
 Run:
 
 ```bash
-python -m pytest tests/test_infrastructure_diagnostics.py::test_diagnostic_episode_returns_same_pass_canonical_record_from_one_mapped_action_stream tests/test_infrastructure_diagnostics.py::test_same_pass_canonical_eval30_csv_uses_canonical_required_columns_and_summary -q
+python -m pytest tests/test_infrastructure_diagnostics.py::test_diagnostic_episode_returns_same_pass_canonical_record_from_one_mapped_action_stream tests/test_infrastructure_diagnostics.py::test_overlapping_action_metrics_are_identical_after_same_pass_and_diagnostic_csv_roundtrip tests/test_infrastructure_diagnostics.py::test_same_pass_canonical_eval30_csv_uses_canonical_required_columns_and_summary -q
 ```
 
-Expected: FAIL with `KeyError: 'mapped_actions_by_step'` or `ImportError: cannot import name 'write_same_pass_canonical_eval30'`.
+Expected: FAIL with `ImportError: cannot import name 'canonical_overlapping_action_metrics'` or `KeyError: 'same_pass_overlapping_action_metrics'`.
 
 - [ ] **Step 3: Implement the minimal same-pass evaluator data flow**
 
@@ -308,10 +401,15 @@ from evaluate_td3_gnn import (
 Add these functions after `select_mapped_action()` at `evaluate_td3_gnn_infrastructure_diagnostics.py:71-80`:
 
 ```python
-def mapped_action_count_stats(mapped_actions_by_step, max_action, tolerance):
+def canonical_overlapping_action_metrics(
+    mapped_actions_by_step: list[np.ndarray],
+    max_action: float,
+    tolerance: float,
+) -> dict[str, float | int]:
     stacked_actions = np.asarray(mapped_actions_by_step, dtype=np.float32)
     if stacked_actions.size == 0:
         return {
+            **action_diagnostics_from_actions([], max_action=max_action, tolerance=tolerance),
             "mapped_action_dimension": 0,
             "same_pass_at_max_count": 0,
             "total_action_decision_denominator": 0,
@@ -319,7 +417,13 @@ def mapped_action_count_stats(mapped_actions_by_step, max_action, tolerance):
     if stacked_actions.ndim == 1:
         stacked_actions = stacked_actions.reshape(1, -1)
     at_max_mask = stacked_actions >= (float(max_action) - float(tolerance))
+    action_metrics = action_diagnostics_from_actions(
+        [row for row in stacked_actions],
+        max_action=max_action,
+        tolerance=tolerance,
+    )
     return {
+        **action_metrics,
         "mapped_action_dimension": int(stacked_actions.shape[1]),
         "same_pass_at_max_count": int(np.count_nonzero(at_max_mask)),
         "total_action_decision_denominator": int(stacked_actions.shape[0] * stacked_actions.shape[1]),
@@ -328,17 +432,15 @@ def mapped_action_count_stats(mapped_actions_by_step, max_action, tolerance):
 
 def build_same_pass_canonical_episode_record(
     episode_record,
-    mapped_actions_by_step,
-    max_action,
-    max_action_tolerance,
+    overlapping_action_metrics,
 ):
     canonical_stats = dict(episode_record.get("stats", {}))
     canonical_stats.update(
-        mapped_action_count_stats(
-            mapped_actions_by_step,
-            max_action=max_action,
-            tolerance=max_action_tolerance,
-        )
+        {
+            "mapped_action_dimension": overlapping_action_metrics["mapped_action_dimension"],
+            "same_pass_at_max_count": overlapping_action_metrics["same_pass_at_max_count"],
+            "total_action_decision_denominator": overlapping_action_metrics["total_action_decision_denominator"],
+        }
     )
     canonical_episode = {
         "episode_reward": episode_record["episode_reward"],
@@ -347,14 +449,26 @@ def build_same_pass_canonical_episode_record(
         "stats": canonical_stats,
         "reset_info": episode_record.get("reset_info", {}),
     }
-    canonical_episode.update(
-        action_diagnostics_from_actions(
-            mapped_actions_by_step,
-            max_action=max_action,
-            tolerance=max_action_tolerance,
+    canonical_episode.update({
+        key: overlapping_action_metrics[key]
+        for key in (
+            "action_mean",
+            "action_std",
+            "action_min",
+            "action_max",
+            "action_fraction_zero",
+            "action_fraction_at_max",
+            "active_action_count_mean",
         )
-    )
+    })
     return canonical_episode
+
+
+def inject_canonical_overlapping_action_metrics(action_summary, overlapping_metrics):
+    global_summary = action_summary["global"]
+    global_summary["action_mean_all_slots"] = overlapping_metrics["action_mean"]
+    global_summary["action_fraction_at_max_all_slots"] = overlapping_metrics["action_fraction_at_max"]
+    global_summary["nonzero_action_count_mean_all_slots"] = overlapping_metrics["active_action_count_mean"]
 
 
 def write_same_pass_canonical_eval30(output_dir, metadata, episode_records):
@@ -367,6 +481,12 @@ def write_same_pass_canonical_eval30(output_dir, metadata, episode_records):
 Patch the return value at `evaluate_td3_gnn_infrastructure_diagnostics.py:141-148`:
 
 ```python
+    overlapping_action_metrics = canonical_overlapping_action_metrics(
+        mapped_actions_by_step,
+        max_action=max_action,
+        tolerance=max_action_tolerance,
+    )
+    inject_canonical_overlapping_action_metrics(action_summary, overlapping_action_metrics)
     episode_record = {
         "episode_reward": episode_reward,
         "episode_steps": episode_steps,
@@ -376,12 +496,11 @@ Patch the return value at `evaluate_td3_gnn_infrastructure_diagnostics.py:141-14
         "action_summary": action_summary,
         "mapped_actions_by_step": mapped_actions_by_step,
         "mapped_action_dimension": int(slot_to_charger_id.size),
+        "same_pass_overlapping_action_metrics": overlapping_action_metrics,
     }
     episode_record["same_pass_canonical_episode_record"] = build_same_pass_canonical_episode_record(
         episode_record,
-        mapped_actions_by_step=mapped_actions_by_step,
-        max_action=max_action,
-        max_action_tolerance=max_action_tolerance,
+        overlapping_action_metrics=overlapping_action_metrics,
     )
     return episode_record
 ```
@@ -391,11 +510,44 @@ Patch the eval loop at `evaluate_td3_gnn_infrastructure_diagnostics.py:286-342` 
 ```python
     same_pass_canonical_records = []
     for episode_index in range(args.eval_episodes):
-        ...
+        episode_seed = args.seed + args.eval_seed_offset + episode_index
+        env = make_env(args.config, seed=episode_seed)
+        episode_record = evaluate_diagnostic_episode(
+            policy=policy,
+            env=env,
+            seed=episode_seed,
+            max_action=max_action,
+            max_action_tolerance=args.max_action_tolerance,
+            max_episode_steps=args.max_episode_steps,
+            deterministic=args.deterministic,
+            eval_expl_noise=args.eval_expl_noise,
+        )
         same_pass_record = dict(episode_record["same_pass_canonical_episode_record"])
         same_pass_record["episode_index"] = episode_index
         same_pass_record["episode_seed"] = episode_seed
         same_pass_canonical_records.append(same_pass_record)
+        action_summary = episode_record["action_summary"]
+        episode_row = build_episode_row(
+            metadata=metadata,
+            episode_index=episode_index,
+            episode_seed=episode_seed,
+            episode_record=episode_record,
+            action_summary=action_summary,
+            stats=episode_record.get("stats", {}),
+            max_action=max_action,
+            tolerance=args.max_action_tolerance,
+        )
+        episode_charger_rows = build_charger_rows(metadata, episode_index, episode_seed, action_summary)
+        episode_transformer_rows = build_transformer_rows(metadata, episode_index, episode_seed, action_summary)
+        validate_diagnostic_reconciliation(
+            episode_row=episode_row,
+            charger_rows=episode_charger_rows,
+            transformer_rows=episode_transformer_rows,
+            tolerance=args.max_action_tolerance,
+        )
+        episode_rows.append(episode_row)
+        charger_rows.extend(episode_charger_rows)
+        transformer_rows.extend(episode_transformer_rows)
 ```
 
 After the four existing diagnostic CSV writes at `evaluate_td3_gnn_infrastructure_diagnostics.py:339-342`, add:
@@ -419,10 +571,10 @@ After the four existing diagnostic CSV writes at `evaluate_td3_gnn_infrastructur
 Run:
 
 ```bash
-python -m pytest tests/test_infrastructure_diagnostics.py::test_diagnostic_episode_returns_same_pass_canonical_record_from_one_mapped_action_stream tests/test_infrastructure_diagnostics.py::test_same_pass_canonical_eval30_csv_uses_canonical_required_columns_and_summary -q
+python -m pytest tests/test_infrastructure_diagnostics.py::test_diagnostic_episode_returns_same_pass_canonical_record_from_one_mapped_action_stream tests/test_infrastructure_diagnostics.py::test_overlapping_action_metrics_are_identical_after_same_pass_and_diagnostic_csv_roundtrip tests/test_infrastructure_diagnostics.py::test_same_pass_canonical_eval30_csv_uses_canonical_required_columns_and_summary -q
 ```
 
-Expected: PASS, `2 passed`.
+Expected: PASS, `3 passed`.
 
 - [ ] **Step 5: Commit**
 
@@ -447,7 +599,81 @@ Replace `test_prepare_seed_validation_rejects_canonical_float_mismatch()` at `te
 
 ```python
 def write_same_pass_canonical_eval30(path, *, scale="25cp", algorithm="actiongnn", training_seed=0, mutator=None):
-    write_canonical_eval30(path, scale=scale, algorithm=algorithm, training_seed=training_seed, mutator=mutator)
+    rows = []
+    denominator = 112 * int(scale.replace("cp", ""))
+    for episode_index in range(EVAL_EPISODES):
+        diagnostic = valid_episode_row(
+            episode_index,
+            scale=scale,
+            algorithm=algorithm,
+            training_seed=training_seed,
+        )
+        at_max_fraction = diagnostic.get("global_action_fraction_at_max_all_slots", "0.0")
+        same_pass_at_max_count = int(round(float(at_max_fraction) * denominator))
+        rows.append(
+            {
+                "row_type": "episode",
+                "algorithm": algorithm,
+                "seed": str(training_seed),
+                "episode_index": diagnostic["episode_index"],
+                "episode_seed": diagnostic["episode_seed"],
+                "episode_steps": diagnostic["episode_steps"],
+                "done": diagnostic["done"],
+                "episode_reward": diagnostic["episode_reward"],
+                "tracking_error": diagnostic["tracking_error"],
+                "energy_tracking_error": diagnostic["energy_tracking_error"],
+                "power_tracker_violation": diagnostic["power_tracker_violation"],
+                "total_energy_charged": diagnostic["total_energy_charged"],
+                "total_energy_discharged": diagnostic["total_energy_discharged"],
+                "average_user_satisfaction": diagnostic["average_user_satisfaction"],
+                "energy_user_satisfaction": diagnostic["energy_user_satisfaction"],
+                "total_transformer_overload": diagnostic["total_transformer_overload"],
+                "total_ev_served": diagnostic["total_ev_served"],
+                "action_mean": diagnostic.get("global_action_mean_all_slots", "0.0"),
+                "action_fraction_at_max": at_max_fraction,
+                "active_action_count_mean": diagnostic.get("nonzero_action_count_mean_all_slots", "0.0"),
+                "mapped_action_dimension": str(int(scale.replace("cp", ""))),
+                "same_pass_at_max_count": str(same_pass_at_max_count),
+                "total_action_decision_denominator": str(denominator),
+            }
+        )
+    rows.append({
+        "row_type": "summary",
+        "algorithm": algorithm,
+        "seed": str(training_seed),
+        "episode_index": "",
+        "episode_seed": "",
+        "episode_steps": "112",
+        "done": "",
+        "episode_reward": "-1.0",
+        "tracking_error": "1.0",
+        "energy_tracking_error": "1.0",
+        "power_tracker_violation": "1.0",
+        "total_energy_charged": "1.0",
+        "total_energy_discharged": "0.0",
+        "average_user_satisfaction": "1.0",
+        "energy_user_satisfaction": "100.0",
+        "total_transformer_overload": "0.0",
+        "total_ev_served": "1",
+        "action_mean": "0.5",
+        "action_fraction_at_max": "0.5",
+        "active_action_count_mean": "1.0",
+        "mapped_action_dimension": str(int(scale.replace("cp", ""))),
+        "same_pass_at_max_count": "",
+        "total_action_decision_denominator": "",
+    })
+    if mutator is not None:
+        mutator(rows)
+    write_csv(
+        path,
+        [
+            *CANONICAL_EVAL30_COLUMNS,
+            "mapped_action_dimension",
+            "same_pass_at_max_count",
+            "total_action_decision_denominator",
+        ],
+        rows,
+    )
 
 
 def read_csv_rows(path):
@@ -467,6 +693,7 @@ def test_same_pass_reward_tracking_mismatch_hard_fails(tmp_path):
 
     def mutate(rows):
         rows[0]["tracking_error"] = "999.0"
+        rows[1]["episode_reward"] = "999.0"
 
     write_same_pass_canonical_eval30(same_pass_csv, mutator=mutate)
     inputs = load_seed_reconciliation_inputs(
@@ -480,9 +707,8 @@ def test_same_pass_reward_tracking_mismatch_hard_fails(tmp_path):
     rows = build_same_pass_reconciliation_rows(inputs)
 
     failed = [row for row in rows if row["status"] == "fail"]
-    assert failed
-    assert failed[0]["field"] == "tracking_error"
-    assert failed[0]["failure_category"] == "same_pass_metric_mismatch"
+    assert {(row["episode_index"], row["field"]) for row in failed} == {(0, "tracking_error"), (1, "episode_reward")}
+    assert {row["failure_category"] for row in failed} == {"same_pass_metric_mismatch"}
 
 
 def test_same_pass_action_summary_mismatch_hard_fails_with_count_fields(tmp_path):
@@ -541,6 +767,8 @@ Patch `scripts/validate_full_infrastructure_diagnostic_eval30.py:114-119` to add
 ```python
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+import collections
+import re
 ```
 
 Patch constants around `scripts/validate_full_infrastructure_diagnostic_eval30.py:130-180`:
@@ -651,6 +879,15 @@ def load_seed_reconciliation_inputs(
         if formal_validation_json is not None
         else {}
     )
+    if require_historical and (formal_validation_json is None or config_path is None or checkpoint_prefix is None):
+        raise ValueError("formal provenance inputs are required")
+    if config_path is not None and not Path(config_path).is_file():
+        raise ValueError(f"missing staged config path: {config_path}")
+    if checkpoint_prefix is not None:
+        for basename in ("model.best_actor", "model.best_actor_optimizer", "model.best_critic", "model.best_critic_optimizer", "kwargs.yaml"):
+            candidate = Path(checkpoint_prefix).parent / basename
+            if not candidate.is_file():
+                raise ValueError(f"missing staged checkpoint member: {candidate}")
     return SeedReconciliationInputs(
         diagnostic_rows=diagnostic_rows,
         transformer_rows=transformer_rows,
@@ -775,7 +1012,7 @@ git commit -m "Add same-pass reconciliation hard gate"
 
 **Interfaces:**
 - Consumes: historical canonical eval30 CSV from formal job `58513929`, same-pass canonical rows, diagnostic rows, staged config/checkpoint paths, `runtime_metadata/formal_package_validation.json`, and Stage D source commit.
-- Produces: `HISTORICAL_DRIFT_COLUMNS`, `HISTORICAL_IDENTITY_FIELDS`, `HISTORICAL_FLOAT_FIELDS`, `build_historical_canonical_drift_rows()`, and audit CSV rows for `validation/historical_canonical_drift.csv`.
+- Produces: `HISTORICAL_DRIFT_COLUMNS`, `HISTORICAL_IDENTITY_FIELDS`, `HISTORICAL_FLOAT_FIELDS`, `PROVENANCE_IDENTITY_FIELDS`, `build_historical_provenance_identity_rows()`, `build_historical_canonical_drift_rows()`, formal config/checkpoint digest fields from `validate_seed_formal_package()`, and identity/audit CSV rows for `validation/historical_canonical_drift.csv`.
 
 - [ ] **Step 1: Write failing historical identity and drift tests**
 
@@ -796,14 +1033,22 @@ def test_historical_identity_mismatch_hard_fails_without_using_float_drift_as_ga
         rows[0]["episode_seed"] = "999999"
 
     write_canonical_eval30(historical_csv, mutator=mutate)
+    config_path, checkpoint_prefix = write_stage_d_provenance_files(tmp_path / "stage_d_files")
+    formal_validation_json = tmp_path / "formal_package_validation.json"
+    formal_validation_json.write_text(
+        json.dumps(formal_validation_for_stage_d_files(config_path, checkpoint_prefix), sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     inputs = load_seed_reconciliation_inputs(
         diagnostic_dir=seed_dir / "diagnostics",
         historical_canonical_csv=historical_csv,
         validation_dir=seed_dir / "validation",
         task_id=0,
         training_seed=0,
-        formal_validation_json=None,
+        formal_validation_json=formal_validation_json,
         stage_d_source_commit_sha="a" * 40,
+        config_path=config_path,
+        checkpoint_prefix=checkpoint_prefix,
     )
     rows = build_historical_canonical_drift_rows(inputs)
 
@@ -827,14 +1072,22 @@ def test_historical_floating_drift_is_audit_only_and_classified(tmp_path):
         rows[0]["tracking_error"] = "1.0000001"
 
     write_canonical_eval30(historical_csv, mutator=mutate)
+    config_path, checkpoint_prefix = write_stage_d_provenance_files(tmp_path / "stage_d_files")
+    formal_validation_json = tmp_path / "formal_package_validation.json"
+    formal_validation_json.write_text(
+        json.dumps(formal_validation_for_stage_d_files(config_path, checkpoint_prefix), sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     inputs = load_seed_reconciliation_inputs(
         diagnostic_dir=seed_dir / "diagnostics",
         historical_canonical_csv=historical_csv,
         validation_dir=seed_dir / "validation",
         task_id=0,
         training_seed=0,
-        formal_validation_json=None,
+        formal_validation_json=formal_validation_json,
         stage_d_source_commit_sha="a" * 40,
+        config_path=config_path,
+        checkpoint_prefix=checkpoint_prefix,
     )
 
     same_pass_rows = build_same_pass_reconciliation_rows(inputs)
@@ -849,6 +1102,150 @@ def test_historical_floating_drift_is_audit_only_and_classified(tmp_path):
     assert drift["classification"] == "historical_float_drift"
     assert drift["historical_source_label"] == "formal_job_58513929_canonical_eval30"
     assert drift["stage_d_source_label"] == "stage_d_same_pass_canonical_eval30"
+
+
+def write_stage_d_provenance_files(root, *, scale="25cp", algorithm="actiongnn"):
+    root.mkdir(parents=True, exist_ok=True)
+    config_path = root / "formal_config.yaml"
+    checkpoint_prefix = root / "model.best"
+    config_path.write_text(f"scale: {scale}\nalgorithm: {algorithm}\n", encoding="utf-8")
+    for basename, payload in {
+        "model.best_actor": "actor\n",
+        "model.best_actor_optimizer": "actor-opt\n",
+        "model.best_critic": "critic\n",
+        "model.best_critic_optimizer": "critic-opt\n",
+        "kwargs.yaml": "{}\n",
+    }.items():
+        (root / basename).write_text(payload, encoding="utf-8")
+    return config_path, checkpoint_prefix
+
+
+def formal_validation_for_stage_d_files(
+    config_path,
+    checkpoint_prefix,
+    *,
+    task_id=0,
+    scale="25cp",
+    algorithm="actiongnn",
+    training_seed=0,
+    mutator=None,
+):
+    from scripts.validate_full_infrastructure_diagnostic_eval30 import sha256_file
+
+    payload = {
+        "status": "ok",
+        "task_id": task_id,
+        "scale": scale,
+        "algorithm": algorithm,
+        "formal_job_id": "58513929",
+        "training_seed": training_seed,
+        "formal_task_id": formal_task_id(task_id, training_seed),
+        "config_sha256": sha256_file(config_path),
+        "checkpoint_member_sha256": {
+            "model.best_actor": sha256_file(checkpoint_prefix.parent / "model.best_actor"),
+            "model.best_actor_optimizer": sha256_file(checkpoint_prefix.parent / "model.best_actor_optimizer"),
+            "model.best_critic": sha256_file(checkpoint_prefix.parent / "model.best_critic"),
+            "model.best_critic_optimizer": sha256_file(checkpoint_prefix.parent / "model.best_critic_optimizer"),
+            "kwargs.yaml": sha256_file(checkpoint_prefix.parent / "kwargs.yaml"),
+        },
+    }
+    if mutator is not None:
+        mutator(payload)
+    return payload
+
+
+@pytest.mark.parametrize(
+    ("mutator", "field"),
+    [
+        (lambda payload: payload.update({"config_sha256": "0" * 64}), "config_sha256"),
+        (lambda payload: payload["checkpoint_member_sha256"].update({"model.best_actor": "0" * 64}), "checkpoint_member_sha256:model.best_actor"),
+        (lambda payload: payload.update({"formal_job_id": "58656380"}), "formal_job_id"),
+    ],
+)
+def test_historical_provenance_mismatch_is_hard_identity_failure(tmp_path, mutator, field):
+    import dataclasses
+    from scripts.validate_full_infrastructure_diagnostic_eval30 import (
+        build_historical_canonical_drift_rows,
+        load_seed_reconciliation_inputs,
+    )
+
+    seed_dir = build_seed_output(tmp_path / "seed0")
+    write_same_pass_canonical_eval30(seed_dir / "diagnostics" / "same_pass_canonical_eval30.csv")
+    historical_csv = tmp_path / "historical_eval30.csv"
+    write_canonical_eval30(historical_csv)
+    config_path, checkpoint_prefix = write_stage_d_provenance_files(tmp_path / "stage_d_files")
+    inputs = load_seed_reconciliation_inputs(
+        diagnostic_dir=seed_dir / "diagnostics",
+        historical_canonical_csv=historical_csv,
+        validation_dir=seed_dir / "validation",
+        task_id=0,
+        training_seed=0,
+        formal_validation_json=None,
+        stage_d_source_commit_sha="a" * 40,
+        config_path=config_path,
+        checkpoint_prefix=checkpoint_prefix,
+    )
+    inputs = dataclasses.replace(
+        inputs,
+        formal_validation=formal_validation_for_stage_d_files(config_path, checkpoint_prefix, mutator=mutator),
+    )
+
+    rows = build_historical_canonical_drift_rows(inputs)
+    mismatch = next(row for row in rows if row["field"] == field)
+    assert mismatch["episode_index"] == ""
+    assert mismatch["episode_seed"] == ""
+    assert mismatch["classification"] == "historical_identity_mismatch"
+
+
+def test_stage_d_source_commit_malformed_is_hard_identity_failure(tmp_path):
+    import dataclasses
+    from scripts.validate_full_infrastructure_diagnostic_eval30 import (
+        build_historical_canonical_drift_rows,
+        load_seed_reconciliation_inputs,
+    )
+
+    seed_dir = build_seed_output(tmp_path / "seed0")
+    write_same_pass_canonical_eval30(seed_dir / "diagnostics" / "same_pass_canonical_eval30.csv")
+    historical_csv = tmp_path / "historical_eval30.csv"
+    write_canonical_eval30(historical_csv)
+    config_path, checkpoint_prefix = write_stage_d_provenance_files(tmp_path / "stage_d_files")
+    inputs = load_seed_reconciliation_inputs(
+        diagnostic_dir=seed_dir / "diagnostics",
+        historical_canonical_csv=historical_csv,
+        validation_dir=seed_dir / "validation",
+        task_id=0,
+        training_seed=0,
+        formal_validation_json=None,
+        stage_d_source_commit_sha="NOT_A_SHA",
+        config_path=config_path,
+        checkpoint_prefix=checkpoint_prefix,
+    )
+    inputs = dataclasses.replace(
+        inputs,
+        formal_validation=formal_validation_for_stage_d_files(config_path, checkpoint_prefix),
+    )
+
+    rows = build_historical_canonical_drift_rows(inputs)
+    source_row = next(row for row in rows if row["field"] == "stage_d_source_commit_sha")
+    assert source_row["classification"] == "historical_identity_mismatch"
+
+
+def test_validate_seed_formal_package_returns_digests_with_temporary_extract_dir(tmp_path):
+    import re
+    from scripts.validate_full_infrastructure_diagnostic_eval30 import validate_seed_formal_package
+
+    package = create_full_formal_package(tmp_path / "formal", task_id=0, training_seed=0)
+    payload = validate_seed_formal_package(package, task_id=0, training_seed=0, extract_dir=None)
+
+    assert re.fullmatch(r"[0-9a-f]{64}", payload["config_sha256"])
+    assert set(payload["checkpoint_member_sha256"]) == {
+        "model.best_actor",
+        "model.best_actor_optimizer",
+        "model.best_critic",
+        "model.best_critic_optimizer",
+        "kwargs.yaml",
+    }
+    assert all(re.fullmatch(r"[0-9a-f]{64}", value) for value in payload["checkpoint_member_sha256"].values())
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -856,10 +1253,10 @@ def test_historical_floating_drift_is_audit_only_and_classified(tmp_path):
 Run:
 
 ```bash
-python -m pytest tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_historical_identity_mismatch_hard_fails_without_using_float_drift_as_gate tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_historical_floating_drift_is_audit_only_and_classified -q
+python -m pytest tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_historical_identity_mismatch_hard_fails_without_using_float_drift_as_gate tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_historical_floating_drift_is_audit_only_and_classified tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_historical_provenance_mismatch_is_hard_identity_failure tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_stage_d_source_commit_malformed_is_hard_identity_failure tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_validate_seed_formal_package_returns_digests_with_temporary_extract_dir -q
 ```
 
-Expected: FAIL with `ImportError: cannot import name 'build_historical_canonical_drift_rows'`.
+Expected: FAIL with `ImportError: cannot import name 'build_historical_canonical_drift_rows'`, missing `config_sha256`, or `FileNotFoundError` when digest code tries to read files after a temporary extraction directory has been removed.
 
 - [ ] **Step 3: Implement historical identity and float audit builders**
 
@@ -955,7 +1352,7 @@ def _identity_classification(historical, stage_d, value_type, field):
             historical_value = str(historical)
             stage_d_value = str(stage_d)
     except ValueError:
-        return str(historical), str(stage_d), "not_comparable"
+        return str(historical), str(stage_d), "historical_identity_mismatch"
     classification = (
         "historical_identity_match"
         if historical_value == stage_d_value
@@ -964,10 +1361,92 @@ def _identity_classification(historical, stage_d, value_type, field):
     return str(historical_value), str(stage_d_value), classification
 
 
+def _checkpoint_member_path(checkpoint_prefix: Path, basename: str) -> Path:
+    if basename == "kwargs.yaml":
+        return checkpoint_prefix.parent / "kwargs.yaml"
+    return checkpoint_prefix.parent / basename
+
+
+def _provenance_row(field: str, expected: object, observed: object, matches: bool) -> dict[str, object]:
+    return {
+        "reconciliation_contract_version": RECONCILIATION_CONTRACT_VERSION,
+        "scale": "",
+        "algorithm": "",
+        "training_seed": "",
+        "formal_task_id": "",
+        "episode_index": "",
+        "episode_seed": "",
+        "field": field,
+        "historical_source_label": "formal_job_58513929_package_validation",
+        "stage_d_source_label": "stage_d_runtime_metadata",
+        "historical_value": str(expected),
+        "stage_d_same_pass_value": str(observed),
+        "absolute_difference": "",
+        "relative_difference": "",
+        "classification": "historical_identity_match" if matches else "historical_identity_mismatch",
+        "historical_at_max_count": "",
+        "stage_d_at_max_count": "",
+        "total_action_decision_denominator": "",
+        "count_difference": "",
+        "fraction_difference": "",
+    }
+
+
+def build_historical_provenance_identity_rows(inputs: SeedReconciliationInputs) -> list[dict[str, object]]:
+    formal_validation = inputs.formal_validation
+    if not formal_validation:
+        raise ValueError("input_contract_mismatch: missing formal package validation")
+    if inputs.config_path is None or inputs.checkpoint_prefix is None:
+        raise ValueError("input_contract_mismatch: missing staged config or checkpoint path")
+
+    observed_config_sha256 = sha256_file(inputs.config_path)
+    observed_checkpoint_sha256 = {
+        basename: sha256_file(_checkpoint_member_path(inputs.checkpoint_prefix, basename))
+        for basename in (
+            "model.best_actor",
+            "model.best_actor_optimizer",
+            "model.best_critic",
+            "model.best_critic_optimizer",
+            "kwargs.yaml",
+        )
+    }
+    expected_checkpoint_sha256 = formal_validation.get("checkpoint_member_sha256")
+    if not isinstance(expected_checkpoint_sha256, dict):
+        raise ValueError("input_contract_mismatch: formal checkpoint digests missing")
+
+    source_commit_is_valid = bool(re.fullmatch(r"[0-9a-f]{40}", inputs.stage_d_source_commit_sha))
+    rows = [
+        _provenance_row("formal_job_id", FORMAL_JOB_ID, formal_validation.get("formal_job_id"), formal_validation.get("formal_job_id") == FORMAL_JOB_ID),
+        _provenance_row("task_id", inputs.task_id, formal_validation.get("task_id"), formal_validation.get("task_id") == inputs.task_id),
+        _provenance_row("formal_task_id", formal_task_id(inputs.task_id, inputs.training_seed), formal_validation.get("formal_task_id"), formal_validation.get("formal_task_id") == formal_task_id(inputs.task_id, inputs.training_seed)),
+        _provenance_row("scale", inputs.scale, formal_validation.get("scale"), formal_validation.get("scale") == inputs.scale),
+        _provenance_row("algorithm", inputs.algorithm, formal_validation.get("algorithm"), formal_validation.get("algorithm") == inputs.algorithm),
+        _provenance_row("training_seed", inputs.training_seed, formal_validation.get("training_seed"), formal_validation.get("training_seed") == inputs.training_seed),
+        _provenance_row("stage_d_source_commit_sha", "40 lowercase hex", inputs.stage_d_source_commit_sha, source_commit_is_valid),
+        _provenance_row("config_sha256", formal_validation.get("config_sha256"), observed_config_sha256, formal_validation.get("config_sha256") == observed_config_sha256),
+    ]
+    for basename in (
+        "model.best_actor",
+        "model.best_actor_optimizer",
+        "model.best_critic",
+        "model.best_critic_optimizer",
+        "kwargs.yaml",
+    ):
+        rows.append(
+            _provenance_row(
+                f"checkpoint_member_sha256:{basename}",
+                expected_checkpoint_sha256.get(basename),
+                observed_checkpoint_sha256[basename],
+                expected_checkpoint_sha256.get(basename) == observed_checkpoint_sha256[basename],
+            )
+        )
+    return rows
+
+
 def build_historical_canonical_drift_rows(inputs: SeedReconciliationInputs) -> list[dict[str, object]]:
     historical_by_index = _episode_rows_by_index(inputs.historical_canonical_rows, "historical canonical rows")
     same_pass_by_index = _episode_rows_by_index(inputs.same_pass_canonical_rows, "same-pass canonical rows")
-    rows: list[dict[str, object]] = []
+    rows: list[dict[str, object]] = build_historical_provenance_identity_rows(inputs)
     for episode_index in range(EVAL_EPISODES):
         historical = historical_by_index[episode_index]
         stage_d = same_pass_by_index[episode_index]
@@ -1015,27 +1494,37 @@ def build_historical_canonical_drift_rows(inputs: SeedReconciliationInputs) -> l
 Patch `validate_seed_formal_package()` at `scripts/validate_full_infrastructure_diagnostic_eval30.py:1217-1290` to include config and checkpoint SHA-256 provenance in the returned JSON:
 
 ```python
-        config_path = root / config_member(task_id, training_seed)
-        checkpoint_members = {
-            basename: root / formal_train_member(task_id, training_seed, basename)
-            for basename in (
-                "model.best_actor",
-                "model.best_actor_optimizer",
-                "model.best_critic",
-                "model.best_critic_optimizer",
-                "kwargs.yaml",
-            )
-        }
+    config_sha256 = ""
+    checkpoint_member_sha256: dict[str, str] = {}
 ```
 
-Then add these returned fields:
+Inside the existing `with temporary_context as temporary:` block, replace the current `config_values = validate_formal_config(root / config_member(task_id, training_seed), task_id)` call with:
 
 ```python
-        "config_sha256": sha256_file(config_path),
-        "checkpoint_member_sha256": {
-            basename: sha256_file(path)
-            for basename, path in checkpoint_members.items()
-        },
+            config_path = root / config_member(task_id, training_seed)
+            checkpoint_members = {
+                basename: root / formal_train_member(task_id, training_seed, basename)
+                for basename in (
+                    "model.best_actor",
+                    "model.best_actor_optimizer",
+                    "model.best_critic",
+                    "model.best_critic_optimizer",
+                    "kwargs.yaml",
+                )
+            }
+            config_values = validate_formal_config(config_path, task_id)
+            config_sha256 = sha256_file(config_path)
+            checkpoint_member_sha256 = {
+                basename: sha256_file(path)
+                for basename, path in checkpoint_members.items()
+            }
+```
+
+The `config_sha256` and `checkpoint_member_sha256` variables must be plain strings/dictionaries before the `with temporary_context` block exits. Then add these returned fields:
+
+```python
+        "config_sha256": config_sha256,
+        "checkpoint_member_sha256": checkpoint_member_sha256,
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
@@ -1043,10 +1532,10 @@ Then add these returned fields:
 Run:
 
 ```bash
-python -m pytest tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_historical_identity_mismatch_hard_fails_without_using_float_drift_as_gate tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_historical_floating_drift_is_audit_only_and_classified -q
+python -m pytest tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_historical_identity_mismatch_hard_fails_without_using_float_drift_as_gate tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_historical_floating_drift_is_audit_only_and_classified tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_historical_provenance_mismatch_is_hard_identity_failure tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_stage_d_source_commit_malformed_is_hard_identity_failure tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_validate_seed_formal_package_returns_digests_with_temporary_extract_dir -q
 ```
 
-Expected: PASS, `2 passed`.
+Expected: PASS, `7 passed` because the provenance mismatch test is parametrized across three mutations.
 
 - [ ] **Step 5: Commit**
 
@@ -1111,13 +1600,38 @@ def test_one_count_historical_saturation_drift_is_audit_only(scale, mapped_actio
             row["action_fraction_at_max"] = str(historical_count / denominator)
 
     write_canonical_eval30(historical_csv, scale=scale, mutator=historical_mutate)
+    algorithm = str(stage_d_task(task_id)["algorithm"])
+    config_path, checkpoint_prefix = write_stage_d_provenance_files(
+        tmp_path / f"stage_d_files_{scale}",
+        scale=scale,
+        algorithm=algorithm,
+    )
+    formal_validation_json = tmp_path / f"formal_package_validation_{scale}.json"
+    formal_validation_json.write_text(
+        json.dumps(
+            formal_validation_for_stage_d_files(
+                config_path,
+                checkpoint_prefix,
+                task_id=task_id,
+                scale=scale,
+                algorithm=algorithm,
+                training_seed=0,
+            ),
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     inputs = load_seed_reconciliation_inputs(
         diagnostic_dir=seed_dir / "diagnostics",
         historical_canonical_csv=historical_csv,
         validation_dir=seed_dir / "validation",
         task_id=task_id,
         training_seed=0,
+        formal_validation_json=formal_validation_json,
         stage_d_source_commit_sha="a" * 40,
+        config_path=config_path,
+        checkpoint_prefix=checkpoint_prefix,
     )
 
     assert all(row["status"] == "pass" for row in build_same_pass_reconciliation_rows(inputs))
@@ -1149,6 +1663,75 @@ def test_historical_saturation_reconstruction_not_comparable_when_residual_is_to
     assert reconstructed is None
     assert residual >= 1e-9
     assert comparable is False
+
+
+@pytest.mark.parametrize(
+    ("historical_fraction", "stage_d_fraction", "historical_count", "stage_d_count", "expected_classification"),
+    [
+        ("0.0010714285714285715", "0.0014285714285714286", 3, 4, "historical_saturation_count_drift"),
+        ("0.0010714285714285715", "0.0010714285714285715", 3, 3, "exact_match"),
+        ("0.0010714285714285715", "0.0010714285714285716", 3, 3, "historical_float_drift"),
+        ("0.333", "0.0010714285714285715", None, 3, "not_comparable"),
+    ],
+)
+def test_historical_saturation_classification_matrix(
+    tmp_path,
+    historical_fraction,
+    stage_d_fraction,
+    historical_count,
+    stage_d_count,
+    expected_classification,
+):
+    from scripts.validate_full_infrastructure_diagnostic_eval30 import (
+        build_historical_canonical_drift_rows,
+        load_seed_reconciliation_inputs,
+    )
+
+    seed_dir = build_seed_output(tmp_path / "seed0")
+    same_pass_csv = seed_dir / "diagnostics" / "same_pass_canonical_eval30.csv"
+    denominator = 2800
+
+    def same_pass_mutate(rows):
+        for row in rows:
+            if row["row_type"] == "episode":
+                row["action_fraction_at_max"] = stage_d_fraction
+                row["same_pass_at_max_count"] = str(stage_d_count)
+                row["mapped_action_dimension"] = "25"
+                row["total_action_decision_denominator"] = str(denominator)
+
+    write_same_pass_canonical_eval30(same_pass_csv, mutator=same_pass_mutate)
+    historical_csv = tmp_path / "historical_eval30.csv"
+
+    def historical_mutate(rows):
+        for row in rows:
+            row["action_fraction_at_max"] = historical_fraction
+
+    write_canonical_eval30(historical_csv, mutator=historical_mutate)
+    config_path, checkpoint_prefix = write_stage_d_provenance_files(tmp_path / "stage_d_files")
+    formal_validation_json = tmp_path / "formal_package_validation.json"
+    formal_validation_json.write_text(
+        json.dumps(formal_validation_for_stage_d_files(config_path, checkpoint_prefix), sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    inputs = load_seed_reconciliation_inputs(
+        diagnostic_dir=seed_dir / "diagnostics",
+        historical_canonical_csv=historical_csv,
+        validation_dir=seed_dir / "validation",
+        task_id=0,
+        training_seed=0,
+        formal_validation_json=formal_validation_json,
+        stage_d_source_commit_sha="a" * 40,
+        config_path=config_path,
+        checkpoint_prefix=checkpoint_prefix,
+    )
+
+    drift_rows = build_historical_canonical_drift_rows(inputs)
+    saturation = next(row for row in drift_rows if row["field"] == "action_fraction_at_max" and row["episode_index"] == 0)
+    assert saturation["classification"] == expected_classification
+    if historical_count is None:
+        assert saturation["historical_at_max_count"] == ""
+    else:
+        assert saturation["historical_at_max_count"] == historical_count
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -1156,10 +1739,10 @@ def test_historical_saturation_reconstruction_not_comparable_when_residual_is_to
 Run:
 
 ```bash
-python -m pytest tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_one_count_historical_saturation_drift_is_audit_only tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_historical_saturation_count_and_denominator_reconstruct_stored_fraction tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_historical_saturation_reconstruction_not_comparable_when_residual_is_too_large -q
+python -m pytest tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_one_count_historical_saturation_drift_is_audit_only tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_historical_saturation_count_and_denominator_reconstruct_stored_fraction tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_historical_saturation_reconstruction_not_comparable_when_residual_is_too_large tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_historical_saturation_classification_matrix -q
 ```
 
-Expected: FAIL with `ImportError: cannot import name 'reconstruct_saturation_count'` or classification `historical_float_drift` instead of `historical_saturation_count_drift`.
+Expected: FAIL with `ImportError: cannot import name 'reconstruct_saturation_count'`, classification `historical_float_drift` instead of `historical_saturation_count_drift`, or classification `historical_saturation_count_drift` for the zero-count-difference float-drift case.
 
 - [ ] **Step 3: Implement deterministic count reconstruction**
 
@@ -1225,16 +1808,18 @@ Patch the `action_fraction_at_max` branch inside `build_historical_canonical_dri
                 stage_d_value = _finite_number(stage_d.get(stage_d_field), stage_d_field)
                 count_difference = int(stage_d_count - historical_count)
                 fraction_difference = float(stage_d_value - historical_value)
+                if count_difference != 0:
+                    classification = "historical_saturation_count_drift"
+                elif stage_d_value == historical_value:
+                    classification = "exact_match"
+                else:
+                    classification = "historical_float_drift"
                 row.update({
                     "historical_value": historical_value,
                     "stage_d_same_pass_value": stage_d_value,
                     "absolute_difference": abs(stage_d_value - historical_value),
                     "relative_difference": abs(stage_d_value - historical_value) / max(abs(historical_value), 1e-12),
-                    "classification": (
-                        "exact_match"
-                        if count_difference == 0 and stage_d_value == historical_value
-                        else "historical_saturation_count_drift"
-                    ),
+                    "classification": classification,
                     "historical_at_max_count": historical_count,
                     "stage_d_at_max_count": stage_d_count,
                     "total_action_decision_denominator": denominator,
@@ -1252,10 +1837,10 @@ This reconstruction is audit-only. Do not use `SATURATION_RECONSTRUCTION_RESIDUA
 Run:
 
 ```bash
-python -m pytest tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_one_count_historical_saturation_drift_is_audit_only tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_historical_saturation_count_and_denominator_reconstruct_stored_fraction tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_historical_saturation_reconstruction_not_comparable_when_residual_is_too_large -q
+python -m pytest tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_one_count_historical_saturation_drift_is_audit_only tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_historical_saturation_count_and_denominator_reconstruct_stored_fraction tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_historical_saturation_reconstruction_not_comparable_when_residual_is_too_large tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_historical_saturation_classification_matrix -q
 ```
 
-Expected: PASS, `6 passed` because the first test is parametrized across four scales.
+Expected: PASS, `10 passed` because the first test is parametrized across four scales and the classification matrix covers four outcomes.
 
 - [ ] **Step 5: Commit**
 
@@ -1289,6 +1874,12 @@ def test_reconciliation_evidence_remains_present_after_hard_gate_failure(tmp_pat
     write_same_pass_canonical_eval30(same_pass_csv, mutator=mutate)
     historical_csv = tmp_path / "historical_eval30.csv"
     write_canonical_eval30(historical_csv)
+    config_path, checkpoint_prefix = write_stage_d_provenance_files(tmp_path / "stage_d_files")
+    formal_validation_json = tmp_path / "formal_package_validation.json"
+    formal_validation_json.write_text(
+        json.dumps(formal_validation_for_stage_d_files(config_path, checkpoint_prefix), sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     result = subprocess.run(
         [
             sys.executable,
@@ -1302,6 +1893,12 @@ def test_reconciliation_evidence_remains_present_after_hard_gate_failure(tmp_pat
             str(seed_dir / "validation"),
             "--runtime-metadata-dir",
             str(seed_dir / "runtime_metadata"),
+            "--formal-validation-json",
+            str(formal_validation_json),
+            "--config-path",
+            str(config_path),
+            "--checkpoint-prefix",
+            str(checkpoint_prefix),
             "--task-id",
             "0",
             "--training-seed",
@@ -1333,6 +1930,12 @@ def test_missing_required_input_fails_input_contract_without_complete_evidence_s
     (seed_dir / "diagnostics" / "same_pass_canonical_eval30.csv").unlink()
     historical_csv = tmp_path / "historical_eval30.csv"
     write_canonical_eval30(historical_csv)
+    config_path, checkpoint_prefix = write_stage_d_provenance_files(tmp_path / "stage_d_files")
+    formal_validation_json = tmp_path / "formal_package_validation.json"
+    formal_validation_json.write_text(
+        json.dumps(formal_validation_for_stage_d_files(config_path, checkpoint_prefix), sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
     result = subprocess.run(
         [
@@ -1347,6 +1950,12 @@ def test_missing_required_input_fails_input_contract_without_complete_evidence_s
             str(seed_dir / "validation"),
             "--runtime-metadata-dir",
             str(seed_dir / "runtime_metadata"),
+            "--formal-validation-json",
+            str(formal_validation_json),
+            "--config-path",
+            str(config_path),
+            "--checkpoint-prefix",
+            str(checkpoint_prefix),
             "--task-id",
             "0",
             "--training-seed",
@@ -1370,6 +1979,177 @@ def test_missing_required_input_fails_input_contract_without_complete_evidence_s
         seed_dir / "runtime_metadata" / "reconciliation_summary.json",
     ]
     assert not all(path.exists() for path in complete_evidence_paths)
+
+
+def run_prepare_seed_validation_with_provenance(
+    seed_dir,
+    historical_csv,
+    *,
+    source_commit="a" * 40,
+    formal_validation_mutator=None,
+    extra_args=(),
+):
+    config_path, checkpoint_prefix = write_stage_d_provenance_files(seed_dir / "stage_d_files")
+    formal_validation_json = seed_dir / "runtime_metadata" / "formal_package_validation.json"
+    formal_validation_json.parent.mkdir(parents=True, exist_ok=True)
+    formal_validation_json.write_text(
+        json.dumps(
+            formal_validation_for_stage_d_files(
+                config_path,
+                checkpoint_prefix,
+                mutator=formal_validation_mutator,
+            ),
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return subprocess.run(
+        [
+            sys.executable,
+            str(VALIDATOR),
+            "prepare-seed-validation",
+            "--diagnostic-dir",
+            str(seed_dir / "diagnostics"),
+            *extra_args,
+            "--validation-dir",
+            str(seed_dir / "validation"),
+            "--runtime-metadata-dir",
+            str(seed_dir / "runtime_metadata"),
+            "--formal-validation-json",
+            str(formal_validation_json),
+            "--config-path",
+            str(config_path),
+            "--checkpoint-prefix",
+            str(checkpoint_prefix),
+            "--task-id",
+            "0",
+            "--training-seed",
+            "0",
+            "--stage-d-source-commit-sha",
+            source_commit,
+        ],
+        cwd=PROJECT_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
+@pytest.mark.parametrize("option_name", ["--historical-canonical-csv", "--canonical-csv"])
+def test_prepare_seed_validation_accepts_canonical_csv_aliases(tmp_path, option_name):
+    seed_dir = build_seed_output(tmp_path / "seed0")
+    historical_csv = tmp_path / "historical_eval30.csv"
+    write_canonical_eval30(historical_csv)
+
+    result = run_prepare_seed_validation_with_provenance(
+        seed_dir,
+        historical_csv,
+        extra_args=[option_name, str(historical_csv)],
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_prepare_seed_validation_rejects_conflicting_canonical_csv_alias_values(tmp_path):
+    seed_dir = build_seed_output(tmp_path / "seed0")
+    historical_csv = tmp_path / "historical_eval30.csv"
+    other_historical_csv = tmp_path / "other_historical_eval30.csv"
+    write_canonical_eval30(historical_csv)
+    write_canonical_eval30(other_historical_csv)
+
+    result = run_prepare_seed_validation_with_provenance(
+        seed_dir,
+        historical_csv,
+        extra_args=[
+            "--historical-canonical-csv",
+            str(historical_csv),
+            "--canonical-csv",
+            str(other_historical_csv),
+        ],
+    )
+
+    assert result.returncode != 0
+    assert "conflicting canonical CSV arguments" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("mutate_historical", "mutate_same_pass", "source_commit", "formal_validation_mutator", "field"),
+    [
+        (lambda rows: rows[0].update({"episode_seed": "bad-seed"}), None, "a" * 40, None, "episode_seed"),
+        (lambda rows: rows[0].update({"done": "maybe"}), None, "a" * 40, None, "done"),
+        (None, None, "NOT_A_SHA", None, "stage_d_source_commit_sha"),
+        (None, None, "a" * 40, lambda payload: payload.update({"formal_job_id": "not-a-job"}), "formal_job_id"),
+    ],
+)
+def test_malformed_identity_values_hard_fail_after_evidence_without_audit_classification(
+    tmp_path,
+    mutate_historical,
+    mutate_same_pass,
+    source_commit,
+    formal_validation_mutator,
+    field,
+):
+    seed_dir = build_seed_output(tmp_path / "seed0")
+    if mutate_same_pass is not None:
+        mutate_csv(seed_dir / "diagnostics" / "same_pass_canonical_eval30.csv", lambda _fields, rows: mutate_same_pass(rows))
+    historical_csv = tmp_path / "historical_eval30.csv"
+    write_canonical_eval30(historical_csv, mutator=mutate_historical)
+
+    result = run_prepare_seed_validation_with_provenance(
+        seed_dir,
+        historical_csv,
+        source_commit=source_commit,
+        formal_validation_mutator=formal_validation_mutator,
+        extra_args=["--historical-canonical-csv", str(historical_csv)],
+    )
+
+    assert result.returncode != 0
+    assert "historical_identity_mismatch" in result.stderr
+    _, drift_rows = read_csv_rows(seed_dir / "validation" / "historical_canonical_drift.csv")
+    identity_rows = [row for row in drift_rows if row["field"] == field]
+    assert identity_rows
+    assert {row["classification"] for row in identity_rows} == {"historical_identity_mismatch"}
+    assert all(row["classification"] != "not_comparable" for row in identity_rows)
+
+
+def test_mapping_validation_payload_is_built_without_writing_or_raising(tmp_path):
+    from scripts.validate_full_infrastructure_diagnostic_eval30 import (
+        build_mapping_validation_payload,
+        load_seed_reconciliation_inputs,
+    )
+
+    seed_dir = build_seed_output(tmp_path / "seed0")
+    historical_csv = tmp_path / "historical_eval30.csv"
+    write_canonical_eval30(historical_csv)
+    config_path, checkpoint_prefix = write_stage_d_provenance_files(tmp_path / "stage_d_files")
+    formal_validation_json = tmp_path / "formal_package_validation.json"
+    formal_validation_json.write_text(
+        json.dumps(formal_validation_for_stage_d_files(config_path, checkpoint_prefix), sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    inputs = load_seed_reconciliation_inputs(
+        diagnostic_dir=seed_dir / "diagnostics",
+        historical_canonical_csv=historical_csv,
+        validation_dir=seed_dir / "validation",
+        task_id=0,
+        training_seed=0,
+        formal_validation_json=formal_validation_json,
+        stage_d_source_commit_sha="a" * 40,
+        config_path=config_path,
+        checkpoint_prefix=checkpoint_prefix,
+    )
+
+    payload = build_mapping_validation_payload(inputs, inputs.transformer_rows, inputs.charger_rows)
+
+    assert payload["reconciliation_contract_version"] == 2
+    assert payload["status"] == "ok"
+    assert payload["scale"] == "25cp"
+    assert payload["expected_charger_count"] == 25
+    assert payload["expected_transformer_count"] == 3
+    assert payload["episode_count"] == 30
+    assert not (seed_dir / "validation" / "mapping_validation.json").exists()
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -1377,10 +2157,10 @@ def test_missing_required_input_fails_input_contract_without_complete_evidence_s
 Run:
 
 ```bash
-python -m pytest tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_reconciliation_evidence_remains_present_after_hard_gate_failure tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_missing_required_input_fails_input_contract_without_complete_evidence_set -q
+python -m pytest tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_reconciliation_evidence_remains_present_after_hard_gate_failure tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_missing_required_input_fails_input_contract_without_complete_evidence_set tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_prepare_seed_validation_accepts_canonical_csv_aliases tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_prepare_seed_validation_rejects_conflicting_canonical_csv_alias_values tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_malformed_identity_values_hard_fail_after_evidence_without_audit_classification tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_mapping_validation_payload_is_built_without_writing_or_raising -q
 ```
 
-Expected: FAIL because the CLI does not accept `--historical-canonical-csv` or `--runtime-metadata-dir`, or because evidence files are not written before raising.
+Expected: FAIL because the CLI does not accept `--historical-canonical-csv` or `--runtime-metadata-dir`, the alias conflicts are silently accepted, malformed identity values are classified as `not_comparable`, `build_mapping_validation_payload()` is missing, or evidence files are not written before raising.
 
 - [ ] **Step 3: Split pure builders from writers and gate evaluation**
 
@@ -1393,6 +2173,55 @@ def evaluate_service_reconciliation_rows(rows: list[dict[str, object]]) -> int:
         for row in rows
         if any(row[field] != "pass" for field in SERVICE_STATUS_FIELDS)
     )
+
+
+def build_mapping_validation_payload(
+    inputs: SeedReconciliationInputs,
+    transformer_rows: list[dict[str, str]],
+    charger_rows: list[dict[str, str]],
+) -> dict[str, object]:
+    expected_charger_count, expected_transformer_count = TOPOLOGY[inputs.scale]
+    episode_indexes = {_exact_integer(row.get("episode_index"), "episode_index") for row in inputs.diagnostic_rows}
+    transformer_episode_indexes = {_exact_integer(row.get("episode_index"), "episode_index") for row in transformer_rows}
+    charger_episode_indexes = {_exact_integer(row.get("episode_index"), "episode_index") for row in charger_rows}
+    charger_keys = {
+        (row.get("episode_index"), row.get("charger_id"))
+        for row in charger_rows
+    }
+    transformer_keys = {
+        (row.get("episode_index"), row.get("transformer_id"))
+        for row in transformer_rows
+    }
+    schema_versions = {
+        row.get("diagnostic_schema_version")
+        for row in [*inputs.diagnostic_rows, *transformer_rows, *charger_rows]
+    }
+    checks = {
+        "episode_count": len(episode_indexes) == EVAL_EPISODES,
+        "transformer_episode_coverage": transformer_episode_indexes == episode_indexes,
+        "charger_episode_coverage": charger_episode_indexes == episode_indexes,
+        "charger_row_count": len(charger_rows) == EVAL_EPISODES * expected_charger_count,
+        "transformer_row_count": len(transformer_rows) == EVAL_EPISODES * expected_transformer_count,
+        "unique_charger_keys": len(charger_keys) == len(charger_rows),
+        "unique_transformer_keys": len(transformer_keys) == len(transformer_rows),
+        "schema_version": schema_versions == {SCHEMA_VERSION},
+    }
+    return {
+        "reconciliation_contract_version": RECONCILIATION_CONTRACT_VERSION,
+        "status": "ok" if all(checks.values()) else "failed",
+        "failure_category": "" if all(checks.values()) else "mapping_validation_mismatch",
+        "scale": inputs.scale,
+        "algorithm": inputs.algorithm,
+        "task_id": inputs.task_id,
+        "training_seed": inputs.training_seed,
+        "episode_count": len(episode_indexes),
+        "expected_episode_count": EVAL_EPISODES,
+        "expected_charger_count": expected_charger_count,
+        "expected_transformer_count": expected_transformer_count,
+        "charger_row_count": len(charger_rows),
+        "transformer_row_count": len(transformer_rows),
+        "checks": checks,
+    }
 ```
 
 Replace `write_csv_rows()` at `scripts/validate_full_infrastructure_diagnostic_eval30.py:1789-1795` with atomic writers:
@@ -1426,6 +2255,7 @@ Add summary and error helpers:
 ```python
 def build_reconciliation_summary_payload(
     *,
+    inputs,
     same_pass_rows,
     historical_rows,
     service_rows,
@@ -1447,6 +2277,7 @@ def build_reconciliation_summary_payload(
     hard_failure_count = identity_failures + same_pass_failures + service_failures + mapping_failures
     return {
         "reconciliation_contract_version": RECONCILIATION_CONTRACT_VERSION,
+        "stage_d_source_commit_sha": inputs.stage_d_source_commit_sha,
         "status": "ok" if hard_failure_count == 0 else "failed",
         "hard_gate_status": "pass" if hard_failure_count == 0 else "fail",
         "historical_identity_status": "pass" if identity_failures == 0 else "fail",
@@ -1487,7 +2318,7 @@ Patch `prepare_seed_validation_files()` at `scripts/validate_full_infrastructure
 
 1. Accept parameters `historical_canonical_csv`, `runtime_metadata_dir`, `formal_validation_json=None`, `stage_d_source_commit_sha=""`, `config_path=None`, `checkpoint_prefix=None`.
 2. Wrap `load_seed_reconciliation_inputs()` in `try/except ValueError as exc` and raise `ValueError(f"input_contract_mismatch: {exc}")` before writing complete evidence.
-3. After inputs are readable, build in this order: `same_pass_rows`, `historical_rows`, `service_rows`, `mapping_payload`, `summary_payload`.
+3. After inputs are readable, build in this order: `same_pass_rows`, `historical_rows`, `service_rows`, `mapping_payload`, `summary_payload`. Call `build_reconciliation_summary_payload(inputs=inputs, same_pass_rows=same_pass_rows, historical_rows=historical_rows, service_rows=service_rows, mapping_payload=mapping_payload)`.
 4. Write atomically in this order: `validation/same_pass_canonical_reconciliation.csv`, `validation/historical_canonical_drift.csv`, `validation/service_reconciliation.csv`, `validation/mapping_validation.json`, `runtime_metadata/reconciliation_summary.json`.
 5. Call `raise_reconciliation_contract_error(summary_payload["failure_categories"])`.
 6. Return counts and `reconciliation_contract_version`.
@@ -1495,8 +2326,13 @@ Patch `prepare_seed_validation_files()` at `scripts/validate_full_infrastructure
 Patch CLI at `scripts/validate_full_infrastructure_diagnostic_eval30.py:2788-2797`:
 
 ```python
-    seed_validation_parser.add_argument("--historical-canonical-csv", required=True, type=Path)
-    seed_validation_parser.add_argument("--canonical-csv", dest="historical_canonical_csv", type=Path)
+    seed_validation_parser.add_argument(
+        "--historical-canonical-csv",
+        "--canonical-csv",
+        dest="historical_canonical_csv",
+        required=True,
+        type=Path,
+    )
     seed_validation_parser.add_argument("--runtime-metadata-dir", required=True, type=Path)
     seed_validation_parser.add_argument("--formal-validation-json", type=Path)
     seed_validation_parser.add_argument("--stage-d-source-commit-sha", required=True)
@@ -1504,17 +2340,34 @@ Patch CLI at `scripts/validate_full_infrastructure_diagnostic_eval30.py:2788-279
     seed_validation_parser.add_argument("--checkpoint-prefix", type=Path)
 ```
 
-Keep `--canonical-csv` as a backward-compatible alias during the implementation commit, but all Slurm and tests must use `--historical-canonical-csv`.
+Keep `--canonical-csv` as a backward-compatible alias during the implementation commit, but all Slurm and new tests must use `--historical-canonical-csv` except the alias-specific tests above. Replace the parse line in `main(argv: list[str] | None = None)` with this explicit conflict guard:
+
+```python
+def _option_values(argv: list[str], option: str) -> list[str]:
+    values: list[str] = []
+    for index, token in enumerate(argv):
+        if token == option and index + 1 < len(argv):
+            values.append(argv[index + 1])
+    return values
+
+
+effective_argv = sys.argv[1:] if argv is None else list(argv)
+args = parser.parse_args(effective_argv)
+historical_values = _option_values(effective_argv, "--historical-canonical-csv")
+legacy_values = _option_values(effective_argv, "--canonical-csv")
+if historical_values and legacy_values and Path(historical_values[-1]) != Path(legacy_values[-1]):
+    parser.error("conflicting canonical CSV arguments")
+```
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run:
 
 ```bash
-python -m pytest tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_reconciliation_evidence_remains_present_after_hard_gate_failure tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_missing_required_input_fails_input_contract_without_complete_evidence_set -q
+python -m pytest tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_reconciliation_evidence_remains_present_after_hard_gate_failure tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_missing_required_input_fails_input_contract_without_complete_evidence_set tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_prepare_seed_validation_accepts_canonical_csv_aliases tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_prepare_seed_validation_rejects_conflicting_canonical_csv_alias_values tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_malformed_identity_values_hard_fail_after_evidence_without_audit_classification tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_mapping_validation_payload_is_built_without_writing_or_raising -q
 ```
 
-Expected: PASS, `2 passed`.
+Expected: PASS, `10 passed` because the alias test is parametrized across two spellings and the malformed identity test is parametrized across three malformed inputs.
 
 - [ ] **Step 5: Commit**
 
@@ -1535,102 +2388,133 @@ git commit -m "Write reconciliation evidence before hard gate failures"
 
 - [ ] **Step 1: Write failing seed/package contract tests**
 
-Patch `build_seed_output()` at `tests/test_full_infrastructure_diagnostic_eval30_workflow.py:333-530` to create `runtime_metadata` and a passing summary:
+Add these imports and helper builders near `CANONICAL_EVAL30_COLUMNS` at `tests/test_full_infrastructure_diagnostic_eval30_workflow.py:188-254`:
 
 ```python
-    runtime_metadata = root / "runtime_metadata"
-    runtime_metadata.mkdir()
-    write_same_pass_canonical_eval30(diagnostics / "same_pass_canonical_eval30.csv", scale=scale, algorithm=algorithm, training_seed=training_seed)
-    write_csv(
-        validation / "same_pass_canonical_reconciliation.csv",
-        [
-            "reconciliation_contract_version",
-            "episode_index",
-            "field",
-            "comparison_type",
-            "same_pass_canonical_value",
-            "diagnostic_value",
-            "absolute_difference",
-            "relative_difference",
-            "same_pass_count",
-            "diagnostic_count",
-            "total_action_decision_denominator",
-            "status",
-            "failure_category",
-        ],
-        [
-            {
+from scripts.validate_full_infrastructure_diagnostic_eval30 import (
+    HISTORICAL_DRIFT_COLUMNS,
+    HISTORICAL_FLOAT_FIELDS,
+    HISTORICAL_IDENTITY_FIELDS,
+    PROVENANCE_IDENTITY_FIELDS,
+    SAME_PASS_FIELD_MAP,
+    SAME_PASS_RECONCILIATION_COLUMNS,
+)
+
+
+def passing_same_pass_reconciliation_rows():
+    rows = []
+    for episode_index in range(EVAL_EPISODES):
+        for canonical_field, _diagnostic_field, comparison_type in SAME_PASS_FIELD_MAP:
+            is_fraction = comparison_type == "fraction_count_exact"
+            rows.append({
                 "reconciliation_contract_version": "2",
                 "episode_index": str(episode_index),
-                "field": "episode_reward",
-                "comparison_type": "float_exact",
-                "same_pass_canonical_value": "-1.0",
-                "diagnostic_value": "-1.0",
+                "field": canonical_field,
+                "comparison_type": comparison_type,
+                "same_pass_canonical_value": "0.5" if canonical_field.startswith("action") else "-1.0",
+                "diagnostic_value": "0.5" if canonical_field.startswith("action") else "-1.0",
                 "absolute_difference": "0.0",
                 "relative_difference": "0.0",
-                "same_pass_count": "",
-                "diagnostic_count": "",
-                "total_action_decision_denominator": "",
+                "same_pass_count": "1400" if is_fraction else "",
+                "diagnostic_count": "1400" if is_fraction else "",
+                "total_action_decision_denominator": "2800" if is_fraction else "",
                 "status": "pass",
                 "failure_category": "",
-            }
-            for episode_index in range(30)
-        ],
-    )
-    write_csv(
-        validation / "historical_canonical_drift.csv",
-        [
-            "reconciliation_contract_version",
-            "scale",
-            "algorithm",
-            "training_seed",
-            "formal_task_id",
-            "episode_index",
-            "episode_seed",
-            "field",
-            "historical_source_label",
-            "stage_d_source_label",
-            "historical_value",
-            "stage_d_same_pass_value",
-            "absolute_difference",
-            "relative_difference",
-            "classification",
-            "historical_at_max_count",
-            "stage_d_at_max_count",
-            "total_action_decision_denominator",
-            "count_difference",
-            "fraction_difference",
-        ],
-        [
-            {
+            })
+    return rows
+
+
+def passing_historical_drift_rows(*, scale, algorithm, task_id, training_seed):
+    rows = []
+    for field in PROVENANCE_IDENTITY_FIELDS:
+        rows.append({
+            "reconciliation_contract_version": "2",
+            "scale": "",
+            "algorithm": "",
+            "training_seed": "",
+            "formal_task_id": "",
+            "episode_index": "",
+            "episode_seed": "",
+            "field": field,
+            "historical_source_label": "formal_job_58513929_package_validation",
+            "stage_d_source_label": "stage_d_runtime_metadata",
+            "historical_value": "match",
+            "stage_d_same_pass_value": "match",
+            "absolute_difference": "",
+            "relative_difference": "",
+            "classification": "historical_identity_match",
+            "historical_at_max_count": "",
+            "stage_d_at_max_count": "",
+            "total_action_decision_denominator": "",
+            "count_difference": "",
+            "fraction_difference": "",
+        })
+    for episode_index in range(EVAL_EPISODES):
+        seed_value = str(episode_seed(scale, training_seed, episode_index))
+        for field, _historical_field, _stage_d_field, _value_type in HISTORICAL_IDENTITY_FIELDS:
+            rows.append({
                 "reconciliation_contract_version": "2",
                 "scale": scale,
                 "algorithm": algorithm,
                 "training_seed": str(training_seed),
                 "formal_task_id": str(formal_task_id(task_id, training_seed)),
                 "episode_index": str(episode_index),
-                "episode_seed": str(episode_seed(scale, training_seed, episode_index)),
-                "field": "episode_reward",
+                "episode_seed": seed_value,
+                "field": field,
                 "historical_source_label": "formal_job_58513929_canonical_eval30",
                 "stage_d_source_label": "stage_d_same_pass_canonical_eval30",
-                "historical_value": "-1.0",
-                "stage_d_same_pass_value": "-1.0",
-                "absolute_difference": "0.0",
-                "relative_difference": "0.0",
-                "classification": "exact_match",
+                "historical_value": "match",
+                "stage_d_same_pass_value": "match",
+                "absolute_difference": "",
+                "relative_difference": "",
+                "classification": "historical_identity_match",
                 "historical_at_max_count": "",
                 "stage_d_at_max_count": "",
                 "total_action_decision_denominator": "",
                 "count_difference": "",
                 "fraction_difference": "",
-            }
-            for episode_index in range(30)
-        ],
-    )
+            })
+        for historical_field, _stage_d_field in HISTORICAL_FLOAT_FIELDS:
+            rows.append({
+                "reconciliation_contract_version": "2",
+                "scale": scale,
+                "algorithm": algorithm,
+                "training_seed": str(training_seed),
+                "formal_task_id": str(formal_task_id(task_id, training_seed)),
+                "episode_index": str(episode_index),
+                "episode_seed": seed_value,
+                "field": historical_field,
+                "historical_source_label": "formal_job_58513929_canonical_eval30",
+                "stage_d_source_label": "stage_d_same_pass_canonical_eval30",
+                "historical_value": "0.0",
+                "stage_d_same_pass_value": "0.0",
+                "absolute_difference": "0.0",
+                "relative_difference": "0.0",
+                "classification": "exact_match",
+                "historical_at_max_count": "1400" if historical_field == "action_fraction_at_max" else "",
+                "stage_d_at_max_count": "1400" if historical_field == "action_fraction_at_max" else "",
+                "total_action_decision_denominator": "2800" if historical_field == "action_fraction_at_max" else "",
+                "count_difference": "0" if historical_field == "action_fraction_at_max" else "",
+                "fraction_difference": "0.0" if historical_field == "action_fraction_at_max" else "",
+            })
+    return rows
+```
+
+Patch `build_seed_output()` at `tests/test_full_infrastructure_diagnostic_eval30_workflow.py:333-530` to accept `source_commit_sha="a" * 40`, create `runtime_metadata`, and write a passing summary. Patch task-package fixture builders at `tests/test_full_infrastructure_diagnostic_eval30_workflow.py:811-1154` so they pass the same `source_commit_sha` into every `build_seed_output()` call that they write into task metadata.
+
+```python
+    runtime_metadata = root / "runtime_metadata"
+    runtime_metadata.mkdir()
+    write_same_pass_canonical_eval30(diagnostics / "same_pass_canonical_eval30.csv", scale=scale, algorithm=algorithm, training_seed=training_seed)
+    same_pass_rows = passing_same_pass_reconciliation_rows()
+    historical_rows = passing_historical_drift_rows(scale=scale, algorithm=algorithm, task_id=task_id, training_seed=training_seed)
+    write_csv(validation / "same_pass_canonical_reconciliation.csv", SAME_PASS_RECONCILIATION_COLUMNS, same_pass_rows)
+    write_csv(validation / "historical_canonical_drift.csv", HISTORICAL_DRIFT_COLUMNS, historical_rows)
     (runtime_metadata / "reconciliation_summary.json").write_text(
         json.dumps(
             {
                 "reconciliation_contract_version": 2,
+                "stage_d_source_commit_sha": source_commit_sha,
                 "status": "ok",
                 "hard_gate_status": "pass",
                 "historical_identity_status": "pass",
@@ -1641,6 +2525,15 @@ Patch `build_seed_output()` at `tests/test_full_infrastructure_diagnostic_eval30
                 "evidence_write_status": "complete",
                 "failure_categories": [],
                 "hard_failure_count": 0,
+                "historical_identity_failure_count": 0,
+                "same_pass_metric_failure_count": 0,
+                "service_reconciliation_failure_count": 0,
+                "mapping_validation_failure_count": 0,
+                "same_pass_canonical_rows": 31,
+                "same_pass_reconciliation_rows": len(same_pass_rows),
+                "historical_drift_rows": len(historical_rows),
+                "historical_float_drift_count": 0,
+                "historical_saturation_count_drift_count": 0,
             },
             sort_keys=True,
         )
@@ -1678,6 +2571,49 @@ def test_validate_seed_output_rejects_reconciliation_contract_version_mismatch(t
 
     with pytest.raises(ValueError, match="reconciliation contract"):
         validate_seed_output_directory(seed_dir, task_id=0, training_seed=0)
+
+
+def test_validate_seed_output_rejects_missing_same_pass_reconciliation_row(tmp_path):
+    seed_dir = build_seed_output(tmp_path / "seed0")
+    path = seed_dir / "validation" / "same_pass_canonical_reconciliation.csv"
+    fields, rows = read_csv_rows(path)
+    write_csv(path, fields, rows[:-1])
+
+    with pytest.raises(ValueError, match="same-pass reconciliation row count"):
+        validate_seed_output_directory(seed_dir, task_id=0, training_seed=0)
+
+
+def test_validate_seed_output_rejects_duplicate_historical_drift_key(tmp_path):
+    seed_dir = build_seed_output(tmp_path / "seed0")
+    path = seed_dir / "validation" / "historical_canonical_drift.csv"
+    fields, rows = read_csv_rows(path)
+    rows.append(dict(rows[-1]))
+    write_csv(path, fields, rows)
+
+    with pytest.raises(ValueError, match="duplicate historical drift key"):
+        validate_seed_output_directory(seed_dir, task_id=0, training_seed=0)
+
+
+def test_validate_seed_output_rejects_reconciliation_row_wrong_version(tmp_path):
+    seed_dir = build_seed_output(tmp_path / "seed0")
+    path = seed_dir / "validation" / "same_pass_canonical_reconciliation.csv"
+    fields, rows = read_csv_rows(path)
+    rows[0]["reconciliation_contract_version"] = "1"
+    write_csv(path, fields, rows)
+
+    with pytest.raises(ValueError, match="reconciliation contract"):
+        validate_seed_output_directory(seed_dir, task_id=0, training_seed=0)
+
+
+def test_validate_seed_output_rejects_summary_count_mismatch(tmp_path):
+    seed_dir = build_seed_output(tmp_path / "seed0")
+    summary_path = seed_dir / "runtime_metadata" / "reconciliation_summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["same_pass_reconciliation_rows"] = summary["same_pass_reconciliation_rows"] - 1
+    summary_path.write_text(json.dumps(summary, sort_keys=True) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="summary count"):
+        validate_seed_output_directory(seed_dir, task_id=0, training_seed=0)
 ```
 
 Add this package membership test after `test_task3_rejects_missing_seed_group()` at `tests/test_full_infrastructure_diagnostic_eval30_workflow.py:1000-1007`:
@@ -1691,6 +2627,19 @@ def test_task_package_validation_requires_all_new_reconciliation_evidence(tmp_pa
 
     with pytest.raises(ValueError, match="file set mismatch"):
         _task3_validate_package(package, task_id=0)
+
+
+def test_task_package_validation_rejects_seed_summary_source_commit_mismatch(tmp_path):
+    def mutate(root):
+        summary_path = root / "seed3" / "runtime_metadata" / "reconciliation_summary.json"
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        summary["stage_d_source_commit_sha"] = "b" * 40
+        summary_path.write_text(json.dumps(summary, sort_keys=True) + "\n", encoding="utf-8")
+
+    package = build_task3_package(tmp_path, staging_mutator=mutate, source_commit_sha="a" * 40)
+
+    with pytest.raises(ValueError, match="Stage D source commit mismatch"):
+        _task3_validate_package(package, task_id=0)
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -1698,10 +2647,10 @@ def test_task_package_validation_requires_all_new_reconciliation_evidence(tmp_pa
 Run:
 
 ```bash
-python -m pytest tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_validate_seed_output_requires_new_reconciliation_evidence tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_validate_seed_output_rejects_reconciliation_contract_version_mismatch tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_task_package_validation_requires_all_new_reconciliation_evidence -q
+python -m pytest tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_validate_seed_output_requires_new_reconciliation_evidence tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_validate_seed_output_rejects_reconciliation_contract_version_mismatch tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_validate_seed_output_rejects_missing_same_pass_reconciliation_row tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_validate_seed_output_rejects_duplicate_historical_drift_key tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_validate_seed_output_rejects_reconciliation_row_wrong_version tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_validate_seed_output_rejects_summary_count_mismatch tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_task_package_validation_requires_all_new_reconciliation_evidence tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_task_package_validation_rejects_seed_summary_source_commit_mismatch -q
 ```
 
-Expected: FAIL because `validate_seed_output_directory()` and `SEED_PACKAGE_FILES` do not require all new evidence.
+Expected: FAIL because `validate_seed_output_directory()` and `SEED_PACKAGE_FILES` do not require all new evidence, exact row counts, unique keys, row-level contract version `2`, or summary count reconciliation.
 
 - [ ] **Step 3: Implement seed and package migration**
 
@@ -1726,23 +2675,77 @@ SEED_PACKAGE_FILES: Final[tuple[str, ...]] = (
 Patch `validate_seed_output_directory()` at `scripts/validate_full_infrastructure_diagnostic_eval30.py:437-584`:
 
 ```python
+    def _require_exact_columns(fieldnames, expected_columns, label):
+        if tuple(fieldnames) != tuple(expected_columns):
+            raise ValueError(f"{label} columns mismatch")
+
+    def _require_contract_version(rows, label):
+        bad = [row for row in rows if str(row.get("reconciliation_contract_version")) != str(RECONCILIATION_CONTRACT_VERSION)]
+        if bad:
+            raise ValueError(f"{label} reconciliation contract version mismatch")
+
+    def _require_unique_keys(rows, key_fields, label):
+        seen = set()
+        for row in rows:
+            key = tuple(row.get(field, "") for field in key_fields)
+            if key in seen:
+                raise ValueError(f"duplicate {label} key: {key}")
+            seen.add(key)
+
     runtime_metadata = root / "runtime_metadata"
     same_pass_fields, same_pass_rows = _read_csv(diagnostics / SAME_PASS_CANONICAL_FILENAME)
     _require_columns(
         same_pass_fields,
-        {"row_type", "episode_index", "episode_seed", "same_pass_at_max_count", "total_action_decision_denominator"},
+        {
+            "row_type",
+            "algorithm",
+            "seed",
+            "episode_index",
+            "episode_seed",
+            "episode_steps",
+            "done",
+            "episode_reward",
+            "tracking_error",
+            "action_mean",
+            "action_fraction_at_max",
+            "active_action_count_mean",
+            "mapped_action_dimension",
+            "same_pass_at_max_count",
+            "total_action_decision_denominator",
+        },
         "same-pass canonical eval30",
     )
     same_pass_episode_count = sum(row.get("row_type") == "episode" for row in same_pass_rows)
     same_pass_summary_count = sum(row.get("row_type") == "summary" for row in same_pass_rows)
     if same_pass_episode_count != EVAL_EPISODES or same_pass_summary_count != 1:
         raise ValueError("same-pass canonical reconciliation evidence must contain 30 episodes and one summary")
-    same_pass_reconciliation_rows = _validate_status_csv(
-        validation / SAME_PASS_RECONCILIATION_FILENAME,
-        label="same-pass canonical reconciliation",
-        required_status_fields=("status",),
-    )
-    _read_csv(validation / HISTORICAL_DRIFT_FILENAME)
+    same_pass_reconciliation_fields, same_pass_reconciliation_rows = _read_csv(validation / SAME_PASS_RECONCILIATION_FILENAME)
+    _require_exact_columns(same_pass_reconciliation_fields, SAME_PASS_RECONCILIATION_COLUMNS, "same-pass canonical reconciliation")
+    _require_contract_version(same_pass_reconciliation_rows, "same-pass canonical reconciliation")
+    expected_same_pass_rows = EVAL_EPISODES * len(SAME_PASS_FIELD_MAP)
+    if len(same_pass_reconciliation_rows) != expected_same_pass_rows:
+        raise ValueError("same-pass reconciliation row count mismatch")
+    _require_unique_keys(same_pass_reconciliation_rows, ("episode_index", "field"), "same-pass reconciliation")
+    if any(row.get("status") != "pass" for row in same_pass_reconciliation_rows):
+        raise ValueError("same-pass reconciliation status mismatch")
+
+    historical_fields, historical_rows = _read_csv(validation / HISTORICAL_DRIFT_FILENAME)
+    _require_exact_columns(historical_fields, HISTORICAL_DRIFT_COLUMNS, "historical canonical drift")
+    _require_contract_version(historical_rows, "historical canonical drift")
+    expected_historical_rows = len(PROVENANCE_IDENTITY_FIELDS) + EVAL_EPISODES * (len(HISTORICAL_IDENTITY_FIELDS) + len(HISTORICAL_FLOAT_FIELDS))
+    if len(historical_rows) != expected_historical_rows:
+        raise ValueError("historical drift row count mismatch")
+    _require_unique_keys(historical_rows, ("episode_index", "episode_seed", "field"), "historical drift")
+    expected_provenance_fields = set(PROVENANCE_IDENTITY_FIELDS)
+    actual_provenance_fields = {row["field"] for row in historical_rows if row.get("episode_index", "") == ""}
+    if actual_provenance_fields != expected_provenance_fields:
+        raise ValueError("historical provenance field coverage mismatch")
+    expected_episode_fields = {field for field, *_rest in HISTORICAL_IDENTITY_FIELDS} | {field for field, _stage_d_field in HISTORICAL_FLOAT_FIELDS}
+    for episode_index in range(EVAL_EPISODES):
+        fields = {row["field"] for row in historical_rows if row.get("episode_index") == str(episode_index)}
+        if fields != expected_episode_fields:
+            raise ValueError(f"historical drift field coverage mismatch for episode {episode_index}")
+    historical_classification_counts = collections.Counter(row["classification"] for row in historical_rows)
     reconciliation_summary = _read_json_object(
         runtime_metadata / RECONCILIATION_SUMMARY_FILENAME,
         "reconciliation summary",
@@ -1758,6 +2761,18 @@ Patch `validate_seed_output_directory()` at `scripts/validate_full_infrastructur
     }.items():
         if reconciliation_summary.get(field) != expected:
             raise ValueError(f"reconciliation summary {field} mismatch")
+    expected_counts = {
+        "same_pass_canonical_rows": len(same_pass_rows),
+        "same_pass_reconciliation_rows": len(same_pass_reconciliation_rows),
+        "historical_drift_rows": len(historical_rows),
+        "historical_identity_failure_count": historical_classification_counts["historical_identity_mismatch"],
+        "historical_float_drift_count": historical_classification_counts["historical_float_drift"],
+        "historical_saturation_count_drift_count": historical_classification_counts["historical_saturation_count_drift"],
+        "same_pass_metric_failure_count": 0,
+    }
+    for field, expected in expected_counts.items():
+        if int(reconciliation_summary.get(field, -1)) != int(expected):
+            raise ValueError(f"reconciliation summary count mismatch for {field}")
 ```
 
 Return these additional fields:
@@ -1773,6 +2788,8 @@ Patch `_validate_task_metadata()` at `scripts/validate_full_infrastructure_diagn
 ```python
 "reconciliation_contract_version": RECONCILIATION_CONTRACT_VERSION,
 ```
+
+Patch `validate_stage_d_task_package()` at `scripts/validate_full_infrastructure_diagnostic_eval30.py:927-989` so every seed's `runtime_metadata/reconciliation_summary.json` has `stage_d_source_commit_sha` equal to the task metadata `source_commit_sha`; any mismatch raises `ValueError("Stage D source commit mismatch")` and blocks task package publication.
 
 Patch `_validate_task_validation()` at `scripts/validate_full_infrastructure_diagnostic_eval30.py:880-897` and `validation_payload` at `scripts/validate_full_infrastructure_diagnostic_eval30.py:1916-1922` to require and write:
 
@@ -1791,7 +2808,7 @@ Patch `validate_stage_d_task_package()` return at `scripts/validate_full_infrast
 Run:
 
 ```bash
-python -m pytest tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_validate_seed_output_accepts_exact_seed_directory tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_validate_seed_output_requires_new_reconciliation_evidence tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_validate_seed_output_rejects_reconciliation_contract_version_mismatch tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_task3_valid_five_seed_package_passes tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_task_package_validation_requires_all_new_reconciliation_evidence -q
+python -m pytest tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_validate_seed_output_accepts_exact_seed_directory tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_validate_seed_output_requires_new_reconciliation_evidence tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_validate_seed_output_rejects_reconciliation_contract_version_mismatch tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_validate_seed_output_rejects_missing_same_pass_reconciliation_row tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_validate_seed_output_rejects_duplicate_historical_drift_key tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_validate_seed_output_rejects_reconciliation_row_wrong_version tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_validate_seed_output_rejects_summary_count_mismatch tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_task3_valid_five_seed_package_passes tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_task_package_validation_requires_all_new_reconciliation_evidence tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_task_package_validation_rejects_seed_summary_source_commit_mismatch -q
 ```
 
 Expected: PASS, including updated assertions that task-package validation returns `reconciliation_contract_version == 2`.
@@ -1863,6 +2880,77 @@ def test_complete_bundle_validation_requires_reconciliation_summaries(tmp_path):
 
     assert result.returncode != 0
     assert "historical_canonical_drift_summary" in result.stderr
+
+
+def rewrite_bundle_csv_member(source_bundle, target_bundle, member_name, row_mutator):
+    with tarfile.open(source_bundle, "r:gz") as source, tarfile.open(target_bundle, "w:gz") as target:
+        for member in source.getmembers():
+            if not member.isfile():
+                target.addfile(member)
+                continue
+            payload = source.extractfile(member).read()
+            if member.name == member_name:
+                text = payload.decode("utf-8")
+                reader = csv.DictReader(io.StringIO(text))
+                fieldnames = list(reader.fieldnames or [])
+                rows = list(reader)
+                row_mutator(fieldnames, rows)
+                buffer = io.StringIO()
+                writer = csv.DictWriter(buffer, fieldnames=fieldnames, lineterminator="\n")
+                writer.writeheader()
+                writer.writerows(rows)
+                payload = buffer.getvalue().encode("utf-8")
+                member = tarfile.TarInfo(member.name)
+                member.size = len(payload)
+            target.addfile(member, io.BytesIO(payload))
+
+
+@pytest.mark.parametrize(
+    ("member_name", "row_mutator", "expected_error"),
+    [
+        (
+            "summaries/same_pass_canonical_reconciliation_summary.csv",
+            lambda _fields, rows: rows.pop(),
+            "same-pass reconciliation summary row count",
+        ),
+        (
+            "summaries/historical_canonical_drift_summary.csv",
+            lambda _fields, rows: rows.append(dict(rows[-1])),
+            "duplicate historical drift summary key",
+        ),
+        (
+            "summaries/reconciliation_summary_inventory.csv",
+            lambda _fields, rows: rows[0].update({"reconciliation_contract_version": "1"}),
+            "reconciliation contract version",
+        ),
+        (
+            "summaries/reconciliation_summary_inventory.csv",
+            lambda _fields, rows: rows[0].update({"same_pass_reconciliation_rows": "1"}),
+            "inventory count mismatch",
+        ),
+        (
+            "summaries/reconciliation_summary_inventory.csv",
+            lambda _fields, rows: rows[0].update({"stage_d_source_commit_sha": "b" * 40}),
+            "Stage D source commit mismatch",
+        ),
+    ],
+)
+def test_complete_bundle_validation_rejects_corrupt_reconciliation_summaries(
+    tmp_path,
+    member_name,
+    row_mutator,
+    expected_error,
+):
+    fixture = create_task5_reducer_fixture(tmp_path)
+    result = run_task5_reducer(fixture)
+    bundle = Path(json.loads(result.stdout)["bundle_path"])
+    broken = tmp_path / f"broken_{Path(member_name).name}.tar.gz"
+    rewrite_bundle_csv_member(bundle, broken, member_name, row_mutator)
+
+    result = run_full_validator("validate-complete-bundle", "--bundle", broken, check=False)
+
+    assert result.returncode != 0
+    assert expected_error in result.stderr
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -1870,10 +2958,10 @@ def test_complete_bundle_validation_requires_reconciliation_summaries(tmp_path):
 Run:
 
 ```bash
-python -m pytest tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_reducer_emits_all_three_reconciliation_summaries tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_complete_bundle_validation_requires_reconciliation_summaries -q
+python -m pytest tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_reducer_emits_all_three_reconciliation_summaries tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_complete_bundle_validation_requires_reconciliation_summaries tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_complete_bundle_validation_rejects_corrupt_reconciliation_summaries -q
 ```
 
-Expected: FAIL because the complete bundle still emits `canonical_reconciliation_summary.csv` and does not require the three reconciliation-v2 summaries.
+Expected: FAIL because the complete bundle still emits `canonical_reconciliation_summary.csv`, does not require the three reconciliation-v2 summaries, and does not validate truncated, duplicated, wrong-version, count-inconsistent, or source-commit-mismatched summary CSVs.
 
 - [ ] **Step 3: Implement reducer migration**
 
@@ -1916,10 +3004,15 @@ Enrich each same-pass and drift row with `task_id`, `scale`, `algorithm`, `train
             "training_seed": str(seed),
             "formal_task_id": str(formal_task_id(task_id, seed)),
             "reconciliation_contract_version": str(reconciliation_summary["reconciliation_contract_version"]),
+            "stage_d_source_commit_sha": str(reconciliation_summary["stage_d_source_commit_sha"]),
             "status": str(reconciliation_summary["status"]),
             "hard_gate_status": str(reconciliation_summary["hard_gate_status"]),
             "historical_identity_status": str(reconciliation_summary["historical_identity_status"]),
             "same_pass_metric_status": str(reconciliation_summary["same_pass_metric_status"]),
+            "same_pass_reconciliation_rows": str(reconciliation_summary["same_pass_reconciliation_rows"]),
+            "historical_drift_rows": str(reconciliation_summary["historical_drift_rows"]),
+            "historical_identity_failure_count": str(reconciliation_summary.get("historical_identity_failure_count", 0)),
+            "same_pass_metric_failure_count": str(reconciliation_summary.get("same_pass_metric_failure_count", 0)),
             "historical_float_drift_count": str(reconciliation_summary.get("historical_float_drift_count", 0)),
             "historical_saturation_count_drift_count": str(reconciliation_summary.get("historical_saturation_count_drift_count", 0)),
         })
@@ -1939,10 +3032,15 @@ Patch `reduce_complete_workflow()` at `scripts/validate_full_infrastructure_diag
         "training_seed",
         "formal_task_id",
         "reconciliation_contract_version",
+        "stage_d_source_commit_sha",
         "status",
         "hard_gate_status",
         "historical_identity_status",
         "same_pass_metric_status",
+        "same_pass_reconciliation_rows",
+        "historical_drift_rows",
+        "historical_identity_failure_count",
+        "same_pass_metric_failure_count",
         "historical_float_drift_count",
         "historical_saturation_count_drift_count",
     ]
@@ -1956,17 +3054,57 @@ Patch `validation_payload` at `scripts/validate_full_infrastructure_diagnostic_e
 "reconciliation_contract_version": RECONCILIATION_CONTRACT_VERSION,
 ```
 
-Patch `validate_complete_bundle_file()` to read `reconciliation_summary_inventory.csv`, require exactly 40 rows, require every row has version `"2"`, `status == "ok"`, and `hard_gate_status == "pass"`.
+Patch `validate_complete_bundle_file()` to read all three reconciliation summaries and enforce this exact accounting:
+
+```python
+same_pass_fields, same_pass_rows = _read_csv(root / "summaries" / "same_pass_canonical_reconciliation_summary.csv")
+historical_fields, historical_rows = _read_csv(root / "summaries" / "historical_canonical_drift_summary.csv")
+inventory_fields, inventory_rows = _read_csv(root / "summaries" / "reconciliation_summary_inventory.csv")
+_require_contract_version(same_pass_rows, "same-pass reconciliation summary")
+_require_contract_version(historical_rows, "historical drift summary")
+_require_contract_version(inventory_rows, "reconciliation inventory")
+if len(inventory_rows) != len(STAGE_D_TASKS) * len(TRAINING_SEEDS):
+    raise ValueError("reconciliation inventory row count mismatch")
+_require_unique_keys(inventory_rows, ("task_id", "training_seed"), "reconciliation inventory")
+_require_unique_keys(same_pass_rows, ("task_id", "training_seed", "episode_index", "field"), "same-pass reconciliation summary")
+_require_unique_keys(historical_rows, ("task_id", "training_seed", "episode_index", "episode_seed", "field"), "historical drift summary")
+expected_same_pass_rows = len(STAGE_D_TASKS) * len(TRAINING_SEEDS) * EVAL_EPISODES * len(SAME_PASS_FIELD_MAP)
+expected_historical_rows = len(STAGE_D_TASKS) * len(TRAINING_SEEDS) * (len(PROVENANCE_IDENTITY_FIELDS) + EVAL_EPISODES * (len(HISTORICAL_IDENTITY_FIELDS) + len(HISTORICAL_FLOAT_FIELDS)))
+if len(same_pass_rows) != expected_same_pass_rows:
+    raise ValueError("same-pass reconciliation summary row count mismatch")
+if len(historical_rows) != expected_historical_rows:
+    raise ValueError("historical drift summary row count mismatch")
+if any(row.get("status") != "ok" or row.get("hard_gate_status") != "pass" for row in inventory_rows):
+    raise ValueError("reconciliation inventory hard gate mismatch")
+source_commits = {row["stage_d_source_commit_sha"] for row in inventory_rows}
+if len(source_commits) != 1 or not re.fullmatch(r"[0-9a-f]{40}", next(iter(source_commits))):
+    raise ValueError("Stage D source commit mismatch")
+inventory_same_pass_total = sum(int(row["same_pass_reconciliation_rows"]) for row in inventory_rows)
+inventory_historical_total = sum(int(row["historical_drift_rows"]) for row in inventory_rows)
+if inventory_same_pass_total != len(same_pass_rows):
+    raise ValueError("inventory count mismatch for same-pass reconciliation rows")
+if inventory_historical_total != len(historical_rows):
+    raise ValueError("inventory count mismatch for historical drift rows")
+if sum(int(row["same_pass_metric_failure_count"]) for row in inventory_rows) != sum(row.get("status") != "pass" for row in same_pass_rows):
+    raise ValueError("inventory count mismatch for same-pass failures")
+historical_counts = collections.Counter(row["classification"] for row in historical_rows)
+if sum(int(row["historical_identity_failure_count"]) for row in inventory_rows) != historical_counts["historical_identity_mismatch"]:
+    raise ValueError("inventory count mismatch for historical identity failures")
+if sum(int(row["historical_float_drift_count"]) for row in inventory_rows) != historical_counts["historical_float_drift"]:
+    raise ValueError("inventory count mismatch for historical float drift")
+if sum(int(row["historical_saturation_count_drift_count"]) for row in inventory_rows) != historical_counts["historical_saturation_count_drift"]:
+    raise ValueError("inventory count mismatch for historical saturation drift")
+```
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run:
 
 ```bash
-python -m pytest tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_task5_complete_workflow_accepts_synthetic_8_task_packages tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_reducer_emits_all_three_reconciliation_summaries tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_complete_bundle_validation_requires_reconciliation_summaries -q
+python -m pytest tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_task5_complete_workflow_accepts_synthetic_8_task_packages tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_reducer_emits_all_three_reconciliation_summaries tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_complete_bundle_validation_requires_reconciliation_summaries tests/test_full_infrastructure_diagnostic_eval30_workflow.py::test_complete_bundle_validation_rejects_corrupt_reconciliation_summaries -q
 ```
 
-Expected: PASS, `3 passed`.
+Expected: PASS, `8 passed` because the corrupt-summary validation test is parametrized across five cases.
 
 - [ ] **Step 5: Commit**
 
@@ -2329,10 +3467,21 @@ Expected: PASS. No local test invokes `sbatch`, live `sacct`, network access, re
 - [ ] Python source compilation without writing bytecode:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 python -m py_compile evaluate_td3_gnn.py evaluate_td3_gnn_infrastructure_diagnostics.py utils/infrastructure_diagnostics.py scripts/validate_full_infrastructure_diagnostic_eval30.py
+python - <<'PY'
+from pathlib import Path
+
+for path_text in [
+    "evaluate_td3_gnn.py",
+    "evaluate_td3_gnn_infrastructure_diagnostics.py",
+    "utils/infrastructure_diagnostics.py",
+    "scripts/validate_full_infrastructure_diagnostic_eval30.py",
+]:
+    path = Path(path_text)
+    compile(path.read_text(encoding="utf-8"), str(path), "exec")
+PY
 ```
 
-Expected: PASS with no `.pyc` files written because `PYTHONDONTWRITEBYTECODE=1` is set.
+Expected: PASS with no `.pyc` files written because the command calls Python's in-memory `compile()` and does not call `py_compile`.
 
 - [ ] Bash syntax checks for affected shell/Slurm files:
 
