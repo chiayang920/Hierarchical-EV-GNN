@@ -51,7 +51,9 @@ ALGORITHM=""
 TRAINING_SEEDS=""
 FORMAL_TASK_IDS=""
 EVAL_EPISODES_FROM_MAPPING=""
-EVAL_SEED_OFFSET=""
+SCALE_BASE_SEED_OFFSET=""
+EVAL_SEED_OFFSETS=""
+FIRST_EPISODE_SEEDS=""
 
 while IFS='=' read -r key value; do
   case "${key}" in
@@ -61,7 +63,9 @@ while IFS='=' read -r key value; do
     training_seeds) TRAINING_SEEDS="${value}" ;;
     formal_task_ids) FORMAL_TASK_IDS="${value}" ;;
     eval_episodes) EVAL_EPISODES_FROM_MAPPING="${value}" ;;
-    eval_seed_offset) EVAL_SEED_OFFSET="${value}" ;;
+    scale_base_seed_offset) SCALE_BASE_SEED_OFFSET="${value}" ;;
+    eval_seed_offsets) EVAL_SEED_OFFSETS="${value}" ;;
+    first_episode_seeds) FIRST_EPISODE_SEEDS="${value}" ;;
     *)
       echo "ERROR: unsupported task-mapping field '${key}'" >&2
       exit 4
@@ -85,16 +89,21 @@ if [[ ! "${FORMAL_TASK_IDS}" =~ ^[0-9]+,[0-9]+,[0-9]+,[0-9]+,[0-9]+$ ]]; then
   echo "ERROR: task-mapping formal task IDs are invalid" >&2
   exit 8
 fi
-if [[ ! "${EVAL_SEED_OFFSET}" =~ ^[0-9]+$ ]]; then
-  echo "ERROR: task-mapping evaluation seed offset is invalid" >&2
+if [[ ! "${SCALE_BASE_SEED_OFFSET}" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: task-mapping scale base seed offset is invalid" >&2
   exit 9
 fi
 
 IFS=',' read -r -a TRAINING_SEED_ARRAY <<< "${TRAINING_SEEDS}"
 IFS=',' read -r -a FORMAL_TASK_ID_ARRAY <<< "${FORMAL_TASK_IDS}"
+IFS=',' read -r -a EVAL_SEED_OFFSET_ARRAY <<< "${EVAL_SEED_OFFSETS}"
+IFS=',' read -r -a FIRST_EPISODE_SEED_ARRAY <<< "${FIRST_EPISODE_SEEDS}"
 
-if [[ "${#TRAINING_SEED_ARRAY[@]}" -ne 5 ]] || [[ "${#FORMAL_TASK_ID_ARRAY[@]}" -ne 5 ]]; then
-  echo "ERROR: Stage D task mapping must contain exactly five seeds and formal task IDs" >&2
+if [[ "${#TRAINING_SEED_ARRAY[@]}" -ne 5 ]] \
+  || [[ "${#FORMAL_TASK_ID_ARRAY[@]}" -ne 5 ]] \
+  || [[ "${#EVAL_SEED_OFFSET_ARRAY[@]}" -ne 5 ]] \
+  || [[ "${#FIRST_EPISODE_SEED_ARRAY[@]}" -ne 5 ]]; then
+  echo "ERROR: Stage D task mapping must contain exactly five seeds, formal task IDs, offsets, and first episode seeds" >&2
   exit 10
 fi
 
@@ -123,7 +132,9 @@ if [[ "${EV_GNN_FULL_DIAGNOSTIC_DRY_RUN:-0}" == "1" ]]; then
   echo "training_seeds=${TRAINING_SEEDS}"
   echo "formal_task_ids=${FORMAL_TASK_IDS}"
   echo "eval_episodes=${EVAL_EPISODES_FROM_MAPPING}"
-  echo "eval_seed_offset=${EVAL_SEED_OFFSET}"
+  echo "scale_base_seed_offset=${SCALE_BASE_SEED_OFFSET}"
+  echo "eval_seed_offsets=${EVAL_SEED_OFFSETS}"
+  echo "first_episode_seeds=${FIRST_EPISODE_SEEDS}"
   echo "expected_episode_count=${EXPECTED_EPISODE_COUNT}"
   echo "repo_root=${REPO_ROOT}"
   echo "formal_package_root=${FORMAL_PACKAGE_ROOT}"
@@ -133,12 +144,14 @@ if [[ "${EV_GNN_FULL_DIAGNOSTIC_DRY_RUN:-0}" == "1" ]]; then
   for index in 0 1 2 3 4; do
     training_seed="${TRAINING_SEED_ARRAY[${index}]}"
     formal_task_id="${FORMAL_TASK_ID_ARRAY[${index}]}"
+    eval_seed_offset="${EVAL_SEED_OFFSET_ARRAY[${index}]}"
+    first_episode_seed="${FIRST_EPISODE_SEED_ARRAY[${index}]}"
     seed_root="${TASK_DIR}/seed${training_seed}"
     checkpoint_prefix="${seed_root}/checkpoint/model.best"
     config_path="${seed_root}/config/formal_config.yaml"
     diagnostic_dir="${seed_root}/diagnostics"
     run_name="full_infrastructure_diagnostic_eval30_${SCALE}_${ALGORITHM}_seed${training_seed}_job${ARRAY_JOB_ID}_task${TASK_ID}"
-    echo "EVALUATOR_COMMAND_SEED_${training_seed}=python evaluate_td3_gnn_infrastructure_diagnostics.py --algorithm ${ALGORITHM} --scale ${SCALE} --config ${config_path} --seed ${training_seed} --eval_episodes 30 --checkpoint ${checkpoint_prefix} --output_dir ${diagnostic_dir} --run_name ${run_name} --device ${DEVICE} --max_episode_steps <validated_simulation_length> --deterministic ${DETERMINISTIC} --eval_expl_noise ${EVAL_EXPL_NOISE} --eval_seed_offset ${EVAL_SEED_OFFSET} --matrix_job_id ${ARRAY_JOB_ID} # formal_task_id=${formal_task_id}"
+    echo "EVALUATOR_COMMAND_SEED_${training_seed}=python evaluate_td3_gnn_infrastructure_diagnostics.py --algorithm ${ALGORITHM} --scale ${SCALE} --config ${config_path} --seed ${training_seed} --eval_episodes 30 --checkpoint ${checkpoint_prefix} --output_dir ${diagnostic_dir} --run_name ${run_name} --device ${DEVICE} --max_episode_steps <validated_simulation_length> --deterministic ${DETERMINISTIC} --eval_expl_noise ${EVAL_EXPL_NOISE} --eval_seed_offset ${eval_seed_offset} --matrix_job_id ${ARRAY_JOB_ID} # formal_task_id=${formal_task_id} first_episode_seed=${first_episode_seed}"
   done
   echo "DRY_RUN_NO_EVALUATION_OR_PACKAGING"
   exit 0
@@ -204,6 +217,7 @@ cd "${REPO_ROOT}"
 for index in 0 1 2 3 4; do
   training_seed="${TRAINING_SEED_ARRAY[${index}]}"
   formal_task_id="${FORMAL_TASK_ID_ARRAY[${index}]}"
+  eval_seed_offset="${EVAL_SEED_OFFSET_ARRAY[${index}]}"
   seed_root="${TASK_DIR}/seed${training_seed}"
   formal_staging_dir="${seed_root}/formal_package_staging"
   formal_extract_dir="${seed_root}/formal_extract"
@@ -272,7 +286,7 @@ for index in 0 1 2 3 4; do
     --max_episode_steps "${max_episode_steps}"
     --deterministic "${DETERMINISTIC}"
     --eval_expl_noise "${EVAL_EXPL_NOISE}"
-    --eval_seed_offset "${EVAL_SEED_OFFSET}"
+    --eval_seed_offset "${eval_seed_offset}"
     --matrix_job_id "${ARRAY_JOB_ID}"
   )
   print_shell_command "${diagnostic_command[@]}" > "${runtime_dir}/diagnostic_command.txt"

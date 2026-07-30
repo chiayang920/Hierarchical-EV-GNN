@@ -8,9 +8,16 @@ from scripts.validate_full_infrastructure_diagnostic_eval30 import (
     EVAL_EPISODES,
     TOPOLOGY,
     TRAINING_SEEDS,
+    evaluator_seed_offset,
     episode_seed,
     formal_task_id,
     stage_d_task,
+)
+from utils.infrastructure_diagnostics import (
+    CHARGER_DIAGNOSTIC_COLUMNS,
+    EPISODE_DIAGNOSTIC_COLUMNS,
+    SEED_SUMMARY_DIAGNOSTIC_COLUMNS,
+    TRANSFORMER_DIAGNOSTIC_COLUMNS,
 )
 
 
@@ -48,8 +55,15 @@ def test_stage_d_episode_contract():
     assert TRAINING_SEEDS == (0, 1, 2, 3, 4)
     assert EVAL_EPISODES == 30
     assert episode_seed("25cp", 0, 0) == 710000
-    assert episode_seed("25cp", 4, 29) == 710033
-    assert episode_seed("1000cp", 4, 29) == 740033
+    assert episode_seed("25cp", 4, 29) == 714029
+    assert episode_seed("1000cp", 4, 29) == 744029
+
+
+def test_stage_d_matches_actual_formal_job_seed_schedule():
+    assert episode_seed("25cp", 0, 0) == 710000
+    assert episode_seed("25cp", 1, 0) == 711000
+    assert episode_seed("25cp", 4, 0) == 714000
+    assert episode_seed("1000cp", 4, 0) == 744000
 
 
 @pytest.mark.parametrize("task_id", [-1, 8, 99, True, "0"])
@@ -96,7 +110,9 @@ def test_episode_seed_rejects_invalid_input(
                 "training_seeds=0,1,2,3,4",
                 "formal_task_ids=0,1,2,3,4",
                 "eval_episodes=30",
-                "eval_seed_offset=710000",
+                "scale_base_seed_offset=710000",
+                "eval_seed_offsets=710000,710999,711998,712997,713996",
+                "first_episode_seeds=710000,711000,712000,713000,714000",
             ],
         ),
         (
@@ -108,7 +124,9 @@ def test_episode_seed_rejects_invalid_input(
                 "training_seeds=0,1,2,3,4",
                 "formal_task_ids=35,36,37,38,39",
                 "eval_episodes=30",
-                "eval_seed_offset=740000",
+                "scale_base_seed_offset=740000",
+                "eval_seed_offsets=740000,740999,741998,742997,743996",
+                "first_episode_seeds=740000,741000,742000,743000,744000",
             ],
         ),
     ],
@@ -149,15 +167,10 @@ def complete_inventory_rows():
             "algorithm": algorithm,
             "training_seed": str(seed),
             "episode_index": str(episode_index),
-            "episode_seed": str(offset + seed + episode_index),
+            "episode_seed": str(episode_seed(scale, seed, episode_index)),
             "diagnostic_schema_version": "3",
         }
-        for scale, offset in [
-            ("25cp", 710000),
-            ("100cp", 720000),
-            ("500cp", 730000),
-            ("1000cp", 740000),
-        ]
+        for scale in ["25cp", "100cp", "500cp", "1000cp"]
         for algorithm in ("actiongnn", "hierarchical")
         for seed in range(5)
         for episode_index in range(30)
@@ -172,6 +185,74 @@ def write_csv(path, fieldnames, rows):
         writer.writerows(rows)
 
 
+CANONICAL_EVAL30_COLUMNS = [
+    "row_type",
+    "algorithm",
+    "seed",
+    "episode_index",
+    "episode_seed",
+    "episode_steps",
+    "done",
+    "episode_reward",
+    "tracking_error",
+    "energy_tracking_error",
+    "power_tracker_violation",
+    "total_energy_charged",
+    "total_energy_discharged",
+    "average_user_satisfaction",
+    "energy_user_satisfaction",
+    "total_transformer_overload",
+    "total_ev_served",
+    "action_mean",
+    "action_fraction_at_max",
+    "active_action_count_mean",
+]
+
+
+def write_canonical_eval30(path, *, scale="25cp", algorithm="actiongnn", training_seed=0, mutator=None):
+    rows = []
+    for episode_index in range(EVAL_EPISODES):
+        diagnostic = valid_episode_row(
+            episode_index,
+            scale=scale,
+            algorithm=algorithm,
+            training_seed=training_seed,
+        )
+        rows.append(
+            {
+                "row_type": "episode",
+                "algorithm": algorithm,
+                "seed": str(training_seed),
+                "episode_index": diagnostic["episode_index"],
+                "episode_seed": diagnostic["episode_seed"],
+                "episode_steps": diagnostic["episode_steps"],
+                "done": diagnostic["done"],
+                "episode_reward": diagnostic["episode_reward"],
+                "tracking_error": diagnostic["tracking_error"],
+                "energy_tracking_error": diagnostic["energy_tracking_error"],
+                "power_tracker_violation": diagnostic["power_tracker_violation"],
+                "total_energy_charged": diagnostic["total_energy_charged"],
+                "total_energy_discharged": diagnostic["total_energy_discharged"],
+                "average_user_satisfaction": diagnostic["average_user_satisfaction"],
+                "energy_user_satisfaction": diagnostic["energy_user_satisfaction"],
+                "total_transformer_overload": diagnostic["total_transformer_overload"],
+                "total_ev_served": diagnostic["total_ev_served"],
+                "action_mean": diagnostic.get("global_action_mean_all_slots", "0.0"),
+                "action_fraction_at_max": diagnostic.get(
+                    "global_action_fraction_at_max_all_slots",
+                    "0.0",
+                ),
+                "active_action_count_mean": diagnostic.get(
+                    "nonzero_action_count_mean_all_slots",
+                    "0.0",
+                ),
+            }
+        )
+    if mutator is not None:
+        mutator(rows)
+    write_csv(path, CANONICAL_EVAL30_COLUMNS, rows)
+
+
 def valid_episode_row(
     episode_index,
     *,
@@ -179,20 +260,31 @@ def valid_episode_row(
     algorithm="actiongnn",
     training_seed=0,
 ):
-    return {
+    row = {column: "0.0" for column in EPISODE_DIAGNOSTIC_COLUMNS}
+    row.update({
         "matrix_job_id": "99999999",
         "scale": scale,
         "algorithm": algorithm,
         "training_seed": str(training_seed),
         "episode_index": str(episode_index),
-        "episode_seed": str(
-            {"25cp": 710000, "100cp": 720000, "500cp": 730000, "1000cp": 740000}[scale]
-            + training_seed
-            + episode_index
-        ),
+        "episode_seed": str(episode_seed(scale, training_seed, episode_index)),
+        "config": f"config_files/PublicPST_{scale}.yaml",
+        "checkpoint_prefix": "/tmp/model.best",
+        "run_name": f"synthetic_{scale}_{algorithm}_seed{training_seed}",
         "episode_steps": "112",
         "done": "True",
         "episode_reward": "-1.0",
+        "max_action": "1.0",
+        "max_action_tolerance": "1e-06",
+        "environment_action_low": "-1.0",
+        "environment_action_high": "1.0",
+        "observed_action_min_active": "0.0",
+        "observed_action_max_active": "1.0",
+        "action_tolerance": "1e-06",
+        "environment_action_domain_support": "signed",
+        "v2g_enabled": "False",
+        "v2g_enabled_source": "config",
+        "global_action_fraction_at_max_all_slots": "0.5",
         "tracking_error": "1.0",
         "energy_tracking_error": "1.0",
         "power_tracker_violation": "1.0",
@@ -203,8 +295,39 @@ def valid_episode_row(
         "total_transformer_overload": "0.0",
         "total_ev_served": "1",
         "global_action_fraction_at_max_active": "0.5",
+        "global_action_nonzero_fraction_active": "1.0",
+        "active_action_decision_count": "1",
+        "active_action_below_environment_low_count": "0",
+        "active_action_below_environment_low_fraction": "0.0",
+        "active_action_above_environment_high_count": "0",
+        "active_action_above_environment_high_fraction": "0.0",
+        "global_positive_action_fraction_active": "1.0",
+        "global_zero_action_fraction_active": "0.0",
+        "global_negative_action_fraction_active": "0.0",
+        "global_action_fraction_at_positive_max_active": "0.5",
+        "global_action_fraction_at_negative_min_active": "0.0",
+        "global_positive_action_sum_active": "1.0",
+        "global_negative_action_magnitude_sum_active": "0.0",
+        "global_action_mean_all_slots": "0.5",
+        "global_action_mean_active": "0.5",
+        "global_action_sum_active": "1.0",
+        "active_slot_count_mean": "1.0",
+        "nonzero_action_count_mean_all_slots": "1.0",
+        "inactive_slot_fraction_mean": "0.0",
+        "inactive_slot_decision_count": "0",
+        "inactive_nonzero_action_count": "0",
+        "inactive_nonzero_action_fraction_all_slots": "0.0",
+        "transformer_action_fraction_at_max_active_macro_mean": "0.5",
+        "charger_action_fraction_at_max_active_macro_mean": "0.5",
+        "transformer_action_nonzero_fraction_active_macro_mean": "1.0",
+        "charger_action_nonzero_fraction_active_macro_mean": "1.0",
+        "transformer_allocation_zero_pressure_step_fraction": "0.0",
+        "transformer_allocation_valid_step_count": "1.0",
+        "charger_allocation_zero_pressure_step_fraction": "0.0",
+        "charger_allocation_valid_step_count": "1.0",
         "diagnostic_schema_version": "3",
-    }
+    })
+    return row
 
 
 def build_seed_output(
@@ -246,14 +369,56 @@ def build_seed_output(
         episode_rows,
     )
 
-    seed_summary = {
+    seed_summary = {column: "0.0" for column in SEED_SUMMARY_DIAGNOSTIC_COLUMNS}
+    seed_summary.update({
         "matrix_job_id": "99999999",
         "scale": scale,
         "algorithm": algorithm,
         "training_seed": str(training_seed),
         "n_eval_episodes": "30",
+        "global_action_fraction_at_max_active_mean": "0.5",
+        "global_action_fraction_at_max_all_slots_mean": "0.5",
+        "global_action_nonzero_fraction_active_mean": "1.0",
+        "active_action_decision_count_mean": "1.0",
+        "active_action_below_environment_low_count": "0",
+        "active_action_below_environment_low_fraction": "0.0",
+        "active_action_above_environment_high_count": "0",
+        "active_action_above_environment_high_fraction": "0.0",
+        "global_positive_action_fraction_active_mean": "1.0",
+        "global_zero_action_fraction_active_mean": "0.0",
+        "global_negative_action_fraction_active_mean": "0.0",
+        "global_action_fraction_at_positive_max_active_mean": "0.5",
+        "global_action_fraction_at_negative_min_active_mean": "0.0",
+        "global_positive_action_sum_active_mean": "1.0",
+        "global_negative_action_magnitude_sum_active_mean": "0.0",
+        "observed_action_min_active_mean": "0.0",
+        "observed_action_max_active_mean": "1.0",
+        "environment_action_low": "-1.0",
+        "environment_action_high": "1.0",
+        "action_tolerance": "1e-06",
+        "environment_action_domain_support": "signed",
+        "v2g_enabled": "False",
+        "v2g_enabled_source": "config",
+        "inactive_slot_decision_count_mean": "0.0",
+        "inactive_nonzero_action_count_mean": "0.0",
+        "inactive_nonzero_action_fraction_all_slots_mean": "0.0",
+        "transformer_action_fraction_at_max_active_macro_mean": "0.5",
+        "charger_action_fraction_at_max_active_macro_mean": "0.5",
+        "transformer_action_nonzero_fraction_active_macro_mean": "1.0",
+        "charger_action_nonzero_fraction_active_macro_mean": "1.0",
+        "transformer_allocation_zero_pressure_step_fraction_mean": "0.0",
+        "transformer_allocation_valid_step_count_mean": "1.0",
+        "charger_allocation_zero_pressure_step_fraction_mean": "0.0",
+        "charger_allocation_valid_step_count_mean": "1.0",
+        "power_tracker_violation_mean": "1.0",
+        "tracking_error_mean": "1.0",
+        "energy_tracking_error_mean": "1.0",
+        "total_ev_served_mean": "1.0",
+        "total_energy_charged_mean": "1.0",
+        "average_user_satisfaction_mean": "1.0",
+        "energy_user_satisfaction_mean": "100.0",
         "diagnostic_schema_version": "3",
-    }
+    })
     write_csv(
         diagnostics / "seed_summary_diagnostics.csv",
         list(seed_summary),
@@ -261,35 +426,65 @@ def build_seed_output(
     )
 
     def infrastructure_rows(count, *, label):
-        return [
-            {
+        columns = (
+            TRANSFORMER_DIAGNOSTIC_COLUMNS
+            if label == "transformer"
+            else CHARGER_DIAGNOSTIC_COLUMNS
+        )
+        rows = []
+        for episode_index in range(30):
+            for row_index in range(count):
+                row = {column: "0.0" for column in columns}
+                row.update({
                 "matrix_job_id": "99999999",
                 "scale": scale,
                 "algorithm": algorithm,
                 "training_seed": str(training_seed),
                 "episode_index": str(episode_index),
-                "episode_seed": str(
-                    {
-                        "25cp": 710000,
-                        "100cp": 720000,
-                        "500cp": 730000,
-                        "1000cp": 740000,
-                    }[scale]
-                    + training_seed
-                    + episode_index
-                ),
+                "episode_seed": str(episode_seed(scale, training_seed, episode_index)),
                 f"{label}_id": str(row_index),
                 "transformer_id": str(row_index % transformer_count),
+                "n_chargers_total": str(charger_count),
+                "n_active_chargers_seen": "1",
+                "n_ports": "1",
+                "n_active_ev_decisions": "1" if row_index == 0 else "0",
+                "n_all_slot_decisions": "1",
+                "action_sum_active": "1.0" if row_index == 0 else "0.0",
+                "action_mean_active": "1.0" if row_index == 0 else "0.0",
+                "action_max_active": "1.0" if row_index == 0 else "0.0",
+                "action_fraction_at_max_active": "1.0" if row_index == 0 else "0.0",
+                "action_nonzero_fraction_active": "1.0" if row_index == 0 else "0.0",
+                "positive_action_fraction_active": "1.0" if row_index == 0 else "0.0",
+                "zero_action_fraction_active": "0.0" if row_index == 0 else "1.0",
+                "negative_action_fraction_active": "0.0",
+                "action_fraction_at_positive_max_active": "1.0" if row_index == 0 else "0.0",
+                "action_fraction_at_negative_min_active": "0.0",
+                "positive_action_sum_active": "1.0" if row_index == 0 else "0.0",
+                "negative_action_magnitude_sum_active": "0.0",
+                "action_sum_all_slots": "1.0" if row_index == 0 else "0.0",
+                "action_mean_all_slots": "1.0" if row_index == 0 else "0.0",
+                "action_max_all_slots": "1.0" if row_index == 0 else "0.0",
+                "action_fraction_at_max_all_slots": "1.0" if row_index == 0 else "0.0",
+                "overload_magnitude_sum": "0.0",
+                "overload_magnitude_max": "0.0",
+                "overload_frequency_steps": "0",
+                "overload_frequency_fraction": "0.0",
+                "cs_power_sum_kwh": "1.0" if row_index == 0 else "0.0",
+                "cs_power_mean_kw": "1.0" if row_index == 0 else "0.0",
+                "cs_power_max_kw": "1.0" if row_index == 0 else "0.0",
                 "served_ev_count": "1" if row_index == 0 else "0",
                 "energy_charged_kwh": "1.0" if row_index == 0 else "0.0",
                 "energy_discharged_kwh": "0.0",
                 "user_satisfaction_sum": "1.0" if row_index == 0 else "0.0",
+                "user_satisfaction_mean": "1.0" if row_index == 0 else "0.0",
+                "user_satisfaction_mean_served_ev_weighted": "1.0" if row_index == 0 else "0.0",
                 "user_satisfaction_observation_count": "1" if row_index == 0 else "0",
+                "user_satisfaction_source": "synthetic",
                 "diagnostic_schema_version": "3",
-            }
-            for episode_index in range(30)
-            for row_index in range(count)
-        ]
+                })
+                row = {column: row[column] for column in columns}
+                rows.append(row)
+        return rows
 
     transformer_rows = infrastructure_rows(transformer_count, label="transformer")
     charger_rows = infrastructure_rows(charger_count, label="charger")
@@ -458,7 +653,7 @@ def test_validate_seed_output_rejects_missing_required_column(tmp_path):
             row.pop("episode_reward")
 
     mutate_csv(path, remove_column)
-    with pytest.raises(ValueError, match="missing required column"):
+    with pytest.raises(ValueError, match="column contract mismatch"):
         validate_seed_output_directory(seed_dir, task_id=0, training_seed=0)
 
 
@@ -537,6 +732,40 @@ def test_validate_seed_output_cli(tmp_path):
     payload = json.loads(result.stdout)
     assert payload["status"] == "ok"
     assert payload["episode_count"] == 30
+
+
+def test_prepare_seed_validation_rejects_canonical_float_mismatch(tmp_path):
+    seed_dir = build_seed_output(tmp_path / "seed0")
+    canonical_csv = tmp_path / "canonical_eval30.csv"
+
+    def mutate(rows):
+        rows[0]["tracking_error"] = "999.0"
+
+    write_canonical_eval30(canonical_csv, mutator=mutate)
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(VALIDATOR),
+            "prepare-seed-validation",
+            "--diagnostic-dir",
+            str(seed_dir / "diagnostics"),
+            "--canonical-csv",
+            str(canonical_csv),
+            "--validation-dir",
+            str(tmp_path / "validation"),
+            "--task-id",
+            "0",
+            "--training-seed",
+            "0",
+        ],
+        cwd=PROJECT_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "canonical reconciliation" in result.stderr
 
 # STAGE_D_TASK3_MINIMAL_PACKAGE_CONTRACT_TESTS
 import hashlib
@@ -976,14 +1205,14 @@ def test_task4_runner_has_exact_slurm_resources():
 @pytest.mark.parametrize(
     ("task_id", "scale", "algorithm", "formal_ids", "offset"),
     [
-        (0, "25cp", "actiongnn", "0,1,2,3,4", "710000"),
-        (1, "25cp", "hierarchical", "5,6,7,8,9", "710000"),
-        (2, "100cp", "actiongnn", "10,11,12,13,14", "720000"),
-        (3, "100cp", "hierarchical", "15,16,17,18,19", "720000"),
-        (4, "500cp", "actiongnn", "20,21,22,23,24", "730000"),
-        (5, "500cp", "hierarchical", "25,26,27,28,29", "730000"),
-        (6, "1000cp", "actiongnn", "30,31,32,33,34", "740000"),
-        (7, "1000cp", "hierarchical", "35,36,37,38,39", "740000"),
+        (0, "25cp", "actiongnn", "0,1,2,3,4", "710000,710999,711998,712997,713996"),
+        (1, "25cp", "hierarchical", "5,6,7,8,9", "710000,710999,711998,712997,713996"),
+        (2, "100cp", "actiongnn", "10,11,12,13,14", "720000,720999,721998,722997,723996"),
+        (3, "100cp", "hierarchical", "15,16,17,18,19", "720000,720999,721998,722997,723996"),
+        (4, "500cp", "actiongnn", "20,21,22,23,24", "730000,730999,731998,732997,733996"),
+        (5, "500cp", "hierarchical", "25,26,27,28,29", "730000,730999,731998,732997,733996"),
+        (6, "1000cp", "actiongnn", "30,31,32,33,34", "740000,740999,741998,742997,743996"),
+        (7, "1000cp", "hierarchical", "35,36,37,38,39", "740000,740999,741998,742997,743996"),
     ],
 )
 def test_task4_runner_dry_run_exact_mapping(
@@ -1002,7 +1231,7 @@ def test_task4_runner_dry_run_exact_mapping(
     assert "training_seeds=0,1,2,3,4" in result.stdout
     assert f"formal_task_ids={formal_ids}" in result.stdout
     assert "eval_episodes=30" in result.stdout
-    assert f"eval_seed_offset={offset}" in result.stdout
+    assert f"eval_seed_offsets={offset}" in result.stdout
     assert "expected_episode_count=150" in result.stdout
     assert result.stdout.count("EVALUATOR_COMMAND_SEED_") == 5
     assert "DRY_RUN_NO_EVALUATION_OR_PACKAGING" in result.stdout
@@ -1023,7 +1252,8 @@ def test_task4_runner_dry_run_uses_formal_eval30_contract(tmp_path):
         assert "--device cpu" in command
         assert "--deterministic true" in command
         assert "--eval_expl_noise 0.0" in command
-        assert "--eval_seed_offset 710000" in command
+        expected_offset = 710000 + 999 * seed
+        assert f"--eval_seed_offset {expected_offset}" in command
         assert f"# formal_task_id={seed}" in command
         assert "model.best" in command
         assert "model.last" not in command
@@ -1054,7 +1284,12 @@ def test_task4_runner_real_mode_requires_expected_source_commit_before_side_effe
 def test_task4_runner_real_mode_orchestrates_synthetic_seed_evaluations(tmp_path):
     source_root = tmp_path / "source"
     (source_root / "scripts").mkdir(parents=True)
+    (source_root / "utils").mkdir()
     shutil.copy2(VALIDATOR, source_root / "scripts" / VALIDATOR.name)
+    shutil.copy2(
+        PROJECT_ROOT / "utils" / "infrastructure_diagnostics.py",
+        source_root / "utils" / "infrastructure_diagnostics.py",
+    )
     source_commit = "a" * 40
     (source_root / "SOURCE_COMMIT_SHA.txt").write_text(
         source_commit + "\n",
@@ -1065,11 +1300,17 @@ def test_task4_runner_real_mode_orchestrates_synthetic_seed_evaluations(tmp_path
     for seed in TRAINING_SEEDS:
         create_full_formal_package(formal_root, task_id=0, training_seed=seed)
 
-    evaluator_stub = tmp_path / "stub_evaluator.py"
+    evaluator_stub = source_root / "stub_evaluator.py"
     evaluator_stub.write_text(
         """import argparse
 import csv
 from pathlib import Path
+from utils.infrastructure_diagnostics import (
+    CHARGER_DIAGNOSTIC_COLUMNS,
+    EPISODE_DIAGNOSTIC_COLUMNS,
+    SEED_SUMMARY_DIAGNOSTIC_COLUMNS,
+    TRANSFORMER_DIAGNOSTIC_COLUMNS,
+)
 
 OFFSETS = {"25cp": 710000, "100cp": 720000, "500cp": 730000, "1000cp": 740000}
 TOPOLOGY = {"25cp": (25, 3), "100cp": (100, 7), "500cp": (500, 35), "1000cp": (1000, 70)}
@@ -1112,7 +1353,8 @@ if args.max_episode_steps != 112:
 output = Path(args.output_dir)
 episode_rows = []
 for episode_index in range(args.eval_episodes):
-    episode_rows.append(
+    row = {column: "0.0" for column in EPISODE_DIAGNOSTIC_COLUMNS}
+    row.update(
         {
             "matrix_job_id": args.matrix_job_id,
             "scale": args.scale,
@@ -1120,9 +1362,54 @@ for episode_index in range(args.eval_episodes):
             "training_seed": str(args.seed),
             "episode_index": str(episode_index),
             "episode_seed": str(args.eval_seed_offset + args.seed + episode_index),
+            "config": args.config,
+            "checkpoint_prefix": args.checkpoint,
+            "run_name": args.run_name,
             "episode_steps": "112",
             "done": "True",
             "episode_reward": "-1.0",
+            "max_action": "1.0",
+            "max_action_tolerance": "1e-06",
+            "environment_action_low": "-1.0",
+            "environment_action_high": "1.0",
+            "observed_action_min_active": "0.0",
+            "observed_action_max_active": "1.0",
+            "action_tolerance": "1e-06",
+            "environment_action_domain_support": "signed",
+            "v2g_enabled": "False",
+            "v2g_enabled_source": "config",
+            "global_action_fraction_at_max_all_slots": "0.5",
+            "global_action_fraction_at_max_active": "0.5",
+            "global_action_nonzero_fraction_active": "1.0",
+            "active_action_decision_count": "1",
+            "active_action_below_environment_low_count": "0",
+            "active_action_below_environment_low_fraction": "0.0",
+            "active_action_above_environment_high_count": "0",
+            "active_action_above_environment_high_fraction": "0.0",
+            "global_positive_action_fraction_active": "1.0",
+            "global_zero_action_fraction_active": "0.0",
+            "global_negative_action_fraction_active": "0.0",
+            "global_action_fraction_at_positive_max_active": "0.5",
+            "global_action_fraction_at_negative_min_active": "0.0",
+            "global_positive_action_sum_active": "1.0",
+            "global_negative_action_magnitude_sum_active": "0.0",
+            "global_action_mean_all_slots": "0.5",
+            "global_action_mean_active": "0.5",
+            "global_action_sum_active": "1.0",
+            "active_slot_count_mean": "1.0",
+            "nonzero_action_count_mean_all_slots": "1.0",
+            "inactive_slot_fraction_mean": "0.0",
+            "inactive_slot_decision_count": "0",
+            "inactive_nonzero_action_count": "0",
+            "inactive_nonzero_action_fraction_all_slots": "0.0",
+            "transformer_action_fraction_at_max_active_macro_mean": "0.5",
+            "charger_action_fraction_at_max_active_macro_mean": "0.5",
+            "transformer_action_nonzero_fraction_active_macro_mean": "1.0",
+            "charger_action_nonzero_fraction_active_macro_mean": "1.0",
+            "transformer_allocation_zero_pressure_step_fraction": "0.0",
+            "transformer_allocation_valid_step_count": "1.0",
+            "charger_allocation_zero_pressure_step_fraction": "0.0",
+            "charger_allocation_valid_step_count": "1.0",
             "tracking_error": "1.0",
             "energy_tracking_error": "1.0",
             "power_tracker_violation": "1.0",
@@ -1132,25 +1419,57 @@ for episode_index in range(args.eval_episodes):
             "energy_user_satisfaction": "100.0",
             "total_transformer_overload": "0.0",
             "total_ev_served": "1",
-            "global_action_fraction_at_max_active": "0.5",
             "diagnostic_schema_version": "3",
         }
     )
-write_csv(output / "episode_diagnostics.csv", list(episode_rows[0]), episode_rows)
-summary = {
-    "matrix_job_id": args.matrix_job_id,
-    "scale": args.scale,
-    "algorithm": args.algorithm,
-    "training_seed": str(args.seed),
-    "n_eval_episodes": "30",
-    "diagnostic_schema_version": "3",
-}
-write_csv(output / "seed_summary_diagnostics.csv", list(summary), [summary])
+    episode_rows.append({column: row[column] for column in EPISODE_DIAGNOSTIC_COLUMNS})
+write_csv(output / "episode_diagnostics.csv", EPISODE_DIAGNOSTIC_COLUMNS, episode_rows)
+summary = {column: "0.0" for column in SEED_SUMMARY_DIAGNOSTIC_COLUMNS}
+summary.update(
+    {
+        "matrix_job_id": args.matrix_job_id,
+        "scale": args.scale,
+        "algorithm": args.algorithm,
+        "training_seed": str(args.seed),
+        "n_eval_episodes": "30",
+        "global_action_fraction_at_max_active_mean": "0.5",
+        "global_action_fraction_at_max_all_slots_mean": "0.5",
+        "global_action_nonzero_fraction_active_mean": "1.0",
+        "active_action_decision_count_mean": "1.0",
+        "active_action_below_environment_low_count": "0",
+        "active_action_below_environment_low_fraction": "0.0",
+        "active_action_above_environment_high_count": "0",
+        "active_action_above_environment_high_fraction": "0.0",
+        "global_positive_action_fraction_active_mean": "1.0",
+        "global_zero_action_fraction_active_mean": "0.0",
+        "global_negative_action_fraction_active_mean": "0.0",
+        "environment_action_low": "-1.0",
+        "environment_action_high": "1.0",
+        "action_tolerance": "1e-06",
+        "environment_action_domain_support": "signed",
+        "v2g_enabled": "False",
+        "v2g_enabled_source": "config",
+        "power_tracker_violation_mean": "1.0",
+        "tracking_error_mean": "1.0",
+        "energy_tracking_error_mean": "1.0",
+        "total_ev_served_mean": "1.0",
+        "total_energy_charged_mean": "1.0",
+        "average_user_satisfaction_mean": "1.0",
+        "energy_user_satisfaction_mean": "100.0",
+        "diagnostic_schema_version": "3",
+    }
+)
+write_csv(output / "seed_summary_diagnostics.csv", SEED_SUMMARY_DIAGNOSTIC_COLUMNS, [summary])
 
 
 def infrastructure_rows(count, label):
-    return [
-        {
+    columns = TRANSFORMER_DIAGNOSTIC_COLUMNS if label == "transformer" else CHARGER_DIAGNOSTIC_COLUMNS
+    rows = []
+    for episode_index in range(args.eval_episodes):
+        for row_index in range(count):
+            row = {column: "0.0" for column in columns}
+            row.update(
+                {
             "matrix_job_id": args.matrix_job_id,
             "scale": args.scale,
             "algorithm": args.algorithm,
@@ -1159,23 +1478,54 @@ def infrastructure_rows(count, label):
             "episode_seed": str(args.eval_seed_offset + args.seed + episode_index),
             f"{label}_id": str(row_index),
             "transformer_id": str(row_index % transformer_count),
+            "n_chargers_total": str(charger_count),
+            "n_active_chargers_seen": "1",
+            "n_ports": "1",
+            "n_active_ev_decisions": "1" if row_index == 0 else "0",
+            "n_all_slot_decisions": "1",
+            "action_sum_active": "1.0" if row_index == 0 else "0.0",
+            "action_mean_active": "1.0" if row_index == 0 else "0.0",
+            "action_max_active": "1.0" if row_index == 0 else "0.0",
+            "action_fraction_at_max_active": "1.0" if row_index == 0 else "0.0",
+            "action_nonzero_fraction_active": "1.0" if row_index == 0 else "0.0",
+            "positive_action_fraction_active": "1.0" if row_index == 0 else "0.0",
+            "zero_action_fraction_active": "0.0" if row_index == 0 else "1.0",
+            "negative_action_fraction_active": "0.0",
+            "action_fraction_at_positive_max_active": "1.0" if row_index == 0 else "0.0",
+            "action_fraction_at_negative_min_active": "0.0",
+            "positive_action_sum_active": "1.0" if row_index == 0 else "0.0",
+            "negative_action_magnitude_sum_active": "0.0",
+            "action_sum_all_slots": "1.0" if row_index == 0 else "0.0",
+            "action_mean_all_slots": "1.0" if row_index == 0 else "0.0",
+            "action_max_all_slots": "1.0" if row_index == 0 else "0.0",
+            "action_fraction_at_max_all_slots": "1.0" if row_index == 0 else "0.0",
+            "overload_magnitude_sum": "0.0",
+            "overload_magnitude_max": "0.0",
+            "overload_frequency_steps": "0",
+            "overload_frequency_fraction": "0.0",
+            "cs_power_sum_kwh": "1.0" if row_index == 0 else "0.0",
+            "cs_power_mean_kw": "1.0" if row_index == 0 else "0.0",
+            "cs_power_max_kw": "1.0" if row_index == 0 else "0.0",
             "served_ev_count": "1" if row_index == 0 else "0",
             "energy_charged_kwh": "1.0" if row_index == 0 else "0.0",
             "energy_discharged_kwh": "0.0",
             "user_satisfaction_sum": "1.0" if row_index == 0 else "0.0",
+            "user_satisfaction_mean": "1.0" if row_index == 0 else "0.0",
+            "user_satisfaction_mean_served_ev_weighted": "1.0" if row_index == 0 else "0.0",
             "user_satisfaction_observation_count": "1" if row_index == 0 else "0",
+            "user_satisfaction_source": "synthetic",
             "diagnostic_schema_version": "3",
-        }
-        for episode_index in range(args.eval_episodes)
-        for row_index in range(count)
-    ]
+                }
+            )
+            rows.append({column: row[column] for column in columns})
+    return rows
 
 
 charger_count, transformer_count = TOPOLOGY[args.scale]
 transformer_rows = infrastructure_rows(transformer_count, "transformer")
 charger_rows = infrastructure_rows(charger_count, "charger")
-write_csv(output / "transformer_diagnostics.csv", list(transformer_rows[0]), transformer_rows)
-write_csv(output / "charger_diagnostics.csv", list(charger_rows[0]), charger_rows)
+write_csv(output / "transformer_diagnostics.csv", TRANSFORMER_DIAGNOSTIC_COLUMNS, transformer_rows)
+write_csv(output / "charger_diagnostics.csv", CHARGER_DIAGNOSTIC_COLUMNS, charger_rows)
 """,
         encoding="utf-8",
     )
@@ -1322,15 +1672,48 @@ def full_formal_members(
     run_name = f"controlled_multiscale_formal_{scale}_{algorithm}_seed{training_seed}"
     train_dir = f"train/{run_name}"
     checkpoint_prefix = "model.last" if use_model_last else "model.best"
-    eval_seed_offset = {"25cp": 710000, "100cp": 720000, "500cp": 730000, "1000cp": 740000}[scale]
+    eval_seed_offset = evaluator_seed_offset(scale, training_seed)
+    canonical_dict_rows = []
+    for episode_index in range(EVAL_EPISODES):
+        diagnostic = valid_episode_row(
+            episode_index,
+            scale=scale,
+            algorithm=algorithm,
+            training_seed=training_seed,
+        )
+        canonical_dict_rows.append(
+            {
+                "row_type": "episode",
+                "algorithm": algorithm,
+                "seed": str(training_seed),
+                "episode_index": diagnostic["episode_index"],
+                "episode_seed": diagnostic["episode_seed"],
+                "episode_steps": diagnostic["episode_steps"],
+                "done": diagnostic["done"],
+                "episode_reward": diagnostic["episode_reward"],
+                "tracking_error": diagnostic["tracking_error"],
+                "energy_tracking_error": diagnostic["energy_tracking_error"],
+                "power_tracker_violation": diagnostic["power_tracker_violation"],
+                "total_energy_charged": diagnostic["total_energy_charged"],
+                "total_energy_discharged": diagnostic["total_energy_discharged"],
+                "average_user_satisfaction": diagnostic["average_user_satisfaction"],
+                "energy_user_satisfaction": diagnostic["energy_user_satisfaction"],
+                "total_transformer_overload": diagnostic["total_transformer_overload"],
+                "total_ev_served": diagnostic["total_ev_served"],
+                "action_mean": diagnostic["global_action_mean_all_slots"],
+                "action_fraction_at_max": diagnostic[
+                    "global_action_fraction_at_max_all_slots"
+                ],
+                "active_action_count_mean": diagnostic[
+                    "nonzero_action_count_mean_all_slots"
+                ],
+            }
+        )
     canonical_rows = [
-        "row_type,algorithm,seed,episode_index,episode_seed,episode_steps,done\n",
+        ",".join(CANONICAL_EVAL30_COLUMNS) + "\n",
         *[
-            (
-                f"episode,{algorithm},{training_seed},{episode_index},"
-                f"{episode_seed(scale, training_seed, episode_index)},112,True\n"
-            )
-            for episode_index in range(EVAL_EPISODES)
+            ",".join(row[column] for column in CANONICAL_EVAL30_COLUMNS) + "\n"
+            for row in canonical_dict_rows
         ],
     ]
     source_manifest_files = [
@@ -1923,9 +2306,14 @@ def test_task6_submit_default_dry_run_does_not_invoke_sbatch(tmp_path):
     source_root = tmp_path / "source_root"
     (source_root / "m3_jobs").mkdir(parents=True)
     (source_root / "scripts").mkdir()
+    (source_root / "utils").mkdir()
     for script in [TASK4_RUNNER, TASK5_REDUCER, TASK6_SUBMIT]:
         shutil.copy2(script, source_root / "m3_jobs" / script.name)
     shutil.copy2(VALIDATOR, source_root / "scripts" / VALIDATOR.name)
+    shutil.copy2(
+        PROJECT_ROOT / "utils" / "infrastructure_diagnostics.py",
+        source_root / "utils" / "infrastructure_diagnostics.py",
+    )
     source_commit = "f" * 40
     (source_root / "SOURCE_COMMIT_SHA.txt").write_text(source_commit + "\n", encoding="utf-8")
 

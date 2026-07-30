@@ -15,6 +15,17 @@ import time
 
 import yaml
 
+REPO_ROOT_FOR_IMPORTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if REPO_ROOT_FOR_IMPORTS not in sys.path:
+    sys.path.insert(0, REPO_ROOT_FOR_IMPORTS)
+
+from utils.infrastructure_diagnostics import (
+    CHARGER_DIAGNOSTIC_COLUMNS,
+    EPISODE_DIAGNOSTIC_COLUMNS,
+    SEED_SUMMARY_DIAGNOSTIC_COLUMNS,
+    TRANSFORMER_DIAGNOSTIC_COLUMNS,
+)
+
 TRAINING_SEEDS: Final[tuple[int, ...]] = (0, 1, 2, 3, 4)
 EVAL_EPISODES: Final[int] = 30
 
@@ -59,7 +70,16 @@ def episode_seed(scale: str, training_seed: int, episode_index: int) -> int:
         raise ValueError(f"unsupported training seed: {training_seed!r}")
     if type(episode_index) is not int or not 0 <= episode_index < EVAL_EPISODES:
         raise ValueError(f"episode index must be 0..{EVAL_EPISODES - 1}")
-    return SCALE_SEED_OFFSETS[scale] + training_seed + episode_index
+    return SCALE_SEED_OFFSETS[scale] + (1000 * training_seed) + episode_index
+
+
+def evaluator_seed_offset(scale: str, training_seed: int) -> int:
+    """Resolve the offset passed to the evaluator CLI for one training seed."""
+    if scale not in SCALE_SEED_OFFSETS:
+        raise ValueError(f"unsupported scale: {scale!r}")
+    if type(training_seed) is not int or training_seed not in TRAINING_SEEDS:
+        raise ValueError(f"unsupported training seed: {training_seed!r}")
+    return SCALE_SEED_OFFSETS[scale] + (999 * training_seed)
 
 
 def task_mapping_lines(task_id: int) -> list[str]:
@@ -70,6 +90,14 @@ def task_mapping_lines(task_id: int) -> list[str]:
         str(formal_task_id(task_id, training_seed))
         for training_seed in TRAINING_SEEDS
     )
+    eval_seed_offsets = ",".join(
+        str(evaluator_seed_offset(scale, training_seed))
+        for training_seed in TRAINING_SEEDS
+    )
+    first_episode_seeds = ",".join(
+        str(episode_seed(scale, training_seed, 0))
+        for training_seed in TRAINING_SEEDS
+    )
     return [
         f"task_id={task_id}",
         f"scale={scale}",
@@ -77,7 +105,9 @@ def task_mapping_lines(task_id: int) -> list[str]:
         "training_seeds=" + ",".join(map(str, TRAINING_SEEDS)),
         f"formal_task_ids={formal_ids}",
         f"eval_episodes={EVAL_EPISODES}",
-        f"eval_seed_offset={SCALE_SEED_OFFSETS[scale]}",
+        f"scale_base_seed_offset={SCALE_SEED_OFFSETS[scale]}",
+        f"eval_seed_offsets={eval_seed_offsets}",
+        f"first_episode_seeds={first_episode_seeds}",
     ]
 
 
@@ -100,29 +130,6 @@ TOPOLOGY: Final[dict[str, tuple[int, int]]] = {
 ALGORITHMS: Final[tuple[str, ...]] = ("actiongnn", "hierarchical")
 SCHEMA_VERSION: Final[str] = "3"
 
-EPISODE_REQUIRED_COLUMNS: Final[set[str]] = {
-    "matrix_job_id",
-    "scale",
-    "algorithm",
-    "training_seed",
-    "episode_index",
-    "episode_seed",
-    "episode_steps",
-    "done",
-    "episode_reward",
-    "tracking_error",
-    "energy_tracking_error",
-    "power_tracker_violation",
-    "total_energy_charged",
-    "total_energy_discharged",
-    "average_user_satisfaction",
-    "energy_user_satisfaction",
-    "total_transformer_overload",
-    "total_ev_served",
-    "global_action_fraction_at_max_active",
-    "diagnostic_schema_version",
-}
-
 EPISODE_REQUIRED_NUMERIC_FIELDS: Final[tuple[str, ...]] = (
     "episode_index",
     "episode_seed",
@@ -140,30 +147,36 @@ EPISODE_REQUIRED_NUMERIC_FIELDS: Final[tuple[str, ...]] = (
     "global_action_fraction_at_max_active",
 )
 
-SEED_SUMMARY_REQUIRED_COLUMNS: Final[set[str]] = {
-    "matrix_job_id",
-    "scale",
-    "algorithm",
-    "training_seed",
-    "n_eval_episodes",
-    "diagnostic_schema_version",
-}
-
-INFRASTRUCTURE_REQUIRED_COLUMNS: Final[set[str]] = {
-    "matrix_job_id",
-    "scale",
-    "algorithm",
-    "training_seed",
-    "episode_index",
-    "episode_seed",
-    "diagnostic_schema_version",
-}
-
 SERVICE_STATUS_FIELDS: Final[tuple[str, ...]] = (
     "served_count_reconciliation_status",
     "satisfaction_sum_reconciliation_status",
     "charged_energy_reconciliation_status",
     "discharged_energy_reconciliation_status",
+)
+
+CANONICAL_EXACT_RECONCILIATION: Final[tuple[tuple[str, str, str, str], ...]] = (
+    ("algorithm", "algorithm", "algorithm", "string"),
+    ("training seed", "seed", "training_seed", "integer"),
+    ("episode index", "episode_index", "episode_index", "integer"),
+    ("episode seed", "episode_seed", "episode_seed", "integer"),
+    ("episode steps", "episode_steps", "episode_steps", "integer"),
+    ("done", "done", "done", "boolean"),
+    ("total_ev_served", "total_ev_served", "total_ev_served", "integer"),
+)
+
+CANONICAL_FLOAT_RECONCILIATION: Final[tuple[tuple[str, str, float, float], ...]] = (
+    ("episode_reward", "episode_reward", 1.0, 1e-7),
+    ("tracking_error", "tracking_error", 1.0, 1e-7),
+    ("energy_tracking_error", "energy_tracking_error", 1e-2, 1e-7),
+    ("power_tracker_violation", "power_tracker_violation", 1e-2, 1e-7),
+    ("total_energy_charged", "total_energy_charged", 1e-2, 1e-7),
+    ("total_energy_discharged", "total_energy_discharged", 1e-6, 1e-7),
+    ("average_user_satisfaction", "average_user_satisfaction", 1e-6, 1e-7),
+    ("energy_user_satisfaction", "energy_user_satisfaction", 1e-6, 1e-7),
+    ("total_transformer_overload", "total_transformer_overload", 1e-3, 1e-7),
+    ("global_action_mean_all_slots", "action_mean", 1e-6, 0.0),
+    ("global_action_fraction_at_max_all_slots", "action_fraction_at_max", 1e-4, 0.0),
+    ("nonzero_action_count_mean_all_slots", "active_action_count_mean", 1e-6, 0.0),
 )
 
 
@@ -186,6 +199,20 @@ def _require_columns(
     if missing:
         raise ValueError(
             f"{label} missing required column(s): {', '.join(missing)}"
+        )
+
+
+def _require_exact_columns(
+    fieldnames: list[str],
+    expected_columns: list[str],
+    label: str,
+) -> None:
+    if fieldnames != expected_columns:
+        missing = sorted(set(expected_columns) - set(fieldnames))
+        unexpected = sorted(set(fieldnames) - set(expected_columns))
+        raise ValueError(
+            f"{label} column contract mismatch: "
+            f"missing={missing}, unexpected={unexpected}"
         )
 
 
@@ -339,11 +366,12 @@ def _validate_infrastructure_rows(
     infrastructure_label: str,
     expected_rows_per_episode: int,
 ) -> None:
-    _require_columns(
-        fieldnames,
-        INFRASTRUCTURE_REQUIRED_COLUMNS,
-        infrastructure_label,
+    expected_columns = (
+        TRANSFORMER_DIAGNOSTIC_COLUMNS
+        if infrastructure_label.startswith("transformer")
+        else CHARGER_DIAGNOSTIC_COLUMNS
     )
+    _require_exact_columns(fieldnames, expected_columns, infrastructure_label)
     expected_total = expected_rows_per_episode * EVAL_EPISODES
     if len(rows) != expected_total:
         raise ValueError(
@@ -431,9 +459,9 @@ def validate_seed_output_directory(
     charger_path = diagnostics / "charger_diagnostics.csv"
 
     episode_fields, episode_rows = _read_csv(episode_path)
-    _require_columns(
+    _require_exact_columns(
         episode_fields,
-        EPISODE_REQUIRED_COLUMNS,
+        EPISODE_DIAGNOSTIC_COLUMNS,
         "episode diagnostics",
     )
     _validate_per_seed_episode_rows(
@@ -444,9 +472,9 @@ def validate_seed_output_directory(
     )
 
     seed_fields, seed_rows = _read_csv(seed_summary_path)
-    _require_columns(
+    _require_exact_columns(
         seed_fields,
-        SEED_SUMMARY_REQUIRED_COLUMNS,
+        SEED_SUMMARY_DIAGNOSTIC_COLUMNS,
         "seed summary diagnostics",
     )
     if len(seed_rows) != 1:
@@ -1525,6 +1553,69 @@ def service_reconciliation_rows(
     return rows
 
 
+def _canonical_exact_values(
+    canonical: dict[str, str],
+    diagnostic: dict[str, str],
+    canonical_field: str,
+    diagnostic_field: str,
+    value_type: str,
+) -> tuple[str, str, str]:
+    canonical_value = canonical.get(canonical_field, "")
+    diagnostic_value = diagnostic.get(diagnostic_field, "")
+    if value_type == "integer":
+        expected = _exact_integer(canonical_value, canonical_field)
+        observed = _exact_integer(diagnostic_value, diagnostic_field)
+        return str(expected), str(observed), "pass" if expected == observed else "fail"
+    if value_type == "boolean":
+        expected_bool = _parse_bool(canonical_value, canonical_field)
+        observed_bool = _parse_bool(diagnostic_value, diagnostic_field)
+        return (
+            str(expected_bool),
+            str(observed_bool),
+            "pass" if expected_bool == observed_bool else "fail",
+        )
+    return (
+        str(canonical_value),
+        str(diagnostic_value),
+        "pass" if str(canonical_value) == str(diagnostic_value) else "fail",
+    )
+
+
+def _canonical_float_row(
+    episode_index: int,
+    diagnostic_field: str,
+    canonical_value: str,
+    diagnostic_value: str,
+    absolute_tolerance: float,
+    relative_tolerance: float,
+) -> dict[str, object]:
+    expected = _finite_number(canonical_value, diagnostic_field)
+    observed = _finite_number(diagnostic_value, diagnostic_field)
+    absolute_difference = abs(observed - expected)
+    denominator = max(abs(expected), 1e-12)
+    relative_difference = absolute_difference / denominator
+    status = (
+        "pass"
+        if (
+            absolute_difference <= absolute_tolerance
+            or relative_difference <= relative_tolerance
+        )
+        else "fail"
+    )
+    return {
+        "episode_index": episode_index,
+        "field": diagnostic_field,
+        "comparison_type": "floating",
+        "canonical_value": expected,
+        "diagnostic_value": observed,
+        "absolute_difference": absolute_difference,
+        "relative_difference": relative_difference,
+        "absolute_tolerance": absolute_tolerance,
+        "relative_tolerance": relative_tolerance,
+        "status": status,
+    }
+
+
 def prepare_seed_validation_files(
     *,
     diagnostic_dir: Path,
@@ -1554,48 +1645,61 @@ def prepare_seed_validation_files(
     if len(canonical_by_index) < EVAL_EPISODES:
         raise ValueError("canonical eval30 CSV does not contain 30 episode rows")
 
-    reconciliation_rows: list[dict[str, str]] = []
+    reconciliation_rows: list[dict[str, object]] = []
     for diagnostic in diagnostic_rows:
         episode_index = _exact_integer(diagnostic.get("episode_index"), "episode_index")
         canonical = canonical_by_index.get(episode_index)
         if canonical is None:
             raise ValueError(f"missing canonical episode row: {episode_index}")
-        checks = {
-            "algorithm": (
-                canonical.get("algorithm", algorithm),
-                diagnostic.get("algorithm"),
-            ),
-            "training_seed": (
-                canonical.get("seed", str(training_seed)),
-                diagnostic.get("training_seed"),
-            ),
-            "episode_seed": (
-                canonical.get("episode_seed"),
-                diagnostic.get("episode_seed"),
-            ),
-            "episode_steps": (
-                canonical.get("episode_steps"),
-                diagnostic.get("episode_steps"),
-            ),
-            "done": (
-                str(canonical.get("done", "True")).lower(),
-                str(diagnostic.get("done", "True")).lower(),
-            ),
-        }
-        for field, (expected, observed) in checks.items():
-            status = "pass" if str(expected) == str(observed) else "fail"
+        for field, canonical_field, diagnostic_field, value_type in CANONICAL_EXACT_RECONCILIATION:
+            expected, observed, status = _canonical_exact_values(
+                canonical,
+                diagnostic,
+                canonical_field,
+                diagnostic_field,
+                value_type,
+            )
             reconciliation_rows.append(
                 {
-                    "episode_index": str(episode_index),
+                    "episode_index": episode_index,
                     "field": field,
+                    "comparison_type": "exact",
+                    "canonical_value": expected,
+                    "diagnostic_value": observed,
+                    "absolute_difference": "",
+                    "relative_difference": "",
+                    "absolute_tolerance": "0",
+                    "relative_tolerance": "0",
                     "status": status,
                 }
+            )
+        for diagnostic_field, canonical_field, absolute_tolerance, relative_tolerance in CANONICAL_FLOAT_RECONCILIATION:
+            reconciliation_rows.append(
+                _canonical_float_row(
+                    episode_index,
+                    diagnostic_field,
+                    canonical.get(canonical_field, ""),
+                    diagnostic.get(diagnostic_field, ""),
+                    absolute_tolerance,
+                    relative_tolerance,
+                )
             )
     if any(row["status"] != "pass" for row in reconciliation_rows):
         raise ValueError("canonical reconciliation failed")
     write_csv_rows(
         validation_dir / "canonical_reconciliation.csv",
-        ["episode_index", "field", "status"],
+        [
+            "episode_index",
+            "field",
+            "comparison_type",
+            "canonical_value",
+            "diagnostic_value",
+            "absolute_difference",
+            "relative_difference",
+            "absolute_tolerance",
+            "relative_tolerance",
+            "status",
+        ],
         reconciliation_rows,
     )
 
