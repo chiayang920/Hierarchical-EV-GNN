@@ -1,3 +1,4 @@
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -23,6 +24,16 @@ from utils.infrastructure_diagnostics import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 VALIDATOR = PROJECT_ROOT / "scripts" / "validate_full_infrastructure_diagnostic_eval30.py"
+SUBPROCESS_OPENMP_ENV_DEFAULTS = {
+    "OMP_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+    "KMP_INIT_AT_FORK": "FALSE",
+    "KMP_DUPLICATE_LIB_OK": "TRUE",
+}
+for key, value in SUBPROCESS_OPENMP_ENV_DEFAULTS.items():
+    os.environ.setdefault(key, value)
 
 
 @pytest.mark.parametrize(
@@ -64,6 +75,46 @@ def test_stage_d_matches_actual_formal_job_seed_schedule():
     assert episode_seed("25cp", 1, 0) == 711000
     assert episode_seed("25cp", 4, 0) == 714000
     assert episode_seed("1000cp", 4, 0) == 744000
+
+
+def test_formal_task_mapping_remains_unchanged_for_all_8_tasks():
+    assert {
+        task_id: (
+            stage_d_task(task_id)["scale"],
+            stage_d_task(task_id)["algorithm"],
+            tuple(formal_task_id(task_id, seed) for seed in TRAINING_SEEDS),
+        )
+        for task_id in range(8)
+    } == {
+        0: ("25cp", "actiongnn", (0, 1, 2, 3, 4)),
+        1: ("25cp", "hierarchical", (5, 6, 7, 8, 9)),
+        2: ("100cp", "actiongnn", (10, 11, 12, 13, 14)),
+        3: ("100cp", "hierarchical", (15, 16, 17, 18, 19)),
+        4: ("500cp", "actiongnn", (20, 21, 22, 23, 24)),
+        5: ("500cp", "hierarchical", (25, 26, 27, 28, 29)),
+        6: ("1000cp", "actiongnn", (30, 31, 32, 33, 34)),
+        7: ("1000cp", "hierarchical", (35, 36, 37, 38, 39)),
+    }
+
+
+def test_seed_schedule_remains_unchanged_for_all_scales_and_training_seeds():
+    expected_offsets = {
+        "25cp": 710000,
+        "100cp": 720000,
+        "500cp": 730000,
+        "1000cp": 740000,
+    }
+    for scale, base_offset in expected_offsets.items():
+        for training_seed in TRAINING_SEEDS:
+            assert evaluator_seed_offset(scale, training_seed) == (
+                base_offset + (999 * training_seed)
+            )
+            assert episode_seed(scale, training_seed, 0) == (
+                base_offset + (1000 * training_seed)
+            )
+            assert episode_seed(scale, training_seed, 29) == (
+                base_offset + (1000 * training_seed) + 29
+            )
 
 
 @pytest.mark.parametrize("task_id", [-1, 8, 99, True, "0"])
@@ -1571,6 +1622,14 @@ def test_missing_required_input_fails_input_contract_without_complete_evidence_s
         + "\n",
         encoding="utf-8",
     )
+    complete_evidence_paths = [
+        seed_dir / "validation" / "same_pass_canonical_reconciliation.csv",
+        seed_dir / "validation" / "historical_canonical_drift.csv",
+        seed_dir / "validation" / "service_reconciliation.csv",
+        seed_dir / "runtime_metadata" / "reconciliation_summary.json",
+    ]
+    for path in complete_evidence_paths:
+        path.unlink(missing_ok=True)
 
     result = subprocess.run(
         [
@@ -1607,12 +1666,6 @@ def test_missing_required_input_fails_input_contract_without_complete_evidence_s
 
     assert result.returncode != 0
     assert "input_contract_mismatch" in result.stderr
-    complete_evidence_paths = [
-        seed_dir / "validation" / "same_pass_canonical_reconciliation.csv",
-        seed_dir / "validation" / "historical_canonical_drift.csv",
-        seed_dir / "validation" / "service_reconciliation.csv",
-        seed_dir / "runtime_metadata" / "reconciliation_summary.json",
-    ]
     assert not all(path.exists() for path in complete_evidence_paths)
 
 
@@ -3831,6 +3884,46 @@ def test_task5_complete_workflow_rejects_nonempty_reducer_stderr(tmp_path):
     result = run_task5_reducer(fixture)
     assert result.returncode != 0
     assert "reducer stderr snapshot" in result.stderr
+
+
+def test_clean_synthetic_end_to_end_package_and_reducer_validation_succeeds_without_m3(
+    tmp_path,
+):
+    fixture = create_task5_reducer_fixture(tmp_path)
+    result = run_task5_reducer(fixture)
+    payload = json.loads(result.stdout)
+
+    assert result.returncode == 0
+    assert payload["status"] == "ok"
+    assert payload["task_package_count"] == 8
+    assert payload["checkpoint_group_count"] == 40
+    assert payload["episode_count"] == 1200
+    assert payload["formal_job_id"] == "58513929"
+    assert payload["schema_version"] == "3"
+    assert payload["reconciliation_contract_version"] == 2
+
+
+def test_complete_bundle_contains_no_checkpoints_or_failed_job_58656380_reuse(
+    tmp_path,
+):
+    fixture = create_task5_reducer_fixture(tmp_path)
+    result = run_task5_reducer(fixture)
+    bundle = Path(json.loads(result.stdout)["bundle_path"])
+    with tarfile.open(bundle, "r:gz") as archive:
+        members = archive.getmembers()
+        names = [member.name for member in members if member.isfile()]
+        payloads = {
+            member.name: archive.extractfile(member).read().decode(
+                "utf-8",
+                errors="replace",
+            )
+            for member in members
+            if member.isfile() and member.name.endswith((".json", ".csv", ".txt", ".env"))
+        }
+
+    assert all("model.best" not in name and "model.last" not in name for name in names)
+    assert all("checkpoint/" not in name for name in names)
+    assert "58656380" not in "\n".join(payloads.values())
 
 
 def test_task6_source_bundle_dry_run_lists_full_eval30_runtime_files():

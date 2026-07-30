@@ -2224,6 +2224,36 @@ def test_schema_v3_keeps_existing_schema_v2_action_and_service_columns():
     assert "user_satisfaction_observation_count" in TRANSFORMER_DIAGNOSTIC_COLUMNS
 
 
+def test_schema_v3_headers_remain_byte_for_byte_unchanged():
+    import hashlib
+    from utils.infrastructure_diagnostics import (
+        CHARGER_DIAGNOSTIC_COLUMNS,
+        EPISODE_DIAGNOSTIC_COLUMNS,
+        SEED_SUMMARY_DIAGNOSTIC_COLUMNS,
+        TRANSFORMER_DIAGNOSTIC_COLUMNS,
+    )
+
+    def digest(columns):
+        return hashlib.sha256(("\n".join(columns) + "\n").encode("utf-8")).hexdigest()
+
+    assert len(EPISODE_DIAGNOSTIC_COLUMNS) == 68
+    assert digest(EPISODE_DIAGNOSTIC_COLUMNS) == (
+        "13f1276e0e8ad9a6f69c68aadb922c726f0b8024a6dd3471780ea17e952dd978"
+    )
+    assert len(CHARGER_DIAGNOSTIC_COLUMNS) == 38
+    assert digest(CHARGER_DIAGNOSTIC_COLUMNS) == (
+        "88f2045630d8d534fa71012fccbe87ce3887b439b4ff1a052db4ae49c85c0677"
+    )
+    assert len(TRANSFORMER_DIAGNOSTIC_COLUMNS) == 44
+    assert digest(TRANSFORMER_DIAGNOSTIC_COLUMNS) == (
+        "58298be54e47444cc9397c6621553a6cb3907a062eb4081022a7da10bbab474e"
+    )
+    assert len(SEED_SUMMARY_DIAGNOSTIC_COLUMNS) == 53
+    assert digest(SEED_SUMMARY_DIAGNOSTIC_COLUMNS) == (
+        "6b481917df764e802dc4163124942dd707d828c943745f0b49c352c1718f51c4"
+    )
+
+
 def test_diagnostic_scale_choices_are_exact_and_closed():
     import evaluate_td3_gnn_infrastructure_diagnostics as evaluator
 
@@ -2431,6 +2461,7 @@ def test_explicit_scale_is_the_only_episode_and_summary_metadata_authority(
             "stats": {},
             "reset_info": {},
             "action_summary": {},
+            "same_pass_canonical_episode_record": {},
         },
     )
 
@@ -2448,6 +2479,11 @@ def test_explicit_scale_is_the_only_episode_and_summary_metadata_authority(
     monkeypatch.setattr(evaluator, "validate_diagnostic_reconciliation", lambda **_kwargs: None)
     monkeypatch.setattr(evaluator, "build_seed_summary_row", capture_summary_row)
     monkeypatch.setattr(evaluator, "write_csv", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        evaluator,
+        "write_same_pass_canonical_eval30",
+        lambda *_args, **_kwargs: None,
+    )
 
     evaluator.main(diagnostic_cli_args(config_path, tmp_path / "out", scale="100cp"))
 
