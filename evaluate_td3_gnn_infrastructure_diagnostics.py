@@ -7,6 +7,8 @@ import yaml
 
 from evaluate_td3_gnn import (
     ALGORITHM_CHOICES,
+    action_diagnostics_from_actions,
+    build_csv_rows as build_canonical_csv_rows,
     create_policy,
     load_checkpoint_kwargs,
     load_policy_checkpoint,
@@ -80,6 +82,104 @@ def select_mapped_action(policy, state, deterministic=True, eval_expl_noise=0.0)
     return selected_action
 
 
+def canonical_overlapping_action_metrics(
+    mapped_actions_by_step: list[np.ndarray],
+    max_action: float,
+    tolerance: float,
+) -> dict[str, float | int]:
+    stacked_actions = np.asarray(mapped_actions_by_step, dtype=np.float32)
+    if stacked_actions.size == 0:
+        return {
+            **action_diagnostics_from_actions(
+                [],
+                max_action=max_action,
+                tolerance=tolerance,
+            ),
+            "mapped_action_dimension": 0,
+            "same_pass_at_max_count": 0,
+            "total_action_decision_denominator": 0,
+        }
+    if stacked_actions.ndim == 1:
+        stacked_actions = stacked_actions.reshape(1, -1)
+    at_max_mask = stacked_actions >= (float(max_action) - float(tolerance))
+    action_metrics = action_diagnostics_from_actions(
+        [row for row in stacked_actions],
+        max_action=max_action,
+        tolerance=tolerance,
+    )
+    return {
+        **action_metrics,
+        "mapped_action_dimension": int(stacked_actions.shape[1]),
+        "same_pass_at_max_count": int(np.count_nonzero(at_max_mask)),
+        "total_action_decision_denominator": int(
+            stacked_actions.shape[0] * stacked_actions.shape[1]
+        ),
+    }
+
+
+def inject_canonical_overlapping_action_metrics(
+    action_summary,
+    overlapping_metrics,
+) -> None:
+    global_summary = action_summary["global"]
+    global_summary["action_mean_all_slots"] = overlapping_metrics["action_mean"]
+    global_summary["action_fraction_at_max_all_slots"] = overlapping_metrics[
+        "action_fraction_at_max"
+    ]
+    global_summary["nonzero_action_count_mean_all_slots"] = overlapping_metrics[
+        "active_action_count_mean"
+    ]
+
+
+def build_same_pass_canonical_episode_record(
+    episode_record,
+    overlapping_action_metrics,
+):
+    canonical_stats = dict(episode_record.get("stats", {}))
+    canonical_stats.update(
+        {
+            "mapped_action_dimension": overlapping_action_metrics[
+                "mapped_action_dimension"
+            ],
+            "same_pass_at_max_count": overlapping_action_metrics[
+                "same_pass_at_max_count"
+            ],
+            "total_action_decision_denominator": overlapping_action_metrics[
+                "total_action_decision_denominator"
+            ],
+        }
+    )
+    canonical_episode = {
+        "episode_reward": episode_record["episode_reward"],
+        "episode_steps": episode_record["episode_steps"],
+        "done": episode_record["done"],
+        "stats": canonical_stats,
+        "reset_info": episode_record.get("reset_info", {}),
+    }
+    canonical_episode.update(
+        {
+            action_metric_key: overlapping_action_metrics[action_metric_key]
+            for action_metric_key in (
+                "action_mean",
+                "action_std",
+                "action_min",
+                "action_max",
+                "action_fraction_zero",
+                "action_fraction_at_max",
+                "active_action_count_mean",
+            )
+        }
+    )
+    return canonical_episode
+
+
+def write_same_pass_canonical_eval30(output_dir, metadata, episode_records):
+    rows, fieldnames = build_canonical_csv_rows(metadata, episode_records)
+    output_path = Path(output_dir) / "same_pass_canonical_eval30.csv"
+    write_csv(output_path, fieldnames, rows)
+    return output_path
+
+
 def evaluate_diagnostic_episode(
     policy,
     env,
@@ -137,15 +237,34 @@ def evaluate_diagnostic_episode(
         tolerance=max_action_tolerance,
         env=env,
     )
+    overlapping_action_metrics = canonical_overlapping_action_metrics(
+        mapped_actions_by_step,
+        max_action=max_action,
+        tolerance=max_action_tolerance,
+    )
+    inject_canonical_overlapping_action_metrics(
+        action_summary,
+        overlapping_action_metrics,
+    )
 
-    return {
+    episode_record = {
         "episode_reward": episode_reward,
         "episode_steps": episode_steps,
         "done": done,
         "stats": stats,
         "reset_info": reset_info,
         "action_summary": action_summary,
+        "mapped_actions_by_step": mapped_actions_by_step,
+        "mapped_action_dimension": int(slot_to_charger_id.size),
+        "same_pass_overlapping_action_metrics": overlapping_action_metrics,
     }
+    episode_record["same_pass_canonical_episode_record"] = (
+        build_same_pass_canonical_episode_record(
+            episode_record,
+            overlapping_action_metrics=overlapping_action_metrics,
+        )
+    )
+    return episode_record
 
 
 def validate_config_scale_contract(config_path, scale):
@@ -286,6 +405,7 @@ def main(argv=None):
     episode_rows = []
     charger_rows = []
     transformer_rows = []
+    same_pass_canonical_records = []
     for episode_index in range(args.eval_episodes):
         episode_seed = args.seed + args.eval_seed_offset + episode_index
         env = make_env(args.config, seed=episode_seed)
@@ -299,6 +419,10 @@ def main(argv=None):
             deterministic=args.deterministic,
             eval_expl_noise=args.eval_expl_noise,
         )
+        same_pass_record = dict(episode_record["same_pass_canonical_episode_record"])
+        same_pass_record["episode_index"] = episode_index
+        same_pass_record["episode_seed"] = episode_seed
+        same_pass_canonical_records.append(same_pass_record)
         action_summary = episode_record["action_summary"]
         episode_row = build_episode_row(
             metadata=metadata,
@@ -340,6 +464,17 @@ def main(argv=None):
     write_csv(output_dir / "transformer_diagnostics.csv", TRANSFORMER_DIAGNOSTIC_COLUMNS, transformer_rows)
     write_csv(output_dir / "charger_diagnostics.csv", CHARGER_DIAGNOSTIC_COLUMNS, charger_rows)
     write_csv(output_dir / "seed_summary_diagnostics.csv", SEED_SUMMARY_DIAGNOSTIC_COLUMNS, seed_summary_rows)
+    write_same_pass_canonical_eval30(
+        output_dir,
+        {
+            "run_name": args.run_name,
+            "algorithm": canonical_algorithm,
+            "config": args.config,
+            "seed": args.seed,
+            "checkpoint": str(checkpoint_prefix),
+        },
+        same_pass_canonical_records,
+    )
 
     print("---------------------------------------")
     print(f"Run name: {args.run_name}")
