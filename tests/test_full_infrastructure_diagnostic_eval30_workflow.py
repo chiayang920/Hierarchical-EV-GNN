@@ -155,6 +155,12 @@ import json
 
 from scripts.validate_full_infrastructure_diagnostic_eval30 import (
     expected_episode_keys,
+    HISTORICAL_DRIFT_COLUMNS,
+    HISTORICAL_FLOAT_FIELDS,
+    HISTORICAL_IDENTITY_FIELDS,
+    PROVENANCE_IDENTITY_FIELDS,
+    SAME_PASS_FIELD_MAP,
+    SAME_PASS_RECONCILIATION_COLUMNS,
     validate_episode_inventory,
     validate_seed_output_directory,
 )
@@ -341,6 +347,119 @@ def read_csv_rows(path):
         return list(reader.fieldnames or []), list(reader)
 
 
+def passing_same_pass_reconciliation_rows():
+    rows = []
+    for episode_index in range(EVAL_EPISODES):
+        for canonical_field, _diagnostic_field, comparison_type in SAME_PASS_FIELD_MAP:
+            is_fraction = comparison_type == "fraction_count_exact"
+            rows.append({
+                "reconciliation_contract_version": "2",
+                "episode_index": str(episode_index),
+                "field": canonical_field,
+                "comparison_type": comparison_type,
+                "same_pass_canonical_value": (
+                    "0.5" if canonical_field.startswith("action") else "-1.0"
+                ),
+                "diagnostic_value": (
+                    "0.5" if canonical_field.startswith("action") else "-1.0"
+                ),
+                "absolute_difference": "0.0",
+                "relative_difference": "0.0",
+                "same_pass_count": "1400" if is_fraction else "",
+                "diagnostic_count": "1400" if is_fraction else "",
+                "total_action_decision_denominator": "2800" if is_fraction else "",
+                "status": "pass",
+                "failure_category": "",
+            })
+    return rows
+
+
+def passing_historical_drift_rows(*, scale, algorithm, task_id, training_seed):
+    rows = []
+    for field in PROVENANCE_IDENTITY_FIELDS:
+        rows.append({
+            "reconciliation_contract_version": "2",
+            "scale": "",
+            "algorithm": "",
+            "training_seed": "",
+            "formal_task_id": "",
+            "episode_index": "",
+            "episode_seed": "",
+            "field": field,
+            "historical_source_label": "formal_job_58513929_package_validation",
+            "stage_d_source_label": "stage_d_runtime_metadata",
+            "historical_value": "match",
+            "stage_d_same_pass_value": "match",
+            "absolute_difference": "",
+            "relative_difference": "",
+            "classification": "historical_identity_match",
+            "historical_at_max_count": "",
+            "stage_d_at_max_count": "",
+            "total_action_decision_denominator": "",
+            "count_difference": "",
+            "fraction_difference": "",
+        })
+    for episode_index in range(EVAL_EPISODES):
+        seed_value = str(episode_seed(scale, training_seed, episode_index))
+        for field, _historical_field, _stage_d_field, _value_type in HISTORICAL_IDENTITY_FIELDS:
+            rows.append({
+                "reconciliation_contract_version": "2",
+                "scale": scale,
+                "algorithm": algorithm,
+                "training_seed": str(training_seed),
+                "formal_task_id": str(formal_task_id(task_id, training_seed)),
+                "episode_index": str(episode_index),
+                "episode_seed": seed_value,
+                "field": field,
+                "historical_source_label": "formal_job_58513929_canonical_eval30",
+                "stage_d_source_label": "stage_d_same_pass_canonical_eval30",
+                "historical_value": "match",
+                "stage_d_same_pass_value": "match",
+                "absolute_difference": "",
+                "relative_difference": "",
+                "classification": "historical_identity_match",
+                "historical_at_max_count": "",
+                "stage_d_at_max_count": "",
+                "total_action_decision_denominator": "",
+                "count_difference": "",
+                "fraction_difference": "",
+            })
+        for historical_field, _stage_d_field in HISTORICAL_FLOAT_FIELDS:
+            rows.append({
+                "reconciliation_contract_version": "2",
+                "scale": scale,
+                "algorithm": algorithm,
+                "training_seed": str(training_seed),
+                "formal_task_id": str(formal_task_id(task_id, training_seed)),
+                "episode_index": str(episode_index),
+                "episode_seed": seed_value,
+                "field": historical_field,
+                "historical_source_label": "formal_job_58513929_canonical_eval30",
+                "stage_d_source_label": "stage_d_same_pass_canonical_eval30",
+                "historical_value": "0.0",
+                "stage_d_same_pass_value": "0.0",
+                "absolute_difference": "0.0",
+                "relative_difference": "0.0",
+                "classification": "exact_match",
+                "historical_at_max_count": (
+                    "1400" if historical_field == "action_fraction_at_max" else ""
+                ),
+                "stage_d_at_max_count": (
+                    "1400" if historical_field == "action_fraction_at_max" else ""
+                ),
+                "total_action_decision_denominator": (
+                    "2800" if historical_field == "action_fraction_at_max" else ""
+                ),
+                "count_difference": (
+                    "0" if historical_field == "action_fraction_at_max" else ""
+                ),
+                "fraction_difference": (
+                    "0.0" if historical_field == "action_fraction_at_max" else ""
+                ),
+            })
+    return rows
+
+
 def valid_episode_row(
     episode_index,
     *,
@@ -423,6 +542,7 @@ def build_seed_output(
     *,
     task_id=0,
     training_seed=0,
+    source_commit_sha="a" * 40,
 ):
     mapping = {
         0: ("25cp", "actiongnn", 25, 3),
@@ -438,9 +558,11 @@ def build_seed_output(
     diagnostics = root / "diagnostics"
     validation = root / "validation"
     logs = root / "logs"
+    runtime_metadata = root / "runtime_metadata"
     diagnostics.mkdir(parents=True)
     validation.mkdir()
     logs.mkdir()
+    runtime_metadata.mkdir()
 
     episode_rows = [
         valid_episode_row(
@@ -594,11 +716,6 @@ def build_seed_output(
     )
 
     write_csv(
-        validation / "canonical_reconciliation.csv",
-        ["status"],
-        [{"status": "pass"} for _ in range(30)],
-    )
-    write_csv(
         validation / "service_reconciliation.csv",
         [
             "served_count_reconciliation_status",
@@ -618,6 +735,54 @@ def build_seed_output(
     )
     (validation / "mapping_validation.json").write_text(
         json.dumps({"status": "ok"}),
+        encoding="utf-8",
+    )
+    same_pass_rows = passing_same_pass_reconciliation_rows()
+    historical_rows = passing_historical_drift_rows(
+        scale=scale,
+        algorithm=algorithm,
+        task_id=task_id,
+        training_seed=training_seed,
+    )
+    write_csv(
+        validation / "same_pass_canonical_reconciliation.csv",
+        SAME_PASS_RECONCILIATION_COLUMNS,
+        same_pass_rows,
+    )
+    write_csv(
+        validation / "historical_canonical_drift.csv",
+        HISTORICAL_DRIFT_COLUMNS,
+        historical_rows,
+    )
+    (runtime_metadata / "reconciliation_summary.json").write_text(
+        json.dumps(
+            {
+                "reconciliation_contract_version": 2,
+                "stage_d_source_commit_sha": source_commit_sha,
+                "status": "ok",
+                "hard_gate_status": "pass",
+                "historical_identity_status": "pass",
+                "same_pass_metric_status": "pass",
+                "service_reconciliation_status": "pass",
+                "mapping_validation_status": "pass",
+                "historical_drift_audit_status": "written",
+                "evidence_write_status": "complete",
+                "failure_categories": [],
+                "hard_failure_count": 0,
+                "historical_identity_failure_count": 0,
+                "same_pass_metric_failure_count": 0,
+                "service_reconciliation_failure_count": 0,
+                "mapping_validation_failure_count": 0,
+                "same_pass_canonical_rows": 31,
+                "same_pass_reconciliation_rows": len(same_pass_rows),
+                "historical_drift_rows": len(historical_rows),
+                "historical_float_drift_count": 0,
+                "historical_saturation_count_drift_count": 0,
+                "service_reconciliation_rows": 30,
+            },
+            sort_keys=True,
+        )
+        + "\n",
         encoding="utf-8",
     )
     (logs / "stderr.log").write_bytes(b"")
@@ -758,15 +923,15 @@ def test_validate_seed_output_rejects_missing_required_csv(tmp_path):
         validate_seed_output_directory(seed_dir, task_id=0, training_seed=0)
 
 
-def test_validate_seed_output_rejects_failed_canonical_reconciliation(tmp_path):
+def test_validate_seed_output_rejects_failed_same_pass_reconciliation(tmp_path):
     seed_dir = build_seed_output(tmp_path / "seed0")
-    path = seed_dir / "validation" / "canonical_reconciliation.csv"
+    path = seed_dir / "validation" / "same_pass_canonical_reconciliation.csv"
 
     def fail(fieldnames, rows):
         rows[0]["status"] = "fail"
 
     mutate_csv(path, fail)
-    with pytest.raises(ValueError, match="canonical reconciliation"):
+    with pytest.raises(ValueError, match="same-pass reconciliation"):
         validate_seed_output_directory(seed_dir, task_id=0, training_seed=0)
 
 
@@ -789,6 +954,92 @@ def test_validate_seed_output_rejects_failed_mapping_validation(tmp_path):
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="mapping validation"):
+        validate_seed_output_directory(seed_dir, task_id=0, training_seed=0)
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "diagnostics/same_pass_canonical_eval30.csv",
+        "validation/same_pass_canonical_reconciliation.csv",
+        "validation/historical_canonical_drift.csv",
+        "runtime_metadata/reconciliation_summary.json",
+    ],
+)
+def test_validate_seed_output_requires_new_reconciliation_evidence(
+    tmp_path,
+    relative_path,
+):
+    seed_dir = build_seed_output(tmp_path / "seed0")
+    (seed_dir / relative_path).unlink()
+
+    with pytest.raises(ValueError, match="reconciliation"):
+        validate_seed_output_directory(seed_dir, task_id=0, training_seed=0)
+
+
+def test_validate_seed_output_rejects_reconciliation_contract_version_mismatch(
+    tmp_path,
+):
+    seed_dir = build_seed_output(tmp_path / "seed0")
+    summary_path = seed_dir / "runtime_metadata" / "reconciliation_summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["reconciliation_contract_version"] = 1
+    summary_path.write_text(
+        json.dumps(summary, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="reconciliation contract"):
+        validate_seed_output_directory(seed_dir, task_id=0, training_seed=0)
+
+
+def test_validate_seed_output_rejects_missing_same_pass_reconciliation_row(
+    tmp_path,
+):
+    seed_dir = build_seed_output(tmp_path / "seed0")
+    path = seed_dir / "validation" / "same_pass_canonical_reconciliation.csv"
+    fields, rows = read_csv_rows(path)
+    write_csv(path, fields, rows[:-1])
+
+    with pytest.raises(ValueError, match="same-pass reconciliation row count"):
+        validate_seed_output_directory(seed_dir, task_id=0, training_seed=0)
+
+
+def test_validate_seed_output_rejects_duplicate_historical_drift_key(tmp_path):
+    seed_dir = build_seed_output(tmp_path / "seed0")
+    path = seed_dir / "validation" / "historical_canonical_drift.csv"
+    fields, rows = read_csv_rows(path)
+    rows.append(dict(rows[-1]))
+    write_csv(path, fields, rows)
+
+    with pytest.raises(ValueError, match="duplicate historical drift key"):
+        validate_seed_output_directory(seed_dir, task_id=0, training_seed=0)
+
+
+def test_validate_seed_output_rejects_reconciliation_row_wrong_version(tmp_path):
+    seed_dir = build_seed_output(tmp_path / "seed0")
+    path = seed_dir / "validation" / "same_pass_canonical_reconciliation.csv"
+    fields, rows = read_csv_rows(path)
+    rows[0]["reconciliation_contract_version"] = "1"
+    write_csv(path, fields, rows)
+
+    with pytest.raises(ValueError, match="reconciliation contract"):
+        validate_seed_output_directory(seed_dir, task_id=0, training_seed=0)
+
+
+def test_validate_seed_output_rejects_summary_count_mismatch(tmp_path):
+    seed_dir = build_seed_output(tmp_path / "seed0")
+    summary_path = seed_dir / "runtime_metadata" / "reconciliation_summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["same_pass_reconciliation_rows"] = (
+        summary["same_pass_reconciliation_rows"] - 1
+    )
+    summary_path.write_text(
+        json.dumps(summary, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="summary count"):
         validate_seed_output_directory(seed_dir, task_id=0, training_seed=0)
 
 
@@ -1831,7 +2082,12 @@ def build_task3_package(
     algorithm = str(task["algorithm"])
 
     for seed in TRAINING_SEEDS:
-        build_seed_output(root / f"seed{seed}", task_id=task_id, training_seed=seed)
+        build_seed_output(
+            root / f"seed{seed}",
+            task_id=task_id,
+            training_seed=seed,
+            source_commit_sha=source_commit_sha,
+        )
 
     _task3_write_json(
         root / "task_metadata" / "task.json",
@@ -1844,6 +2100,7 @@ def build_task3_package(
             "formal_task_ids": [formal_task_id(task_id, seed) for seed in TRAINING_SEEDS],
             "eval_episodes_per_seed": EVAL_EPISODES,
             "diagnostic_schema_version": "3",
+            "reconciliation_contract_version": 2,
         },
     )
 
@@ -1908,6 +2165,7 @@ def build_task3_package(
             "checkpoint_groups": 5,
             "episode_count": 150,
             "diagnostic_schema_version": "3",
+            "reconciliation_contract_version": 2,
         },
     )
     logs = root / "logs"
@@ -1976,6 +2234,7 @@ def test_task3_valid_five_seed_package_passes(tmp_path):
         "checkpoint_groups": 5,
         "episode_count": 150,
         "diagnostic_schema_version": "3",
+        "reconciliation_contract_version": 2,
         "source_commit_sha": "f" * 40,
         "array_job_id": "99999999",
     }
@@ -2009,6 +2268,41 @@ def test_task3_rejects_missing_seed_group(tmp_path):
 
     package = build_task3_package(tmp_path, staging_mutator=mutate)
     with pytest.raises(ValueError, match="file set mismatch"):
+        _task3_validate_package(package, task_id=0)
+
+
+def test_task_package_validation_requires_all_new_reconciliation_evidence(tmp_path):
+    def mutate(root):
+        (root / "seed3" / "validation" / "historical_canonical_drift.csv").unlink()
+
+    package = build_task3_package(tmp_path, staging_mutator=mutate)
+
+    with pytest.raises(ValueError, match="file set mismatch"):
+        _task3_validate_package(package, task_id=0)
+
+
+def test_task_package_validation_rejects_seed_summary_source_commit_mismatch(tmp_path):
+    def mutate(root):
+        summary_path = (
+            root
+            / "seed3"
+            / "runtime_metadata"
+            / "reconciliation_summary.json"
+        )
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        summary["stage_d_source_commit_sha"] = "b" * 40
+        summary_path.write_text(
+            json.dumps(summary, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+    package = build_task3_package(
+        tmp_path,
+        staging_mutator=mutate,
+        source_commit_sha="a" * 40,
+    )
+
+    with pytest.raises(ValueError, match="Stage D source commit mismatch"):
         _task3_validate_package(package, task_id=0)
 
 
