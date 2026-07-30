@@ -1228,6 +1228,363 @@ def test_historical_saturation_classification_matrix(
         assert saturation["historical_at_max_count"] == historical_count
 
 
+def test_reconciliation_evidence_remains_present_after_hard_gate_failure(tmp_path):
+    seed_dir = build_seed_output(tmp_path / "seed0")
+    same_pass_csv = seed_dir / "diagnostics" / "same_pass_canonical_eval30.csv"
+
+    def mutate(rows):
+        rows[0]["tracking_error"] = "999.0"
+
+    write_same_pass_canonical_eval30(same_pass_csv, mutator=mutate)
+    historical_csv = tmp_path / "historical_eval30.csv"
+    write_canonical_eval30(historical_csv)
+    config_path, checkpoint_prefix = write_stage_d_provenance_files(
+        tmp_path / "stage_d_files"
+    )
+    formal_validation_json = tmp_path / "formal_package_validation.json"
+    formal_validation_json.write_text(
+        json.dumps(
+            formal_validation_for_stage_d_files(config_path, checkpoint_prefix),
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(VALIDATOR),
+            "prepare-seed-validation",
+            "--diagnostic-dir",
+            str(seed_dir / "diagnostics"),
+            "--historical-canonical-csv",
+            str(historical_csv),
+            "--validation-dir",
+            str(seed_dir / "validation"),
+            "--runtime-metadata-dir",
+            str(seed_dir / "runtime_metadata"),
+            "--formal-validation-json",
+            str(formal_validation_json),
+            "--config-path",
+            str(config_path),
+            "--checkpoint-prefix",
+            str(checkpoint_prefix),
+            "--task-id",
+            "0",
+            "--training-seed",
+            "0",
+            "--stage-d-source-commit-sha",
+            "a" * 40,
+        ],
+        cwd=PROJECT_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "same_pass_metric_mismatch" in result.stderr
+    assert (
+        seed_dir / "validation" / "same_pass_canonical_reconciliation.csv"
+    ).is_file()
+    assert (seed_dir / "validation" / "historical_canonical_drift.csv").is_file()
+    assert (seed_dir / "validation" / "service_reconciliation.csv").is_file()
+    summary = json.loads(
+        (seed_dir / "runtime_metadata" / "reconciliation_summary.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert summary["reconciliation_contract_version"] == 2
+    assert summary["status"] == "failed"
+    assert summary["hard_gate_status"] == "fail"
+    assert "same_pass_metric_mismatch" in summary["failure_categories"]
+
+
+def test_missing_required_input_fails_input_contract_without_complete_evidence_set(
+    tmp_path,
+):
+    seed_dir = build_seed_output(tmp_path / "seed0")
+    (seed_dir / "diagnostics" / "same_pass_canonical_eval30.csv").unlink()
+    historical_csv = tmp_path / "historical_eval30.csv"
+    write_canonical_eval30(historical_csv)
+    config_path, checkpoint_prefix = write_stage_d_provenance_files(
+        tmp_path / "stage_d_files"
+    )
+    formal_validation_json = tmp_path / "formal_package_validation.json"
+    formal_validation_json.write_text(
+        json.dumps(
+            formal_validation_for_stage_d_files(config_path, checkpoint_prefix),
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(VALIDATOR),
+            "prepare-seed-validation",
+            "--diagnostic-dir",
+            str(seed_dir / "diagnostics"),
+            "--historical-canonical-csv",
+            str(historical_csv),
+            "--validation-dir",
+            str(seed_dir / "validation"),
+            "--runtime-metadata-dir",
+            str(seed_dir / "runtime_metadata"),
+            "--formal-validation-json",
+            str(formal_validation_json),
+            "--config-path",
+            str(config_path),
+            "--checkpoint-prefix",
+            str(checkpoint_prefix),
+            "--task-id",
+            "0",
+            "--training-seed",
+            "0",
+            "--stage-d-source-commit-sha",
+            "a" * 40,
+        ],
+        cwd=PROJECT_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "input_contract_mismatch" in result.stderr
+    complete_evidence_paths = [
+        seed_dir / "validation" / "same_pass_canonical_reconciliation.csv",
+        seed_dir / "validation" / "historical_canonical_drift.csv",
+        seed_dir / "validation" / "service_reconciliation.csv",
+        seed_dir / "runtime_metadata" / "reconciliation_summary.json",
+    ]
+    assert not all(path.exists() for path in complete_evidence_paths)
+
+
+def run_prepare_seed_validation_with_provenance(
+    seed_dir,
+    historical_csv,
+    *,
+    source_commit="a" * 40,
+    formal_validation_mutator=None,
+    extra_args=(),
+):
+    config_path, checkpoint_prefix = write_stage_d_provenance_files(
+        seed_dir / "stage_d_files"
+    )
+    formal_validation_json = seed_dir / "runtime_metadata" / "formal_package_validation.json"
+    formal_validation_json.parent.mkdir(parents=True, exist_ok=True)
+    formal_validation_json.write_text(
+        json.dumps(
+            formal_validation_for_stage_d_files(
+                config_path,
+                checkpoint_prefix,
+                mutator=formal_validation_mutator,
+            ),
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return subprocess.run(
+        [
+            sys.executable,
+            str(VALIDATOR),
+            "prepare-seed-validation",
+            "--diagnostic-dir",
+            str(seed_dir / "diagnostics"),
+            *extra_args,
+            "--validation-dir",
+            str(seed_dir / "validation"),
+            "--runtime-metadata-dir",
+            str(seed_dir / "runtime_metadata"),
+            "--formal-validation-json",
+            str(formal_validation_json),
+            "--config-path",
+            str(config_path),
+            "--checkpoint-prefix",
+            str(checkpoint_prefix),
+            "--task-id",
+            "0",
+            "--training-seed",
+            "0",
+            "--stage-d-source-commit-sha",
+            source_commit,
+        ],
+        cwd=PROJECT_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
+@pytest.mark.parametrize("option_name", ["--historical-canonical-csv", "--canonical-csv"])
+def test_prepare_seed_validation_accepts_canonical_csv_aliases(
+    tmp_path,
+    option_name,
+):
+    seed_dir = build_seed_output(tmp_path / "seed0")
+    historical_csv = tmp_path / "historical_eval30.csv"
+    write_canonical_eval30(historical_csv)
+
+    result = run_prepare_seed_validation_with_provenance(
+        seed_dir,
+        historical_csv,
+        extra_args=[option_name, str(historical_csv)],
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_prepare_seed_validation_rejects_conflicting_canonical_csv_alias_values(
+    tmp_path,
+):
+    seed_dir = build_seed_output(tmp_path / "seed0")
+    historical_csv = tmp_path / "historical_eval30.csv"
+    other_historical_csv = tmp_path / "other_historical_eval30.csv"
+    write_canonical_eval30(historical_csv)
+    write_canonical_eval30(other_historical_csv)
+
+    result = run_prepare_seed_validation_with_provenance(
+        seed_dir,
+        historical_csv,
+        extra_args=[
+            "--historical-canonical-csv",
+            str(historical_csv),
+            "--canonical-csv",
+            str(other_historical_csv),
+        ],
+    )
+
+    assert result.returncode != 0
+    assert "conflicting canonical CSV arguments" in result.stderr
+
+
+@pytest.mark.parametrize(
+    (
+        "mutate_historical",
+        "mutate_same_pass",
+        "source_commit",
+        "formal_validation_mutator",
+        "field",
+    ),
+    [
+        (
+            lambda rows: rows[0].update({"episode_seed": "bad-seed"}),
+            None,
+            "a" * 40,
+            None,
+            "episode_seed",
+        ),
+        (
+            lambda rows: rows[0].update({"done": "maybe"}),
+            None,
+            "a" * 40,
+            None,
+            "done",
+        ),
+        (None, None, "NOT_A_SHA", None, "stage_d_source_commit_sha"),
+        (
+            None,
+            None,
+            "a" * 40,
+            lambda payload: payload.update({"formal_job_id": "not-a-job"}),
+            "formal_job_id",
+        ),
+    ],
+)
+def test_malformed_identity_values_hard_fail_after_evidence_without_audit_classification(
+    tmp_path,
+    mutate_historical,
+    mutate_same_pass,
+    source_commit,
+    formal_validation_mutator,
+    field,
+):
+    seed_dir = build_seed_output(tmp_path / "seed0")
+    if mutate_same_pass is not None:
+        mutate_csv(
+            seed_dir / "diagnostics" / "same_pass_canonical_eval30.csv",
+            lambda _fields, rows: mutate_same_pass(rows),
+        )
+    historical_csv = tmp_path / "historical_eval30.csv"
+    write_canonical_eval30(historical_csv, mutator=mutate_historical)
+
+    result = run_prepare_seed_validation_with_provenance(
+        seed_dir,
+        historical_csv,
+        source_commit=source_commit,
+        formal_validation_mutator=formal_validation_mutator,
+        extra_args=["--historical-canonical-csv", str(historical_csv)],
+    )
+
+    assert result.returncode != 0
+    assert "historical_identity_mismatch" in result.stderr
+    _, drift_rows = read_csv_rows(
+        seed_dir / "validation" / "historical_canonical_drift.csv"
+    )
+    identity_rows = [row for row in drift_rows if row["field"] == field]
+    assert identity_rows
+    assert {row["classification"] for row in identity_rows} == {
+        "historical_identity_mismatch"
+    }
+    assert all(row["classification"] != "not_comparable" for row in identity_rows)
+
+
+def test_mapping_validation_payload_is_built_without_writing_or_raising(tmp_path):
+    from scripts.validate_full_infrastructure_diagnostic_eval30 import (
+        build_mapping_validation_payload,
+        load_seed_reconciliation_inputs,
+    )
+
+    seed_dir = build_seed_output(tmp_path / "seed0")
+    (seed_dir / "validation" / "mapping_validation.json").unlink()
+    historical_csv = tmp_path / "historical_eval30.csv"
+    write_canonical_eval30(historical_csv)
+    config_path, checkpoint_prefix = write_stage_d_provenance_files(
+        tmp_path / "stage_d_files"
+    )
+    formal_validation_json = tmp_path / "formal_package_validation.json"
+    formal_validation_json.write_text(
+        json.dumps(
+            formal_validation_for_stage_d_files(config_path, checkpoint_prefix),
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    inputs = load_seed_reconciliation_inputs(
+        diagnostic_dir=seed_dir / "diagnostics",
+        historical_canonical_csv=historical_csv,
+        validation_dir=seed_dir / "validation",
+        task_id=0,
+        training_seed=0,
+        formal_validation_json=formal_validation_json,
+        stage_d_source_commit_sha="a" * 40,
+        config_path=config_path,
+        checkpoint_prefix=checkpoint_prefix,
+    )
+
+    payload = build_mapping_validation_payload(
+        inputs,
+        inputs.transformer_rows,
+        inputs.charger_rows,
+    )
+
+    assert payload["reconciliation_contract_version"] == 2
+    assert payload["status"] == "ok"
+    assert payload["scale"] == "25cp"
+    assert payload["expected_charger_count"] == 25
+    assert payload["expected_transformer_count"] == 3
+    assert payload["episode_count"] == 30
+    assert not (seed_dir / "validation" / "mapping_validation.json").exists()
+
+
 def write_stage_d_provenance_files(root, *, scale="25cp", algorithm="actiongnn"):
     root.mkdir(parents=True, exist_ok=True)
     config_path = root / "formal_config.yaml"

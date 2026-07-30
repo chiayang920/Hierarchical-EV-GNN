@@ -1574,7 +1574,7 @@ def _pass_if_close(observed: float, expected: float, *, tolerance: float = 1e-6)
     return "pass" if abs(observed - expected) <= tolerance else "fail"
 
 
-def service_reconciliation_rows(
+def build_service_reconciliation_rows(
     episode_rows: list[dict[str, str]],
     transformer_rows: list[dict[str, str]],
     charger_rows: list[dict[str, str]],
@@ -1677,14 +1677,75 @@ def service_reconciliation_rows(
                 "transformer_energy_discharged_kwh_sum": transformer_discharged,
             }
         )
-    failures = [
-        row
+    return rows
+
+
+def evaluate_service_reconciliation_rows(rows: list[dict[str, object]]) -> int:
+    return sum(
+        1
         for row in rows
         if any(row[field] != "pass" for field in SERVICE_STATUS_FIELDS)
-    ]
-    if failures:
-        raise ValueError("service reconciliation failed")
-    return rows
+    )
+
+
+def build_mapping_validation_payload(
+    inputs: SeedReconciliationInputs,
+    transformer_rows: list[dict[str, str]],
+    charger_rows: list[dict[str, str]],
+) -> dict[str, object]:
+    expected_charger_count, expected_transformer_count = TOPOLOGY[inputs.scale]
+    episode_indexes = {
+        _exact_integer(row.get("episode_index"), "episode_index")
+        for row in inputs.diagnostic_rows
+    }
+    transformer_episode_indexes = {
+        _exact_integer(row.get("episode_index"), "episode_index")
+        for row in transformer_rows
+    }
+    charger_episode_indexes = {
+        _exact_integer(row.get("episode_index"), "episode_index")
+        for row in charger_rows
+    }
+    charger_keys = {
+        (row.get("episode_index"), row.get("charger_id"))
+        for row in charger_rows
+    }
+    transformer_keys = {
+        (row.get("episode_index"), row.get("transformer_id"))
+        for row in transformer_rows
+    }
+    schema_versions = {
+        row.get("diagnostic_schema_version")
+        for row in [*inputs.diagnostic_rows, *transformer_rows, *charger_rows]
+    }
+    checks = {
+        "episode_count": len(episode_indexes) == EVAL_EPISODES,
+        "transformer_episode_coverage": transformer_episode_indexes == episode_indexes,
+        "charger_episode_coverage": charger_episode_indexes == episode_indexes,
+        "charger_row_count": len(charger_rows)
+        == EVAL_EPISODES * expected_charger_count,
+        "transformer_row_count": len(transformer_rows)
+        == EVAL_EPISODES * expected_transformer_count,
+        "unique_charger_keys": len(charger_keys) == len(charger_rows),
+        "unique_transformer_keys": len(transformer_keys) == len(transformer_rows),
+        "schema_version": schema_versions == {SCHEMA_VERSION},
+    }
+    return {
+        "reconciliation_contract_version": RECONCILIATION_CONTRACT_VERSION,
+        "status": "ok" if all(checks.values()) else "failed",
+        "failure_category": "" if all(checks.values()) else "mapping_validation_mismatch",
+        "scale": inputs.scale,
+        "algorithm": inputs.algorithm,
+        "task_id": inputs.task_id,
+        "training_seed": inputs.training_seed,
+        "episode_count": len(episode_indexes),
+        "expected_episode_count": EVAL_EPISODES,
+        "expected_charger_count": expected_charger_count,
+        "expected_transformer_count": expected_transformer_count,
+        "charger_row_count": len(charger_rows),
+        "transformer_row_count": len(transformer_rows),
+        "checks": checks,
+    }
 
 
 def _episode_rows_by_index(
@@ -2230,7 +2291,101 @@ def build_historical_canonical_drift_rows(
                 ),
             })
             rows.append(row)
+    canonical_identity_fields_with_mismatch = {
+        row["field"]
+        for row in rows
+        if row.get("historical_source_label")
+        == "formal_job_58513929_canonical_eval30"
+        and row.get("classification") == "historical_identity_mismatch"
+        and row.get("field")
+        in {field for field, _historical, _stage_d, _kind in HISTORICAL_IDENTITY_FIELDS}
+    }
+    if canonical_identity_fields_with_mismatch:
+        for row in rows:
+            if (
+                row.get("historical_source_label")
+                == "formal_job_58513929_canonical_eval30"
+                and row.get("field") in canonical_identity_fields_with_mismatch
+            ):
+                row["classification"] = "historical_identity_mismatch"
     return rows
+
+
+def build_reconciliation_summary_payload(
+    *,
+    inputs: SeedReconciliationInputs,
+    same_pass_rows: list[dict[str, object]],
+    historical_rows: list[dict[str, object]],
+    service_rows: list[dict[str, object]],
+    mapping_payload: dict[str, object],
+) -> dict[str, object]:
+    same_pass_failures = sum(row["status"] != "pass" for row in same_pass_rows)
+    identity_failures = sum(
+        row["classification"] == "historical_identity_mismatch"
+        for row in historical_rows
+    )
+    service_failures = evaluate_service_reconciliation_rows(service_rows)
+    mapping_failures = 0 if mapping_payload.get("status") == "ok" else 1
+    failure_categories = []
+    if identity_failures:
+        failure_categories.append("historical_identity_mismatch")
+    if same_pass_failures:
+        failure_categories.append("same_pass_metric_mismatch")
+    if service_failures:
+        failure_categories.append("service_reconciliation_mismatch")
+    if mapping_failures:
+        failure_categories.append("mapping_validation_mismatch")
+    hard_failure_count = (
+        identity_failures
+        + same_pass_failures
+        + service_failures
+        + mapping_failures
+    )
+    return {
+        "reconciliation_contract_version": RECONCILIATION_CONTRACT_VERSION,
+        "stage_d_source_commit_sha": inputs.stage_d_source_commit_sha,
+        "status": "ok" if hard_failure_count == 0 else "failed",
+        "hard_gate_status": "pass" if hard_failure_count == 0 else "fail",
+        "historical_identity_status": "pass" if identity_failures == 0 else "fail",
+        "same_pass_metric_status": "pass" if same_pass_failures == 0 else "fail",
+        "service_reconciliation_status": (
+            "pass" if service_failures == 0 else "fail"
+        ),
+        "mapping_validation_status": "pass" if mapping_failures == 0 else "fail",
+        "historical_drift_audit_status": "written",
+        "evidence_write_status": "complete",
+        "failure_categories": failure_categories,
+        "hard_failure_count": hard_failure_count,
+        "historical_identity_failure_count": identity_failures,
+        "same_pass_metric_failure_count": same_pass_failures,
+        "service_reconciliation_failure_count": service_failures,
+        "mapping_validation_failure_count": mapping_failures,
+        "same_pass_canonical_rows": EVAL_EPISODES + 1,
+        "same_pass_reconciliation_rows": len(same_pass_rows),
+        "historical_drift_rows": len(historical_rows),
+        "historical_float_drift_count": sum(
+            row["classification"] == "historical_float_drift"
+            for row in historical_rows
+        ),
+        "historical_saturation_count_drift_count": sum(
+            row["classification"] == "historical_saturation_count_drift"
+            for row in historical_rows
+        ),
+        "service_reconciliation_rows": len(service_rows),
+        "mapping_validation_present": True,
+        "source_labels": {
+            "historical_source_label": "formal_job_58513929_canonical_eval30",
+            "stage_d_source_label": "stage_d_same_pass_canonical_eval30",
+        },
+    }
+
+
+def raise_reconciliation_contract_error(failure_categories: list[str]) -> None:
+    if failure_categories:
+        raise ValueError(
+            "Stage D reconciliation contract failed: "
+            + ",".join(failure_categories)
+        )
 
 
 def _canonical_exact_values(
@@ -2299,115 +2454,65 @@ def _canonical_float_row(
 def prepare_seed_validation_files(
     *,
     diagnostic_dir: Path,
-    canonical_csv: Path,
+    historical_canonical_csv: Path,
     validation_dir: Path,
+    runtime_metadata_dir: Path,
     task_id: int,
     training_seed: int,
+    formal_validation_json: Path | None = None,
+    stage_d_source_commit_sha: str = "",
+    config_path: Path | None = None,
+    checkpoint_prefix: Path | None = None,
 ) -> dict[str, object]:
-    task = stage_d_task(task_id)
-    scale = str(task["scale"])
-    algorithm = str(task["algorithm"])
     validation_dir = Path(validation_dir)
-    validation_dir.mkdir(parents=True, exist_ok=True)
+    runtime_metadata_dir = Path(runtime_metadata_dir)
+    try:
+        inputs = load_seed_reconciliation_inputs(
+            diagnostic_dir=diagnostic_dir,
+            historical_canonical_csv=historical_canonical_csv,
+            validation_dir=validation_dir,
+            task_id=task_id,
+            training_seed=training_seed,
+            formal_validation_json=formal_validation_json,
+            stage_d_source_commit_sha=stage_d_source_commit_sha,
+            config_path=config_path,
+            checkpoint_prefix=checkpoint_prefix,
+        )
+        same_pass_rows = build_same_pass_reconciliation_rows(inputs)
+        historical_rows = build_historical_canonical_drift_rows(inputs)
+        service_rows = build_service_reconciliation_rows(
+            inputs.diagnostic_rows,
+            inputs.transformer_rows,
+            inputs.charger_rows,
+        )
+        mapping_payload = build_mapping_validation_payload(
+            inputs,
+            inputs.transformer_rows,
+            inputs.charger_rows,
+        )
+        summary_payload = build_reconciliation_summary_payload(
+            inputs=inputs,
+            same_pass_rows=same_pass_rows,
+            historical_rows=historical_rows,
+            service_rows=service_rows,
+            mapping_payload=mapping_payload,
+        )
+    except ValueError as exc:
+        if str(exc).startswith("input_contract_mismatch:"):
+            raise
+        raise ValueError(f"input_contract_mismatch: {exc}") from exc
 
-    diagnostic_root = Path(diagnostic_dir)
-    _, diagnostic_rows = _read_csv(diagnostic_root / "episode_diagnostics.csv")
-    transformer_fields, transformer_rows = _read_csv(
-        diagnostic_root / "transformer_diagnostics.csv"
+    atomic_write_csv_rows(
+        validation_dir / SAME_PASS_RECONCILIATION_FILENAME,
+        SAME_PASS_RECONCILIATION_COLUMNS,
+        same_pass_rows,
     )
-    charger_fields, charger_rows = _read_csv(diagnostic_root / "charger_diagnostics.csv")
-    canonical_fields, canonical_rows = _read_csv(Path(canonical_csv))
-    canonical_by_index = {
-        _exact_integer(row.get("episode_index"), "episode_index"): row
-        for row in canonical_rows
-        if row.get("row_type", "episode") == "episode"
-    }
-    if len(canonical_by_index) < EVAL_EPISODES:
-        raise ValueError("canonical eval30 CSV does not contain 30 episode rows")
-
-    reconciliation_rows: list[dict[str, object]] = []
-    for diagnostic in diagnostic_rows:
-        episode_index = _exact_integer(diagnostic.get("episode_index"), "episode_index")
-        canonical = canonical_by_index.get(episode_index)
-        if canonical is None:
-            raise ValueError(f"missing canonical episode row: {episode_index}")
-        for field, canonical_field, diagnostic_field, value_type in CANONICAL_EXACT_RECONCILIATION:
-            expected, observed, status = _canonical_exact_values(
-                canonical,
-                diagnostic,
-                canonical_field,
-                diagnostic_field,
-                value_type,
-            )
-            reconciliation_rows.append(
-                {
-                    "episode_index": episode_index,
-                    "field": field,
-                    "comparison_type": "exact",
-                    "canonical_value": expected,
-                    "diagnostic_value": observed,
-                    "absolute_difference": "",
-                    "relative_difference": "",
-                    "absolute_tolerance": "0",
-                    "relative_tolerance": "0",
-                    "status": status,
-                }
-            )
-        for diagnostic_field, canonical_field, absolute_tolerance, relative_tolerance in CANONICAL_FLOAT_RECONCILIATION:
-            reconciliation_rows.append(
-                _canonical_float_row(
-                    episode_index,
-                    diagnostic_field,
-                    canonical.get(canonical_field, ""),
-                    diagnostic.get(diagnostic_field, ""),
-                    absolute_tolerance,
-                    relative_tolerance,
-                )
-            )
-    if any(row["status"] != "pass" for row in reconciliation_rows):
-        raise ValueError("canonical reconciliation failed")
-    write_csv_rows(
-        validation_dir / "canonical_reconciliation.csv",
-        [
-            "episode_index",
-            "field",
-            "comparison_type",
-            "canonical_value",
-            "diagnostic_value",
-            "absolute_difference",
-            "relative_difference",
-            "absolute_tolerance",
-            "relative_tolerance",
-            "status",
-        ],
-        reconciliation_rows,
+    atomic_write_csv_rows(
+        validation_dir / HISTORICAL_DRIFT_FILENAME,
+        HISTORICAL_DRIFT_COLUMNS,
+        historical_rows,
     )
-
-    expected_chargers, expected_transformers = TOPOLOGY[scale]
-    _validate_infrastructure_rows(
-        transformer_rows,
-        transformer_fields,
-        scale=scale,
-        algorithm=algorithm,
-        training_seed=training_seed,
-        infrastructure_label="transformer diagnostics",
-        expected_rows_per_episode=expected_transformers,
-    )
-    _validate_infrastructure_rows(
-        charger_rows,
-        charger_fields,
-        scale=scale,
-        algorithm=algorithm,
-        training_seed=training_seed,
-        infrastructure_label="charger diagnostics",
-        expected_rows_per_episode=expected_chargers,
-    )
-    service_rows = service_reconciliation_rows(
-        diagnostic_rows,
-        transformer_rows,
-        charger_rows,
-    )
-    write_csv_rows(
+    atomic_write_csv_rows(
         validation_dir / "service_reconciliation.csv",
         [
             "episode_index",
@@ -2427,34 +2532,19 @@ def prepare_seed_validation_files(
         ],
         service_rows,
     )
-    episode_keys = sorted(
-        _exact_integer(row.get("episode_index"), "episode_index")
-        for row in diagnostic_rows
+    atomic_write_json(validation_dir / "mapping_validation.json", mapping_payload)
+    atomic_write_json(
+        runtime_metadata_dir / RECONCILIATION_SUMMARY_FILENAME,
+        summary_payload,
     )
-    (validation_dir / "mapping_validation.json").write_text(
-        json.dumps(
-            {
-                "status": "ok",
-                "scale": scale,
-                "algorithm": algorithm,
-                "training_seed": training_seed,
-                "episode_count": len(diagnostic_rows),
-                "transformer_row_count": len(transformer_rows),
-                "charger_row_count": len(charger_rows),
-                "expected_transformer_rows": expected_transformers * EVAL_EPISODES,
-                "expected_charger_rows": expected_chargers * EVAL_EPISODES,
-                "episode_indices": episode_keys,
-                "diagnostic_schema_version": SCHEMA_VERSION,
-            },
-            sort_keys=True,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
+    raise_reconciliation_contract_error(summary_payload["failure_categories"])
     return {
         "status": "ok",
-        "canonical_reconciliation_rows": len(reconciliation_rows),
+        "reconciliation_contract_version": RECONCILIATION_CONTRACT_VERSION,
+        "same_pass_reconciliation_rows": len(same_pass_rows),
+        "historical_drift_rows": len(historical_rows),
         "service_reconciliation_rows": len(service_rows),
+        "hard_gate_status": summary_payload["hard_gate_status"],
     }
 
 
@@ -2466,13 +2556,35 @@ def csv_text(rows: list[dict[str, object]], fieldnames: list[str] | tuple[str, .
     return output.getvalue()
 
 
+def atomic_write_text(path: Path, text: str) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}.{time.time_ns()}")
+    try:
+        temp_path.write_text(text, encoding="utf-8")
+        os.replace(temp_path, path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def atomic_write_csv_rows(
+    path: Path,
+    fieldnames: list[str] | tuple[str, ...],
+    rows: list[dict[str, object]],
+) -> None:
+    atomic_write_text(Path(path), csv_text(rows, fieldnames))
+
+
+def atomic_write_json(path: Path, payload: dict[str, object]) -> None:
+    atomic_write_text(Path(path), json.dumps(payload, sort_keys=True) + "\n")
+
+
 def write_csv_rows(
     path: Path,
     fieldnames: list[str] | tuple[str, ...],
     rows: list[dict[str, object]],
 ) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(csv_text(rows, fieldnames), encoding="utf-8")
+    atomic_write_csv_rows(path, fieldnames, rows)
 
 
 def _copy_required_seed_files(task_root: Path, staging_root: Path) -> None:
@@ -3470,8 +3582,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Create canonical/service/mapping validation files for one seed.",
     )
     seed_validation_parser.add_argument("--diagnostic-dir", required=True, type=Path)
-    seed_validation_parser.add_argument("--canonical-csv", required=True, type=Path)
+    seed_validation_parser.add_argument(
+        "--historical-canonical-csv",
+        "--canonical-csv",
+        dest="historical_canonical_csv",
+        required=True,
+        type=Path,
+    )
     seed_validation_parser.add_argument("--validation-dir", required=True, type=Path)
+    seed_validation_parser.add_argument("--runtime-metadata-dir", required=True, type=Path)
+    seed_validation_parser.add_argument("--formal-validation-json", type=Path)
+    seed_validation_parser.add_argument("--stage-d-source-commit-sha", required=True)
+    seed_validation_parser.add_argument("--config-path", type=Path)
+    seed_validation_parser.add_argument("--checkpoint-prefix", type=Path)
     seed_validation_parser.add_argument("--task-id", required=True, type=int)
     seed_validation_parser.add_argument("--training-seed", required=True, type=int)
 
@@ -3512,8 +3635,26 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _option_values(argv: list[str], option: str) -> list[str]:
+    values: list[str] = []
+    for index, token in enumerate(argv):
+        if token == option and index + 1 < len(argv):
+            values.append(argv[index + 1])
+    return values
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    effective_argv = sys.argv[1:] if argv is None else list(argv)
+    args = parser.parse_args(effective_argv)
+    historical_values = _option_values(effective_argv, "--historical-canonical-csv")
+    legacy_values = _option_values(effective_argv, "--canonical-csv")
+    if (
+        historical_values
+        and legacy_values
+        and Path(historical_values[-1]) != Path(legacy_values[-1])
+    ):
+        parser.error("conflicting canonical CSV arguments")
 
     if args.command == "task-mapping":
         for line in task_mapping_lines(args.task_id):
@@ -3577,10 +3718,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "prepare-seed-validation":
         result = prepare_seed_validation_files(
             diagnostic_dir=args.diagnostic_dir,
-            canonical_csv=args.canonical_csv,
+            historical_canonical_csv=args.historical_canonical_csv,
             validation_dir=args.validation_dir,
+            runtime_metadata_dir=args.runtime_metadata_dir,
             task_id=args.task_id,
             training_seed=args.training_seed,
+            formal_validation_json=args.formal_validation_json,
+            stage_d_source_commit_sha=args.stage_d_source_commit_sha,
+            config_path=args.config_path,
+            checkpoint_prefix=args.checkpoint_prefix,
         )
         print(json.dumps(result, sort_keys=True))
         return 0
