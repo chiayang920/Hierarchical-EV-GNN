@@ -4,10 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import collections
 import contextlib
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Final
 import io
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -120,6 +124,24 @@ from typing import TypeAlias
 
 EpisodeKey: TypeAlias = tuple[str, str, int, int]
 
+
+@dataclass(frozen=True)
+class SeedReconciliationInputs:
+    diagnostic_rows: list[dict[str, str]]
+    transformer_rows: list[dict[str, str]]
+    charger_rows: list[dict[str, str]]
+    historical_canonical_rows: list[dict[str, str]]
+    same_pass_canonical_rows: list[dict[str, str]]
+    formal_validation: dict[str, object]
+    scale: str
+    algorithm: str
+    task_id: int
+    training_seed: int
+    stage_d_source_commit_sha: str
+    config_path: Path | None
+    checkpoint_prefix: Path | None
+
+
 TOPOLOGY: Final[dict[str, tuple[int, int]]] = {
     "25cp": (25, 3),
     "100cp": (100, 7),
@@ -129,6 +151,48 @@ TOPOLOGY: Final[dict[str, tuple[int, int]]] = {
 
 ALGORITHMS: Final[tuple[str, ...]] = ("actiongnn", "hierarchical")
 SCHEMA_VERSION: Final[str] = "3"
+RECONCILIATION_CONTRACT_VERSION: Final[int] = 2
+SAME_PASS_CANONICAL_FILENAME: Final[str] = "same_pass_canonical_eval30.csv"
+SAME_PASS_RECONCILIATION_FILENAME: Final[str] = (
+    "same_pass_canonical_reconciliation.csv"
+)
+HISTORICAL_DRIFT_FILENAME: Final[str] = "historical_canonical_drift.csv"
+RECONCILIATION_SUMMARY_FILENAME: Final[str] = "reconciliation_summary.json"
+
+SAME_PASS_RECONCILIATION_COLUMNS: Final[tuple[str, ...]] = (
+    "reconciliation_contract_version",
+    "episode_index",
+    "field",
+    "comparison_type",
+    "same_pass_canonical_value",
+    "diagnostic_value",
+    "absolute_difference",
+    "relative_difference",
+    "same_pass_count",
+    "diagnostic_count",
+    "total_action_decision_denominator",
+    "status",
+    "failure_category",
+)
+
+SAME_PASS_FIELD_MAP: Final[tuple[tuple[str, str, str], ...]] = (
+    ("episode_reward", "episode_reward", "float_exact"),
+    ("tracking_error", "tracking_error", "float_exact"),
+    ("energy_tracking_error", "energy_tracking_error", "float_exact"),
+    ("power_tracker_violation", "power_tracker_violation", "float_exact"),
+    ("total_energy_charged", "total_energy_charged", "float_exact"),
+    ("total_energy_discharged", "total_energy_discharged", "float_exact"),
+    ("average_user_satisfaction", "average_user_satisfaction", "float_exact"),
+    ("energy_user_satisfaction", "energy_user_satisfaction", "float_exact"),
+    ("total_transformer_overload", "total_transformer_overload", "float_exact"),
+    ("action_mean", "global_action_mean_all_slots", "float_exact"),
+    (
+        "action_fraction_at_max",
+        "global_action_fraction_at_max_all_slots",
+        "fraction_count_exact",
+    ),
+    ("active_action_count_mean", "nonzero_action_count_mean_all_slots", "float_exact"),
+)
 
 EPISODE_REQUIRED_NUMERIC_FIELDS: Final[tuple[str, ...]] = (
     "episode_index",
@@ -1550,6 +1614,207 @@ def service_reconciliation_rows(
     ]
     if failures:
         raise ValueError("service reconciliation failed")
+    return rows
+
+
+def _episode_rows_by_index(
+    rows: list[dict[str, str]],
+    label: str,
+) -> dict[int, dict[str, str]]:
+    by_index: dict[int, dict[str, str]] = {}
+    for row in rows:
+        if row.get("row_type", "episode") != "episode":
+            continue
+        episode_index = _exact_integer(row.get("episode_index"), "episode_index")
+        if episode_index in by_index:
+            raise ValueError(f"{label} duplicate episode index: {episode_index}")
+        by_index[episode_index] = row
+    missing = sorted(set(range(EVAL_EPISODES)) - set(by_index))
+    if missing:
+        raise ValueError(f"{label} missing episode index(es): {missing}")
+    return by_index
+
+
+def load_seed_reconciliation_inputs(
+    *,
+    diagnostic_dir: Path,
+    historical_canonical_csv: Path,
+    validation_dir: Path,
+    task_id: int,
+    training_seed: int,
+    require_historical: bool = True,
+    formal_validation_json: Path | None = None,
+    stage_d_source_commit_sha: str = "",
+    config_path: Path | None = None,
+    checkpoint_prefix: Path | None = None,
+) -> SeedReconciliationInputs:
+    task = stage_d_task(task_id)
+    scale = str(task["scale"])
+    algorithm = str(task["algorithm"])
+    diagnostic_root = Path(diagnostic_dir)
+    Path(validation_dir)
+    _, diagnostic_rows = _read_csv(diagnostic_root / "episode_diagnostics.csv")
+    _, transformer_rows = _read_csv(diagnostic_root / "transformer_diagnostics.csv")
+    _, charger_rows = _read_csv(diagnostic_root / "charger_diagnostics.csv")
+    _, same_pass_rows = _read_csv(diagnostic_root / SAME_PASS_CANONICAL_FILENAME)
+    historical_rows: list[dict[str, str]] = []
+    if require_historical:
+        _, historical_rows = _read_csv(Path(historical_canonical_csv))
+    formal_validation = (
+        _read_json_object(Path(formal_validation_json), "formal package validation")
+        if formal_validation_json is not None
+        else {}
+    )
+    if require_historical and (
+        formal_validation_json is None
+        or config_path is None
+        or checkpoint_prefix is None
+    ):
+        raise ValueError("formal provenance inputs are required")
+    if config_path is not None and not Path(config_path).is_file():
+        raise ValueError(f"missing staged config path: {config_path}")
+    if checkpoint_prefix is not None:
+        for basename in (
+            "model.best_actor",
+            "model.best_actor_optimizer",
+            "model.best_critic",
+            "model.best_critic_optimizer",
+            "kwargs.yaml",
+        ):
+            candidate = Path(checkpoint_prefix).parent / basename
+            if not candidate.is_file():
+                raise ValueError(f"missing staged checkpoint member: {candidate}")
+    return SeedReconciliationInputs(
+        diagnostic_rows=diagnostic_rows,
+        transformer_rows=transformer_rows,
+        charger_rows=charger_rows,
+        historical_canonical_rows=historical_rows,
+        same_pass_canonical_rows=same_pass_rows,
+        formal_validation=formal_validation,
+        scale=scale,
+        algorithm=algorithm,
+        task_id=task_id,
+        training_seed=training_seed,
+        stage_d_source_commit_sha=stage_d_source_commit_sha,
+        config_path=Path(config_path) if config_path is not None else None,
+        checkpoint_prefix=Path(checkpoint_prefix) if checkpoint_prefix is not None else None,
+    )
+
+
+def _same_pass_float_row(
+    episode_index: int,
+    canonical_field: str,
+    diagnostic_field: str,
+    comparison_type: str,
+    canonical_value: object,
+    diagnostic_value: object,
+) -> dict[str, object]:
+    expected = _finite_number(canonical_value, canonical_field)
+    observed = _finite_number(diagnostic_value, diagnostic_field)
+    absolute_difference = abs(observed - expected)
+    relative_difference = absolute_difference / max(abs(expected), 1e-12)
+    status = "pass" if observed == expected else "fail"
+    return {
+        "reconciliation_contract_version": RECONCILIATION_CONTRACT_VERSION,
+        "episode_index": episode_index,
+        "field": canonical_field,
+        "comparison_type": comparison_type,
+        "same_pass_canonical_value": expected,
+        "diagnostic_value": observed,
+        "absolute_difference": absolute_difference,
+        "relative_difference": relative_difference,
+        "same_pass_count": "",
+        "diagnostic_count": "",
+        "total_action_decision_denominator": "",
+        "status": status,
+        "failure_category": "" if status == "pass" else "same_pass_metric_mismatch",
+    }
+
+
+def _count_from_fraction(value: float, denominator: int) -> int:
+    if denominator <= 0:
+        raise ValueError(
+            "total_action_decision_denominator must be positive: "
+            f"{denominator!r}"
+        )
+    return int(
+        Decimal(str(value * denominator)).to_integral_value(
+            rounding=ROUND_HALF_UP,
+        )
+    )
+
+
+def build_same_pass_reconciliation_rows(
+    inputs: SeedReconciliationInputs,
+) -> list[dict[str, object]]:
+    diagnostic_by_index = _episode_rows_by_index(
+        inputs.diagnostic_rows,
+        "diagnostic rows",
+    )
+    same_pass_by_index = _episode_rows_by_index(
+        inputs.same_pass_canonical_rows,
+        "same-pass canonical rows",
+    )
+    rows: list[dict[str, object]] = []
+    for episode_index in range(EVAL_EPISODES):
+        diagnostic = diagnostic_by_index[episode_index]
+        same_pass = same_pass_by_index[episode_index]
+        for canonical_field, diagnostic_field, comparison_type in SAME_PASS_FIELD_MAP:
+            if comparison_type == "fraction_count_exact":
+                expected = _finite_number(
+                    same_pass.get(canonical_field),
+                    canonical_field,
+                )
+                observed = _finite_number(
+                    diagnostic.get(diagnostic_field),
+                    diagnostic_field,
+                )
+                denominator = _exact_integer(
+                    same_pass.get("total_action_decision_denominator"),
+                    "total_action_decision_denominator",
+                )
+                same_pass_count = _exact_integer(
+                    same_pass.get("same_pass_at_max_count"),
+                    "same_pass_at_max_count",
+                )
+                diagnostic_count = _count_from_fraction(observed, denominator)
+                absolute_difference = abs(observed - expected)
+                relative_difference = absolute_difference / max(abs(expected), 1e-12)
+                status = (
+                    "pass"
+                    if expected == observed and same_pass_count == diagnostic_count
+                    else "fail"
+                )
+                rows.append({
+                    "reconciliation_contract_version": RECONCILIATION_CONTRACT_VERSION,
+                    "episode_index": episode_index,
+                    "field": canonical_field,
+                    "comparison_type": comparison_type,
+                    "same_pass_canonical_value": expected,
+                    "diagnostic_value": observed,
+                    "absolute_difference": absolute_difference,
+                    "relative_difference": relative_difference,
+                    "same_pass_count": same_pass_count,
+                    "diagnostic_count": diagnostic_count,
+                    "total_action_decision_denominator": denominator,
+                    "status": status,
+                    "failure_category": (
+                        ""
+                        if status == "pass"
+                        else "same_pass_metric_mismatch"
+                    ),
+                })
+            else:
+                rows.append(
+                    _same_pass_float_row(
+                        episode_index,
+                        canonical_field,
+                        diagnostic_field,
+                        comparison_type,
+                        same_pass.get(canonical_field),
+                        diagnostic.get(diagnostic_field),
+                    )
+                )
     return rows
 
 

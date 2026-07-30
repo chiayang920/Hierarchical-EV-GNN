@@ -253,6 +253,94 @@ def write_canonical_eval30(path, *, scale="25cp", algorithm="actiongnn", trainin
     write_csv(path, CANONICAL_EVAL30_COLUMNS, rows)
 
 
+def write_same_pass_canonical_eval30(path, *, scale="25cp", algorithm="actiongnn", training_seed=0, mutator=None):
+    rows = []
+    mapped_action_dimension = int(scale.replace("cp", ""))
+    denominator = 112 * mapped_action_dimension
+    for episode_index in range(EVAL_EPISODES):
+        diagnostic = valid_episode_row(
+            episode_index,
+            scale=scale,
+            algorithm=algorithm,
+            training_seed=training_seed,
+        )
+        at_max_fraction = diagnostic.get("global_action_fraction_at_max_all_slots", "0.0")
+        same_pass_at_max_count = int(round(float(at_max_fraction) * denominator))
+        rows.append(
+            {
+                "row_type": "episode",
+                "algorithm": algorithm,
+                "seed": str(training_seed),
+                "episode_index": diagnostic["episode_index"],
+                "episode_seed": diagnostic["episode_seed"],
+                "episode_steps": diagnostic["episode_steps"],
+                "done": diagnostic["done"],
+                "episode_reward": diagnostic["episode_reward"],
+                "tracking_error": diagnostic["tracking_error"],
+                "energy_tracking_error": diagnostic["energy_tracking_error"],
+                "power_tracker_violation": diagnostic["power_tracker_violation"],
+                "total_energy_charged": diagnostic["total_energy_charged"],
+                "total_energy_discharged": diagnostic["total_energy_discharged"],
+                "average_user_satisfaction": diagnostic["average_user_satisfaction"],
+                "energy_user_satisfaction": diagnostic["energy_user_satisfaction"],
+                "total_transformer_overload": diagnostic["total_transformer_overload"],
+                "total_ev_served": diagnostic["total_ev_served"],
+                "action_mean": diagnostic.get("global_action_mean_all_slots", "0.0"),
+                "action_fraction_at_max": at_max_fraction,
+                "active_action_count_mean": diagnostic.get(
+                    "nonzero_action_count_mean_all_slots",
+                    "0.0",
+                ),
+                "mapped_action_dimension": str(mapped_action_dimension),
+                "same_pass_at_max_count": str(same_pass_at_max_count),
+                "total_action_decision_denominator": str(denominator),
+            }
+        )
+    rows.append({
+        "row_type": "summary",
+        "algorithm": algorithm,
+        "seed": str(training_seed),
+        "episode_index": "",
+        "episode_seed": "",
+        "episode_steps": "112",
+        "done": "",
+        "episode_reward": "-1.0",
+        "tracking_error": "1.0",
+        "energy_tracking_error": "1.0",
+        "power_tracker_violation": "1.0",
+        "total_energy_charged": "1.0",
+        "total_energy_discharged": "0.0",
+        "average_user_satisfaction": "1.0",
+        "energy_user_satisfaction": "100.0",
+        "total_transformer_overload": "0.0",
+        "total_ev_served": "1",
+        "action_mean": "0.5",
+        "action_fraction_at_max": "0.5",
+        "active_action_count_mean": "1.0",
+        "mapped_action_dimension": str(mapped_action_dimension),
+        "same_pass_at_max_count": "",
+        "total_action_decision_denominator": "",
+    })
+    if mutator is not None:
+        mutator(rows)
+    write_csv(
+        path,
+        [
+            *CANONICAL_EVAL30_COLUMNS,
+            "mapped_action_dimension",
+            "same_pass_at_max_count",
+            "total_action_decision_denominator",
+        ],
+        rows,
+    )
+
+
+def read_csv_rows(path):
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        return list(reader.fieldnames or []), list(reader)
+
+
 def valid_episode_row(
     episode_index,
     *,
@@ -367,6 +455,12 @@ def build_seed_output(
         diagnostics / "episode_diagnostics.csv",
         list(episode_rows[0]),
         episode_rows,
+    )
+    write_same_pass_canonical_eval30(
+        diagnostics / "same_pass_canonical_eval30.csv",
+        scale=scale,
+        algorithm=algorithm,
+        training_seed=training_seed,
     )
 
     seed_summary = {column: "0.0" for column in SEED_SUMMARY_DIAGNOSTIC_COLUMNS}
@@ -734,38 +828,69 @@ def test_validate_seed_output_cli(tmp_path):
     assert payload["episode_count"] == 30
 
 
-def test_prepare_seed_validation_rejects_canonical_float_mismatch(tmp_path):
+def test_same_pass_reward_tracking_mismatch_hard_fails(tmp_path):
+    from scripts.validate_full_infrastructure_diagnostic_eval30 import (
+        build_same_pass_reconciliation_rows,
+        load_seed_reconciliation_inputs,
+    )
+
     seed_dir = build_seed_output(tmp_path / "seed0")
-    canonical_csv = tmp_path / "canonical_eval30.csv"
+    same_pass_csv = seed_dir / "diagnostics" / "same_pass_canonical_eval30.csv"
 
     def mutate(rows):
         rows[0]["tracking_error"] = "999.0"
+        rows[1]["episode_reward"] = "999.0"
 
-    write_canonical_eval30(canonical_csv, mutator=mutate)
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(VALIDATOR),
-            "prepare-seed-validation",
-            "--diagnostic-dir",
-            str(seed_dir / "diagnostics"),
-            "--canonical-csv",
-            str(canonical_csv),
-            "--validation-dir",
-            str(tmp_path / "validation"),
-            "--task-id",
-            "0",
-            "--training-seed",
-            "0",
-        ],
-        cwd=PROJECT_ROOT,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
+    write_same_pass_canonical_eval30(same_pass_csv, mutator=mutate)
+    inputs = load_seed_reconciliation_inputs(
+        diagnostic_dir=seed_dir / "diagnostics",
+        historical_canonical_csv=tmp_path / "unused_historical.csv",
+        validation_dir=seed_dir / "validation",
+        task_id=0,
+        training_seed=0,
+        require_historical=False,
     )
-    assert result.returncode != 0
-    assert "canonical reconciliation" in result.stderr
+    rows = build_same_pass_reconciliation_rows(inputs)
+
+    failed = [row for row in rows if row["status"] == "fail"]
+    assert {(row["episode_index"], row["field"]) for row in failed} == {
+        (0, "tracking_error"),
+        (1, "episode_reward"),
+    }
+    assert {row["failure_category"] for row in failed} == {"same_pass_metric_mismatch"}
+
+
+def test_same_pass_action_summary_mismatch_hard_fails_with_count_fields(tmp_path):
+    from scripts.validate_full_infrastructure_diagnostic_eval30 import (
+        build_same_pass_reconciliation_rows,
+        load_seed_reconciliation_inputs,
+    )
+
+    seed_dir = build_seed_output(tmp_path / "seed0")
+    same_pass_csv = seed_dir / "diagnostics" / "same_pass_canonical_eval30.csv"
+
+    def mutate(rows):
+        rows[0]["action_fraction_at_max"] = "0.25"
+        rows[0]["same_pass_at_max_count"] = "1"
+        rows[0]["total_action_decision_denominator"] = "4"
+
+    write_same_pass_canonical_eval30(same_pass_csv, mutator=mutate)
+    inputs = load_seed_reconciliation_inputs(
+        diagnostic_dir=seed_dir / "diagnostics",
+        historical_canonical_csv=tmp_path / "unused_historical.csv",
+        validation_dir=seed_dir / "validation",
+        task_id=0,
+        training_seed=0,
+        require_historical=False,
+    )
+    rows = build_same_pass_reconciliation_rows(inputs)
+
+    row = next(item for item in rows if item["field"] == "action_fraction_at_max")
+    assert row["status"] == "fail"
+    assert row["same_pass_count"] == 1
+    assert row["diagnostic_count"] == 2
+    assert row["total_action_decision_denominator"] == 4
+    assert row["failure_category"] == "same_pass_metric_mismatch"
 
 # STAGE_D_TASK3_MINIMAL_PACKAGE_CONTRACT_TESTS
 import hashlib
