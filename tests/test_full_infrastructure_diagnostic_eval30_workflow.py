@@ -998,6 +998,236 @@ def test_historical_floating_drift_is_audit_only_and_classified(tmp_path):
     assert drift["stage_d_source_label"] == "stage_d_same_pass_canonical_eval30"
 
 
+@pytest.mark.parametrize(
+    ("scale", "mapped_action_dimension"),
+    [("25cp", 25), ("100cp", 100), ("500cp", 500), ("1000cp", 1000)],
+)
+def test_one_count_historical_saturation_drift_is_audit_only(
+    scale,
+    mapped_action_dimension,
+    tmp_path,
+):
+    from scripts.validate_full_infrastructure_diagnostic_eval30 import (
+        build_historical_canonical_drift_rows,
+        build_same_pass_reconciliation_rows,
+        load_seed_reconciliation_inputs,
+    )
+
+    task_id = {"25cp": 0, "100cp": 2, "500cp": 4, "1000cp": 6}[scale]
+    seed_dir = build_seed_output(tmp_path / "seed0", task_id=task_id)
+    same_pass_csv = seed_dir / "diagnostics" / "same_pass_canonical_eval30.csv"
+    denominator = 112 * mapped_action_dimension
+    stage_d_count = 2
+    historical_count = 1
+
+    def same_pass_mutate(rows):
+        for row in rows:
+            if row["row_type"] == "episode":
+                row["action_fraction_at_max"] = str(stage_d_count / denominator)
+                row["same_pass_at_max_count"] = str(stage_d_count)
+                row["mapped_action_dimension"] = str(mapped_action_dimension)
+                row["total_action_decision_denominator"] = str(denominator)
+
+    write_same_pass_canonical_eval30(
+        same_pass_csv,
+        scale=scale,
+        mutator=same_pass_mutate,
+    )
+    diagnostics_path = seed_dir / "diagnostics" / "episode_diagnostics.csv"
+
+    def diagnostic_mutate(fieldnames, rows):
+        for row in rows:
+            row["global_action_fraction_at_max_all_slots"] = str(
+                stage_d_count / denominator
+            )
+
+    mutate_csv(diagnostics_path, diagnostic_mutate)
+    historical_csv = tmp_path / f"historical_{scale}.csv"
+
+    def historical_mutate(rows):
+        for row in rows:
+            row["action_fraction_at_max"] = str(historical_count / denominator)
+
+    write_canonical_eval30(historical_csv, scale=scale, mutator=historical_mutate)
+    algorithm = str(stage_d_task(task_id)["algorithm"])
+    config_path, checkpoint_prefix = write_stage_d_provenance_files(
+        tmp_path / f"stage_d_files_{scale}",
+        scale=scale,
+        algorithm=algorithm,
+    )
+    formal_validation_json = tmp_path / f"formal_package_validation_{scale}.json"
+    formal_validation_json.write_text(
+        json.dumps(
+            formal_validation_for_stage_d_files(
+                config_path,
+                checkpoint_prefix,
+                task_id=task_id,
+                scale=scale,
+                algorithm=algorithm,
+                training_seed=0,
+            ),
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    inputs = load_seed_reconciliation_inputs(
+        diagnostic_dir=seed_dir / "diagnostics",
+        historical_canonical_csv=historical_csv,
+        validation_dir=seed_dir / "validation",
+        task_id=task_id,
+        training_seed=0,
+        formal_validation_json=formal_validation_json,
+        stage_d_source_commit_sha="a" * 40,
+        config_path=config_path,
+        checkpoint_prefix=checkpoint_prefix,
+    )
+
+    assert all(row["status"] == "pass" for row in build_same_pass_reconciliation_rows(inputs))
+    drift_rows = build_historical_canonical_drift_rows(inputs)
+    saturation = next(
+        row
+        for row in drift_rows
+        if row["field"] == "action_fraction_at_max" and row["episode_index"] == 0
+    )
+    assert saturation["classification"] == "historical_saturation_count_drift"
+    assert saturation["historical_at_max_count"] == historical_count
+    assert saturation["stage_d_at_max_count"] == stage_d_count
+    assert saturation["total_action_decision_denominator"] == denominator
+    assert saturation["count_difference"] == 1
+    assert saturation["fraction_difference"] == pytest.approx(1 / denominator)
+
+
+def test_historical_saturation_count_and_denominator_reconstruct_stored_fraction():
+    from scripts.validate_full_infrastructure_diagnostic_eval30 import (
+        reconstruct_saturation_count,
+    )
+
+    reconstructed, residual, comparable = reconstruct_saturation_count(
+        str(17 / 2800),
+        2800,
+    )
+
+    assert reconstructed == 17
+    assert residual < 1e-9
+    assert comparable is True
+
+
+def test_historical_saturation_reconstruction_not_comparable_when_residual_is_too_large():
+    from scripts.validate_full_infrastructure_diagnostic_eval30 import (
+        reconstruct_saturation_count,
+    )
+
+    reconstructed, residual, comparable = reconstruct_saturation_count("0.333", 2800)
+
+    assert reconstructed is None
+    assert residual >= 1e-9
+    assert comparable is False
+
+
+@pytest.mark.parametrize(
+    (
+        "historical_fraction",
+        "stage_d_fraction",
+        "historical_count",
+        "stage_d_count",
+        "expected_classification",
+    ),
+    [
+        (
+            "0.0010714285714285715",
+            "0.0014285714285714286",
+            3,
+            4,
+            "historical_saturation_count_drift",
+        ),
+        (
+            "0.0010714285714285715",
+            "0.0010714285714285715",
+            3,
+            3,
+            "exact_match",
+        ),
+        (
+            "0.0010714285714285715",
+            "0.0010714285714285716",
+            3,
+            3,
+            "historical_float_drift",
+        ),
+        ("0.333", "0.0010714285714285715", None, 3, "not_comparable"),
+    ],
+)
+def test_historical_saturation_classification_matrix(
+    tmp_path,
+    historical_fraction,
+    stage_d_fraction,
+    historical_count,
+    stage_d_count,
+    expected_classification,
+):
+    from scripts.validate_full_infrastructure_diagnostic_eval30 import (
+        build_historical_canonical_drift_rows,
+        load_seed_reconciliation_inputs,
+    )
+
+    seed_dir = build_seed_output(tmp_path / "seed0")
+    same_pass_csv = seed_dir / "diagnostics" / "same_pass_canonical_eval30.csv"
+    denominator = 2800
+
+    def same_pass_mutate(rows):
+        for row in rows:
+            if row["row_type"] == "episode":
+                row["action_fraction_at_max"] = stage_d_fraction
+                row["same_pass_at_max_count"] = str(stage_d_count)
+                row["mapped_action_dimension"] = "25"
+                row["total_action_decision_denominator"] = str(denominator)
+
+    write_same_pass_canonical_eval30(same_pass_csv, mutator=same_pass_mutate)
+    historical_csv = tmp_path / "historical_eval30.csv"
+
+    def historical_mutate(rows):
+        for row in rows:
+            row["action_fraction_at_max"] = historical_fraction
+
+    write_canonical_eval30(historical_csv, mutator=historical_mutate)
+    config_path, checkpoint_prefix = write_stage_d_provenance_files(
+        tmp_path / "stage_d_files"
+    )
+    formal_validation_json = tmp_path / "formal_package_validation.json"
+    formal_validation_json.write_text(
+        json.dumps(
+            formal_validation_for_stage_d_files(config_path, checkpoint_prefix),
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    inputs = load_seed_reconciliation_inputs(
+        diagnostic_dir=seed_dir / "diagnostics",
+        historical_canonical_csv=historical_csv,
+        validation_dir=seed_dir / "validation",
+        task_id=0,
+        training_seed=0,
+        formal_validation_json=formal_validation_json,
+        stage_d_source_commit_sha="a" * 40,
+        config_path=config_path,
+        checkpoint_prefix=checkpoint_prefix,
+    )
+
+    drift_rows = build_historical_canonical_drift_rows(inputs)
+    saturation = next(
+        row
+        for row in drift_rows
+        if row["field"] == "action_fraction_at_max" and row["episode_index"] == 0
+    )
+    assert saturation["classification"] == expected_classification
+    if historical_count is None:
+        assert saturation["historical_at_max_count"] == ""
+    else:
+        assert saturation["historical_at_max_count"] == historical_count
+
+
 def write_stage_d_provenance_files(root, *, scale="25cp", algorithm="actiongnn"):
     root.mkdir(parents=True, exist_ok=True)
     config_path = root / "formal_config.yaml"

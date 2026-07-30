@@ -158,6 +158,7 @@ SAME_PASS_RECONCILIATION_FILENAME: Final[str] = (
 )
 HISTORICAL_DRIFT_FILENAME: Final[str] = "historical_canonical_drift.csv"
 RECONCILIATION_SUMMARY_FILENAME: Final[str] = "reconciliation_summary.json"
+SATURATION_RECONSTRUCTION_RESIDUAL_LIMIT: Final[Decimal] = Decimal("1e-9")
 
 SAME_PASS_RECONCILIATION_COLUMNS: Final[tuple[str, ...]] = (
     "reconciliation_contract_version",
@@ -2077,6 +2078,26 @@ def build_historical_provenance_identity_rows(
     return rows
 
 
+def reconstruct_saturation_count(
+    fraction_text: str,
+    denominator: int,
+) -> tuple[int | None, Decimal, bool]:
+    if denominator <= 0:
+        return None, Decimal("Infinity"), False
+    try:
+        fraction = Decimal(str(fraction_text))
+    except InvalidOperation:
+        return None, Decimal("Infinity"), False
+    product = fraction * Decimal(int(denominator))
+    nearest_count = int(product.to_integral_value(rounding=ROUND_HALF_UP))
+    residual = abs(product - Decimal(nearest_count))
+    if nearest_count < 0 or nearest_count > denominator:
+        return None, residual, False
+    if residual >= SATURATION_RECONSTRUCTION_RESIDUAL_LIMIT:
+        return None, residual, False
+    return nearest_count, residual, True
+
+
 def build_historical_canonical_drift_rows(
     inputs: SeedReconciliationInputs,
 ) -> list[dict[str, object]]:
@@ -2120,6 +2141,62 @@ def build_historical_canonical_drift_rows(
                 historical_field,
             )
             try:
+                if historical_field == "action_fraction_at_max":
+                    denominator = _exact_integer(
+                        stage_d.get("total_action_decision_denominator"),
+                        "total_action_decision_denominator",
+                    )
+                    stage_d_count = _exact_integer(
+                        stage_d.get("same_pass_at_max_count"),
+                        "same_pass_at_max_count",
+                    )
+                    historical_count, _residual, comparable = (
+                        reconstruct_saturation_count(
+                            str(historical.get(historical_field, "")),
+                            denominator,
+                        )
+                    )
+                    if not comparable or historical_count is None:
+                        row.update({
+                            "historical_value": historical.get(historical_field, ""),
+                            "stage_d_same_pass_value": stage_d.get(stage_d_field, ""),
+                            "classification": "not_comparable",
+                            "stage_d_at_max_count": stage_d_count,
+                            "total_action_decision_denominator": denominator,
+                        })
+                        rows.append(row)
+                        continue
+                    historical_value = _finite_number(
+                        historical.get(historical_field),
+                        historical_field,
+                    )
+                    stage_d_value = _finite_number(
+                        stage_d.get(stage_d_field),
+                        stage_d_field,
+                    )
+                    count_difference = int(stage_d_count - historical_count)
+                    fraction_difference = float(stage_d_value - historical_value)
+                    if count_difference != 0:
+                        classification = "historical_saturation_count_drift"
+                    elif stage_d_value == historical_value:
+                        classification = "exact_match"
+                    else:
+                        classification = "historical_float_drift"
+                    row.update({
+                        "historical_value": historical_value,
+                        "stage_d_same_pass_value": stage_d_value,
+                        "absolute_difference": abs(stage_d_value - historical_value),
+                        "relative_difference": abs(stage_d_value - historical_value)
+                        / max(abs(historical_value), 1e-12),
+                        "classification": classification,
+                        "historical_at_max_count": historical_count,
+                        "stage_d_at_max_count": stage_d_count,
+                        "total_action_decision_denominator": denominator,
+                        "count_difference": count_difference,
+                        "fraction_difference": fraction_difference,
+                    })
+                    rows.append(row)
+                    continue
                 historical_value = _finite_number(
                     historical.get(historical_field),
                     historical_field,
