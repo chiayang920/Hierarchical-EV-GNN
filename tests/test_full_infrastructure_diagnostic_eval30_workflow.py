@@ -892,6 +892,300 @@ def test_same_pass_action_summary_mismatch_hard_fails_with_count_fields(tmp_path
     assert row["total_action_decision_denominator"] == 4
     assert row["failure_category"] == "same_pass_metric_mismatch"
 
+
+def test_historical_identity_mismatch_hard_fails_without_using_float_drift_as_gate(tmp_path):
+    from scripts.validate_full_infrastructure_diagnostic_eval30 import (
+        build_historical_canonical_drift_rows,
+        load_seed_reconciliation_inputs,
+    )
+
+    seed_dir = build_seed_output(tmp_path / "seed0")
+    write_same_pass_canonical_eval30(
+        seed_dir / "diagnostics" / "same_pass_canonical_eval30.csv"
+    )
+    historical_csv = tmp_path / "historical_eval30.csv"
+
+    def mutate(rows):
+        rows[0]["episode_seed"] = "999999"
+
+    write_canonical_eval30(historical_csv, mutator=mutate)
+    config_path, checkpoint_prefix = write_stage_d_provenance_files(
+        tmp_path / "stage_d_files"
+    )
+    formal_validation_json = tmp_path / "formal_package_validation.json"
+    formal_validation_json.write_text(
+        json.dumps(
+            formal_validation_for_stage_d_files(config_path, checkpoint_prefix),
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    inputs = load_seed_reconciliation_inputs(
+        diagnostic_dir=seed_dir / "diagnostics",
+        historical_canonical_csv=historical_csv,
+        validation_dir=seed_dir / "validation",
+        task_id=0,
+        training_seed=0,
+        formal_validation_json=formal_validation_json,
+        stage_d_source_commit_sha="a" * 40,
+        config_path=config_path,
+        checkpoint_prefix=checkpoint_prefix,
+    )
+    rows = build_historical_canonical_drift_rows(inputs)
+
+    mismatch = [
+        row
+        for row in rows
+        if row["classification"] == "historical_identity_mismatch"
+    ]
+    assert mismatch
+    assert mismatch[0]["field"] == "episode_seed"
+
+
+def test_historical_floating_drift_is_audit_only_and_classified(tmp_path):
+    from scripts.validate_full_infrastructure_diagnostic_eval30 import (
+        build_historical_canonical_drift_rows,
+        build_same_pass_reconciliation_rows,
+        load_seed_reconciliation_inputs,
+    )
+
+    seed_dir = build_seed_output(tmp_path / "seed0")
+    write_same_pass_canonical_eval30(
+        seed_dir / "diagnostics" / "same_pass_canonical_eval30.csv"
+    )
+    historical_csv = tmp_path / "historical_eval30.csv"
+
+    def mutate(rows):
+        rows[0]["tracking_error"] = "1.0000001"
+
+    write_canonical_eval30(historical_csv, mutator=mutate)
+    config_path, checkpoint_prefix = write_stage_d_provenance_files(
+        tmp_path / "stage_d_files"
+    )
+    formal_validation_json = tmp_path / "formal_package_validation.json"
+    formal_validation_json.write_text(
+        json.dumps(
+            formal_validation_for_stage_d_files(config_path, checkpoint_prefix),
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    inputs = load_seed_reconciliation_inputs(
+        diagnostic_dir=seed_dir / "diagnostics",
+        historical_canonical_csv=historical_csv,
+        validation_dir=seed_dir / "validation",
+        task_id=0,
+        training_seed=0,
+        formal_validation_json=formal_validation_json,
+        stage_d_source_commit_sha="a" * 40,
+        config_path=config_path,
+        checkpoint_prefix=checkpoint_prefix,
+    )
+
+    same_pass_rows = build_same_pass_reconciliation_rows(inputs)
+    drift_rows = build_historical_canonical_drift_rows(inputs)
+
+    assert all(row["status"] == "pass" for row in same_pass_rows)
+    drift = next(
+        row
+        for row in drift_rows
+        if row["episode_index"] == 0 and row["field"] == "tracking_error"
+    )
+    assert drift["classification"] == "historical_float_drift"
+    assert drift["historical_source_label"] == "formal_job_58513929_canonical_eval30"
+    assert drift["stage_d_source_label"] == "stage_d_same_pass_canonical_eval30"
+
+
+def write_stage_d_provenance_files(root, *, scale="25cp", algorithm="actiongnn"):
+    root.mkdir(parents=True, exist_ok=True)
+    config_path = root / "formal_config.yaml"
+    checkpoint_prefix = root / "model.best"
+    config_path.write_text(
+        f"scale: {scale}\nalgorithm: {algorithm}\n",
+        encoding="utf-8",
+    )
+    for basename, payload in {
+        "model.best_actor": "actor\n",
+        "model.best_actor_optimizer": "actor-opt\n",
+        "model.best_critic": "critic\n",
+        "model.best_critic_optimizer": "critic-opt\n",
+        "kwargs.yaml": "{}\n",
+    }.items():
+        (root / basename).write_text(payload, encoding="utf-8")
+    return config_path, checkpoint_prefix
+
+
+def formal_validation_for_stage_d_files(
+    config_path,
+    checkpoint_prefix,
+    *,
+    task_id=0,
+    scale="25cp",
+    algorithm="actiongnn",
+    training_seed=0,
+    mutator=None,
+):
+    from scripts.validate_full_infrastructure_diagnostic_eval30 import sha256_file
+
+    payload = {
+        "status": "ok",
+        "task_id": task_id,
+        "scale": scale,
+        "algorithm": algorithm,
+        "formal_job_id": "58513929",
+        "training_seed": training_seed,
+        "formal_task_id": formal_task_id(task_id, training_seed),
+        "config_sha256": sha256_file(config_path),
+        "checkpoint_member_sha256": {
+            "model.best_actor": sha256_file(
+                checkpoint_prefix.parent / "model.best_actor"
+            ),
+            "model.best_actor_optimizer": sha256_file(
+                checkpoint_prefix.parent / "model.best_actor_optimizer"
+            ),
+            "model.best_critic": sha256_file(
+                checkpoint_prefix.parent / "model.best_critic"
+            ),
+            "model.best_critic_optimizer": sha256_file(
+                checkpoint_prefix.parent / "model.best_critic_optimizer"
+            ),
+            "kwargs.yaml": sha256_file(checkpoint_prefix.parent / "kwargs.yaml"),
+        },
+    }
+    if mutator is not None:
+        mutator(payload)
+    return payload
+
+
+@pytest.mark.parametrize(
+    ("mutator", "field"),
+    [
+        (lambda payload: payload.update({"config_sha256": "0" * 64}), "config_sha256"),
+        (
+            lambda payload: payload["checkpoint_member_sha256"].update(
+                {"model.best_actor": "0" * 64}
+            ),
+            "checkpoint_member_sha256:model.best_actor",
+        ),
+        (lambda payload: payload.update({"formal_job_id": "58656380"}), "formal_job_id"),
+    ],
+)
+def test_historical_provenance_mismatch_is_hard_identity_failure(
+    tmp_path,
+    mutator,
+    field,
+):
+    import dataclasses
+    from scripts.validate_full_infrastructure_diagnostic_eval30 import (
+        build_historical_canonical_drift_rows,
+        load_seed_reconciliation_inputs,
+    )
+
+    seed_dir = build_seed_output(tmp_path / "seed0")
+    write_same_pass_canonical_eval30(
+        seed_dir / "diagnostics" / "same_pass_canonical_eval30.csv"
+    )
+    historical_csv = tmp_path / "historical_eval30.csv"
+    write_canonical_eval30(historical_csv)
+    config_path, checkpoint_prefix = write_stage_d_provenance_files(
+        tmp_path / "stage_d_files"
+    )
+    inputs = load_seed_reconciliation_inputs(
+        diagnostic_dir=seed_dir / "diagnostics",
+        historical_canonical_csv=historical_csv,
+        validation_dir=seed_dir / "validation",
+        task_id=0,
+        training_seed=0,
+        formal_validation_json=None,
+        stage_d_source_commit_sha="a" * 40,
+        config_path=config_path,
+        checkpoint_prefix=checkpoint_prefix,
+    )
+    inputs = dataclasses.replace(
+        inputs,
+        formal_validation=formal_validation_for_stage_d_files(
+            config_path,
+            checkpoint_prefix,
+            mutator=mutator,
+        ),
+    )
+
+    rows = build_historical_canonical_drift_rows(inputs)
+    mismatch = next(row for row in rows if row["field"] == field)
+    assert mismatch["episode_index"] == ""
+    assert mismatch["episode_seed"] == ""
+    assert mismatch["classification"] == "historical_identity_mismatch"
+
+
+def test_stage_d_source_commit_malformed_is_hard_identity_failure(tmp_path):
+    import dataclasses
+    from scripts.validate_full_infrastructure_diagnostic_eval30 import (
+        build_historical_canonical_drift_rows,
+        load_seed_reconciliation_inputs,
+    )
+
+    seed_dir = build_seed_output(tmp_path / "seed0")
+    write_same_pass_canonical_eval30(
+        seed_dir / "diagnostics" / "same_pass_canonical_eval30.csv"
+    )
+    historical_csv = tmp_path / "historical_eval30.csv"
+    write_canonical_eval30(historical_csv)
+    config_path, checkpoint_prefix = write_stage_d_provenance_files(
+        tmp_path / "stage_d_files"
+    )
+    inputs = load_seed_reconciliation_inputs(
+        diagnostic_dir=seed_dir / "diagnostics",
+        historical_canonical_csv=historical_csv,
+        validation_dir=seed_dir / "validation",
+        task_id=0,
+        training_seed=0,
+        formal_validation_json=None,
+        stage_d_source_commit_sha="NOT_A_SHA",
+        config_path=config_path,
+        checkpoint_prefix=checkpoint_prefix,
+    )
+    inputs = dataclasses.replace(
+        inputs,
+        formal_validation=formal_validation_for_stage_d_files(
+            config_path,
+            checkpoint_prefix,
+        ),
+    )
+
+    rows = build_historical_canonical_drift_rows(inputs)
+    source_row = next(row for row in rows if row["field"] == "stage_d_source_commit_sha")
+    assert source_row["classification"] == "historical_identity_mismatch"
+
+
+def test_validate_seed_formal_package_returns_digests_with_temporary_extract_dir(tmp_path):
+    import re
+    from scripts.validate_full_infrastructure_diagnostic_eval30 import (
+        validate_seed_formal_package,
+    )
+
+    package = create_full_formal_package(tmp_path / "formal", task_id=0, training_seed=0)
+    payload = validate_seed_formal_package(
+        package,
+        task_id=0,
+        training_seed=0,
+        extract_dir=None,
+    )
+
+    assert re.fullmatch(r"[0-9a-f]{64}", payload["config_sha256"])
+    assert set(payload["checkpoint_member_sha256"]) == {
+        "model.best_actor",
+        "model.best_actor_optimizer",
+        "model.best_critic",
+        "model.best_critic_optimizer",
+        "kwargs.yaml",
+    }
+    assert all(
+        re.fullmatch(r"[0-9a-f]{64}", value)
+        for value in payload["checkpoint_member_sha256"].values()
+    )
+
 # STAGE_D_TASK3_MINIMAL_PACKAGE_CONTRACT_TESTS
 import hashlib
 import io

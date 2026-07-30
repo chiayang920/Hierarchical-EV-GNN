@@ -194,6 +194,54 @@ SAME_PASS_FIELD_MAP: Final[tuple[tuple[str, str, str], ...]] = (
     ("active_action_count_mean", "nonzero_action_count_mean_all_slots", "float_exact"),
 )
 
+HISTORICAL_DRIFT_COLUMNS: Final[tuple[str, ...]] = (
+    "reconciliation_contract_version",
+    "scale",
+    "algorithm",
+    "training_seed",
+    "formal_task_id",
+    "episode_index",
+    "episode_seed",
+    "field",
+    "historical_source_label",
+    "stage_d_source_label",
+    "historical_value",
+    "stage_d_same_pass_value",
+    "absolute_difference",
+    "relative_difference",
+    "classification",
+    "historical_at_max_count",
+    "stage_d_at_max_count",
+    "total_action_decision_denominator",
+    "count_difference",
+    "fraction_difference",
+)
+
+HISTORICAL_IDENTITY_FIELDS: Final[tuple[tuple[str, str, str, str], ...]] = (
+    ("algorithm", "algorithm", "algorithm", "string"),
+    ("training_seed", "seed", "seed", "integer"),
+    ("episode_index", "episode_index", "episode_index", "integer"),
+    ("episode_seed", "episode_seed", "episode_seed", "integer"),
+    ("episode_steps", "episode_steps", "episode_steps", "integer"),
+    ("done", "done", "done", "boolean"),
+    ("total_ev_served", "total_ev_served", "total_ev_served", "integer"),
+)
+
+HISTORICAL_FLOAT_FIELDS: Final[tuple[tuple[str, str], ...]] = (
+    ("episode_reward", "episode_reward"),
+    ("tracking_error", "tracking_error"),
+    ("energy_tracking_error", "energy_tracking_error"),
+    ("power_tracker_violation", "power_tracker_violation"),
+    ("total_energy_charged", "total_energy_charged"),
+    ("total_energy_discharged", "total_energy_discharged"),
+    ("average_user_satisfaction", "average_user_satisfaction"),
+    ("energy_user_satisfaction", "energy_user_satisfaction"),
+    ("total_transformer_overload", "total_transformer_overload"),
+    ("action_mean", "action_mean"),
+    ("action_fraction_at_max", "action_fraction_at_max"),
+    ("active_action_count_mean", "active_action_count_mean"),
+)
+
 EPISODE_REQUIRED_NUMERIC_FIELDS: Final[tuple[str, ...]] = (
     "episode_index",
     "episode_seed",
@@ -1312,6 +1360,8 @@ def validate_seed_formal_package(
                 )
             raise ValueError(f"missing required formal package member(s): {missing}")
 
+        config_sha256 = ""
+        checkpoint_member_sha256: dict[str, str] = {}
         temporary_context = (
             tempfile.TemporaryDirectory(prefix="stage_d_formal_package_")
             if extract_dir is None
@@ -1326,10 +1376,27 @@ def validate_seed_formal_package(
             _validate_named_manifest(root, FORMAL_PACKAGE_MANIFEST_PATH, regular_names)
             validate_formal_source_manifest(root)
             validate_formal_task_runtime_metadata(root, task_id, training_seed)
-            config_values = validate_formal_config(
-                root / config_member(task_id, training_seed),
-                task_id,
-            )
+            config_path = root / config_member(task_id, training_seed)
+            checkpoint_members = {
+                basename: root / formal_train_member(
+                    task_id,
+                    training_seed,
+                    basename,
+                )
+                for basename in (
+                    "model.best_actor",
+                    "model.best_actor_optimizer",
+                    "model.best_critic",
+                    "model.best_critic_optimizer",
+                    "kwargs.yaml",
+                )
+            }
+            config_values = validate_formal_config(config_path, task_id)
+            config_sha256 = sha256_file(config_path)
+            checkpoint_member_sha256 = {
+                basename: sha256_file(path)
+                for basename, path in checkpoint_members.items()
+            }
 
     task = stage_d_task(task_id)
     return {
@@ -1349,6 +1416,8 @@ def validate_seed_formal_package(
             training_seed,
             "model.best",
         ),
+        "config_sha256": config_sha256,
+        "checkpoint_member_sha256": checkpoint_member_sha256,
         **config_values,
     }
 
@@ -1665,11 +1734,7 @@ def load_seed_reconciliation_inputs(
         if formal_validation_json is not None
         else {}
     )
-    if require_historical and (
-        formal_validation_json is None
-        or config_path is None
-        or checkpoint_prefix is None
-    ):
+    if require_historical and (config_path is None or checkpoint_prefix is None):
         raise ValueError("formal provenance inputs are required")
     if config_path is not None and not Path(config_path).is_file():
         raise ValueError(f"missing staged config path: {config_path}")
@@ -1815,6 +1880,279 @@ def build_same_pass_reconciliation_rows(
                         diagnostic.get(diagnostic_field),
                     )
                 )
+    return rows
+
+
+def _historical_base_row(
+    inputs: SeedReconciliationInputs,
+    episode_index: int | str,
+    episode_seed_value: object,
+    field: str,
+) -> dict[str, object]:
+    return {
+        "reconciliation_contract_version": RECONCILIATION_CONTRACT_VERSION,
+        "scale": inputs.scale,
+        "algorithm": inputs.algorithm,
+        "training_seed": inputs.training_seed,
+        "formal_task_id": formal_task_id(inputs.task_id, inputs.training_seed),
+        "episode_index": episode_index,
+        "episode_seed": episode_seed_value,
+        "field": field,
+        "historical_source_label": "formal_job_58513929_canonical_eval30",
+        "stage_d_source_label": "stage_d_same_pass_canonical_eval30",
+        "historical_value": "",
+        "stage_d_same_pass_value": "",
+        "absolute_difference": "",
+        "relative_difference": "",
+        "classification": "",
+        "historical_at_max_count": "",
+        "stage_d_at_max_count": "",
+        "total_action_decision_denominator": "",
+        "count_difference": "",
+        "fraction_difference": "",
+    }
+
+
+def _identity_classification(
+    historical: object,
+    stage_d: object,
+    value_type: str,
+    field: str,
+) -> tuple[str, str, str]:
+    try:
+        if value_type == "integer":
+            historical_value: object = _exact_integer(historical, field)
+            stage_d_value: object = _exact_integer(stage_d, field)
+        elif value_type == "boolean":
+            historical_value = _parse_bool(historical, field)
+            stage_d_value = _parse_bool(stage_d, field)
+        else:
+            historical_value = str(historical)
+            stage_d_value = str(stage_d)
+    except ValueError:
+        return str(historical), str(stage_d), "historical_identity_mismatch"
+    classification = (
+        "historical_identity_match"
+        if historical_value == stage_d_value
+        else "historical_identity_mismatch"
+    )
+    return str(historical_value), str(stage_d_value), classification
+
+
+def _checkpoint_member_path(checkpoint_prefix: Path, basename: str) -> Path:
+    if basename == "kwargs.yaml":
+        return checkpoint_prefix.parent / "kwargs.yaml"
+    return checkpoint_prefix.parent / basename
+
+
+def _provenance_row(
+    field: str,
+    expected: object,
+    observed: object,
+    matches: bool,
+) -> dict[str, object]:
+    return {
+        "reconciliation_contract_version": RECONCILIATION_CONTRACT_VERSION,
+        "scale": "",
+        "algorithm": "",
+        "training_seed": "",
+        "formal_task_id": "",
+        "episode_index": "",
+        "episode_seed": "",
+        "field": field,
+        "historical_source_label": "formal_job_58513929_package_validation",
+        "stage_d_source_label": "stage_d_runtime_metadata",
+        "historical_value": str(expected),
+        "stage_d_same_pass_value": str(observed),
+        "absolute_difference": "",
+        "relative_difference": "",
+        "classification": (
+            "historical_identity_match"
+            if matches
+            else "historical_identity_mismatch"
+        ),
+        "historical_at_max_count": "",
+        "stage_d_at_max_count": "",
+        "total_action_decision_denominator": "",
+        "count_difference": "",
+        "fraction_difference": "",
+    }
+
+
+def build_historical_provenance_identity_rows(
+    inputs: SeedReconciliationInputs,
+) -> list[dict[str, object]]:
+    formal_validation = inputs.formal_validation
+    if not formal_validation:
+        raise ValueError(
+            "input_contract_mismatch: missing formal package validation"
+        )
+    if inputs.config_path is None or inputs.checkpoint_prefix is None:
+        raise ValueError(
+            "input_contract_mismatch: missing staged config or checkpoint path"
+        )
+
+    observed_config_sha256 = sha256_file(inputs.config_path)
+    checkpoint_basenames = (
+        "model.best_actor",
+        "model.best_actor_optimizer",
+        "model.best_critic",
+        "model.best_critic_optimizer",
+        "kwargs.yaml",
+    )
+    observed_checkpoint_sha256 = {
+        basename: sha256_file(_checkpoint_member_path(inputs.checkpoint_prefix, basename))
+        for basename in checkpoint_basenames
+    }
+    expected_checkpoint_sha256 = formal_validation.get("checkpoint_member_sha256")
+    if not isinstance(expected_checkpoint_sha256, dict):
+        raise ValueError(
+            "input_contract_mismatch: formal checkpoint digests missing"
+        )
+
+    source_commit_is_valid = bool(
+        re.fullmatch(r"[0-9a-f]{40}", inputs.stage_d_source_commit_sha)
+    )
+    rows = [
+        _provenance_row(
+            "formal_job_id",
+            FORMAL_JOB_ID,
+            formal_validation.get("formal_job_id"),
+            formal_validation.get("formal_job_id") == FORMAL_JOB_ID,
+        ),
+        _provenance_row(
+            "task_id",
+            inputs.task_id,
+            formal_validation.get("task_id"),
+            formal_validation.get("task_id") == inputs.task_id,
+        ),
+        _provenance_row(
+            "formal_task_id",
+            formal_task_id(inputs.task_id, inputs.training_seed),
+            formal_validation.get("formal_task_id"),
+            formal_validation.get("formal_task_id")
+            == formal_task_id(inputs.task_id, inputs.training_seed),
+        ),
+        _provenance_row(
+            "scale",
+            inputs.scale,
+            formal_validation.get("scale"),
+            formal_validation.get("scale") == inputs.scale,
+        ),
+        _provenance_row(
+            "algorithm",
+            inputs.algorithm,
+            formal_validation.get("algorithm"),
+            formal_validation.get("algorithm") == inputs.algorithm,
+        ),
+        _provenance_row(
+            "training_seed",
+            inputs.training_seed,
+            formal_validation.get("training_seed"),
+            formal_validation.get("training_seed") == inputs.training_seed,
+        ),
+        _provenance_row(
+            "stage_d_source_commit_sha",
+            "40 lowercase hex",
+            inputs.stage_d_source_commit_sha,
+            source_commit_is_valid,
+        ),
+        _provenance_row(
+            "config_sha256",
+            formal_validation.get("config_sha256"),
+            observed_config_sha256,
+            formal_validation.get("config_sha256") == observed_config_sha256,
+        ),
+    ]
+    for basename in checkpoint_basenames:
+        rows.append(
+            _provenance_row(
+                f"checkpoint_member_sha256:{basename}",
+                expected_checkpoint_sha256.get(basename),
+                observed_checkpoint_sha256[basename],
+                expected_checkpoint_sha256.get(basename)
+                == observed_checkpoint_sha256[basename],
+            )
+        )
+    return rows
+
+
+def build_historical_canonical_drift_rows(
+    inputs: SeedReconciliationInputs,
+) -> list[dict[str, object]]:
+    historical_by_index = _episode_rows_by_index(
+        inputs.historical_canonical_rows,
+        "historical canonical rows",
+    )
+    same_pass_by_index = _episode_rows_by_index(
+        inputs.same_pass_canonical_rows,
+        "same-pass canonical rows",
+    )
+    rows: list[dict[str, object]] = build_historical_provenance_identity_rows(inputs)
+    for episode_index in range(EVAL_EPISODES):
+        historical = historical_by_index[episode_index]
+        stage_d = same_pass_by_index[episode_index]
+        episode_seed_value = stage_d.get("episode_seed", "")
+        for field, historical_field, stage_d_field, value_type in HISTORICAL_IDENTITY_FIELDS:
+            historical_value, stage_d_value, classification = _identity_classification(
+                historical.get(historical_field, ""),
+                stage_d.get(stage_d_field, ""),
+                value_type,
+                field,
+            )
+            row = _historical_base_row(
+                inputs,
+                episode_index,
+                episode_seed_value,
+                field,
+            )
+            row.update({
+                "historical_value": historical_value,
+                "stage_d_same_pass_value": stage_d_value,
+                "classification": classification,
+            })
+            rows.append(row)
+        for historical_field, stage_d_field in HISTORICAL_FLOAT_FIELDS:
+            row = _historical_base_row(
+                inputs,
+                episode_index,
+                episode_seed_value,
+                historical_field,
+            )
+            try:
+                historical_value = _finite_number(
+                    historical.get(historical_field),
+                    historical_field,
+                )
+                stage_d_value = _finite_number(
+                    stage_d.get(stage_d_field),
+                    stage_d_field,
+                )
+            except ValueError:
+                row.update({
+                    "historical_value": historical.get(historical_field, ""),
+                    "stage_d_same_pass_value": stage_d.get(stage_d_field, ""),
+                    "classification": "not_comparable",
+                })
+                rows.append(row)
+                continue
+            absolute_difference = abs(stage_d_value - historical_value)
+            relative_difference = absolute_difference / max(
+                abs(historical_value),
+                1e-12,
+            )
+            row.update({
+                "historical_value": historical_value,
+                "stage_d_same_pass_value": stage_d_value,
+                "absolute_difference": absolute_difference,
+                "relative_difference": relative_difference,
+                "classification": (
+                    "exact_match"
+                    if stage_d_value == historical_value
+                    else "historical_float_drift"
+                ),
+            })
+            rows.append(row)
     return rows
 
 
