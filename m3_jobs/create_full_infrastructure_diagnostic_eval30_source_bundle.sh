@@ -120,6 +120,7 @@ if [[ "${EV_GNN_FULL_DIAGNOSTIC_SOURCE_DRY_RUN:-0}" == "1" ]]; then
   echo "current_dir=${CURRENT_DIR}"
   echo "recorded_head_sha=${RECORDED_HEAD_SHA}"
   echo "top_level=${TOP_LEVEL}"
+  echo "reconciliation_contract_version=2"
   echo "PROHIBITED_PATH_GUARD_OK"
   echo "ALLOWLIST"
   printf "%s\n" "${ALLOWLIST[@]}"

@@ -2557,6 +2557,8 @@ def test_task4_runner_dry_run_uses_formal_eval30_contract(tmp_path):
         assert f"# formal_task_id={seed}" in command
         assert "model.best" in command
         assert "model.last" not in command
+    assert "same_pass_canonical_eval30.csv" in result.stdout
+    assert "reconciliation_contract_version=2" in result.stdout
 
 
 def test_task4_runner_dry_run_is_side_effect_free(tmp_path):
@@ -2724,6 +2726,70 @@ for episode_index in range(args.eval_episodes):
     )
     episode_rows.append({column: row[column] for column in EPISODE_DIAGNOSTIC_COLUMNS})
 write_csv(output / "episode_diagnostics.csv", EPISODE_DIAGNOSTIC_COLUMNS, episode_rows)
+CANONICAL_EVAL30_COLUMNS = [
+    "row_type",
+    "algorithm",
+    "seed",
+    "episode_index",
+    "episode_seed",
+    "episode_steps",
+    "done",
+    "episode_reward",
+    "tracking_error",
+    "energy_tracking_error",
+    "power_tracker_violation",
+    "total_energy_charged",
+    "total_energy_discharged",
+    "average_user_satisfaction",
+    "energy_user_satisfaction",
+    "total_transformer_overload",
+    "total_ev_served",
+    "action_mean",
+    "action_fraction_at_max",
+    "active_action_count_mean",
+    "mapped_action_dimension",
+    "same_pass_at_max_count",
+    "total_action_decision_denominator",
+]
+mapped_action_dimension = TOPOLOGY[args.scale][0]
+denominator = args.max_episode_steps * mapped_action_dimension
+same_pass_rows = []
+for episode in episode_rows:
+    same_pass_rows.append(
+        {
+            "row_type": "episode",
+            "algorithm": args.algorithm,
+            "seed": str(args.seed),
+            "episode_index": episode["episode_index"],
+            "episode_seed": episode["episode_seed"],
+            "episode_steps": episode["episode_steps"],
+            "done": episode["done"],
+            "episode_reward": episode["episode_reward"],
+            "tracking_error": episode["tracking_error"],
+            "energy_tracking_error": episode["energy_tracking_error"],
+            "power_tracker_violation": episode["power_tracker_violation"],
+            "total_energy_charged": episode["total_energy_charged"],
+            "total_energy_discharged": episode["total_energy_discharged"],
+            "average_user_satisfaction": episode["average_user_satisfaction"],
+            "energy_user_satisfaction": episode["energy_user_satisfaction"],
+            "total_transformer_overload": episode["total_transformer_overload"],
+            "total_ev_served": episode["total_ev_served"],
+            "action_mean": episode["global_action_mean_all_slots"],
+            "action_fraction_at_max": episode[
+                "global_action_fraction_at_max_all_slots"
+            ],
+            "active_action_count_mean": episode[
+                "nonzero_action_count_mean_all_slots"
+            ],
+            "mapped_action_dimension": str(mapped_action_dimension),
+            "same_pass_at_max_count": str(denominator // 2),
+            "total_action_decision_denominator": str(denominator),
+        }
+    )
+summary = {column: "" for column in CANONICAL_EVAL30_COLUMNS}
+summary.update({"row_type": "summary", "algorithm": args.algorithm, "seed": str(args.seed)})
+same_pass_rows.append(summary)
+write_csv(output / "same_pass_canonical_eval30.csv", CANONICAL_EVAL30_COLUMNS, same_pass_rows)
 summary = {column: "0.0" for column in SEED_SUMMARY_DIAGNOSTIC_COLUMNS}
 summary.update(
     {
@@ -2864,6 +2930,68 @@ write_csv(output / "charger_diagnostics.csv", CHARGER_DIAGNOSTIC_COLUMNS, charge
         names = [member.name for member in archive.getmembers()]
     assert all("checkpoint/" not in name for name in names)
     assert all("model.best" not in name for name in names)
+
+
+def test_task4_runner_real_mode_packages_reconciliation_v2_evidence(tmp_path):
+    source_root = tmp_path / "source"
+    (source_root / "scripts").mkdir(parents=True)
+    (source_root / "utils").mkdir()
+    shutil.copy2(VALIDATOR, source_root / "scripts" / VALIDATOR.name)
+    shutil.copy2(
+        PROJECT_ROOT / "utils" / "infrastructure_diagnostics.py",
+        source_root / "utils" / "infrastructure_diagnostics.py",
+    )
+    source_commit = "a" * 40
+    (source_root / "SOURCE_COMMIT_SHA.txt").write_text(
+        source_commit + "\n",
+        encoding="utf-8",
+    )
+    formal_root = tmp_path / "formal"
+    for seed in TRAINING_SEEDS:
+        create_full_formal_package(formal_root, task_id=0, training_seed=seed)
+    evaluator_stub = source_root / "stub_evaluator.py"
+    evaluator_stub.write_text(
+        (
+            PROJECT_ROOT
+            / "tests"
+            / "fixtures"
+            / "stage_d_same_pass_evaluator_stub.py"
+        ).read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    env = {
+        **os.environ,
+        "SLURM_ARRAY_TASK_ID": "0",
+        "SLURM_ARRAY_JOB_ID": "424243",
+        "SLURM_JOB_ID": "424243_0",
+        "EV_GNN_FULL_DIAGNOSTIC_REPO_ROOT": str(source_root),
+        "EV_GNN_FULL_DIAGNOSTIC_RUN_ROOT": str(tmp_path / "runs"),
+        "EV_GNN_FULL_DIAGNOSTIC_OUTPUT_ROOT": str(tmp_path / "outputs"),
+        "EV_GNN_FULL_DIAGNOSTIC_FORMAL_PACKAGE_ROOT": str(formal_root),
+        "EV_GNN_FULL_DIAGNOSTIC_FORMAL_COMPLETE_BUNDLE": str(
+            tmp_path / "missing.tar.gz"
+        ),
+        "EV_GNN_FULL_DIAGNOSTIC_EXPECTED_SOURCE_COMMIT": source_commit,
+        "EV_GNN_FULL_DIAGNOSTIC_EVALUATOR_SCRIPT": str(evaluator_stub),
+    }
+    result = subprocess.run(
+        ["bash", str(TASK4_RUNNER)],
+        cwd=PROJECT_ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr + "\n" + result.stdout
+    package = tmp_path / "outputs" / task5_package_basename(0, "424243")
+    with tarfile.open(package, "r:gz") as archive:
+        names = {member.name for member in archive.getmembers() if member.isfile()}
+    assert "seed0/diagnostics/same_pass_canonical_eval30.csv" in names
+    assert "seed0/validation/same_pass_canonical_reconciliation.csv" in names
+    assert "seed0/validation/historical_canonical_drift.csv" in names
+    assert "seed0/runtime_metadata/reconciliation_summary.json" in names
+    assert all("checkpoint/" not in name and "model.best" not in name for name in names)
 
 
 def test_task4_runner_has_no_ambiguous_discovery_patterns():
@@ -3506,6 +3634,10 @@ def test_task5_reducer_dry_run_prints_exact_counts_and_scoped_sacct():
     assert "checkpoint_group_count=40" in result.stdout
     assert "episode_count=1200" in result.stdout
     assert "sacct -j 777777 --parsable2 --noheader" in result.stdout
+    assert "reconciliation_contract_version=2" in result.stdout
+    assert "same_pass_canonical_reconciliation_summary.csv" in result.stdout
+    assert "historical_canonical_drift_summary.csv" in result.stdout
+    assert "reconciliation_summary_inventory.csv" in result.stdout
     assert "DRY_RUN_NO_REDUCTION_OR_PACKAGING" in result.stdout
 
 
@@ -3720,6 +3852,7 @@ def test_task6_source_bundle_dry_run_lists_full_eval30_runtime_files():
     assert "m3_jobs/21_full_infrastructure_diagnostic_eval30.slurm" in result.stdout
     assert "m3_jobs/22_full_infrastructure_diagnostic_eval30_reduce_bundle.slurm" in result.stdout
     assert "scripts/validate_full_infrastructure_diagnostic_eval30.py" in result.stdout
+    assert "reconciliation_contract_version=2" in result.stdout
     assert "DRY_RUN_NO_ARCHIVE_CREATED" in result.stdout
 
 
@@ -3829,4 +3962,5 @@ def test_task6_submit_default_dry_run_does_not_invoke_sbatch(tmp_path):
     assert result.returncode == 0, result.stderr
     assert "SBATCH_ARRAY_COMMAND=sbatch --parsable" in result.stdout
     assert "--dependency=afterok:<array_job_id>" in result.stdout
+    assert "reconciliation_contract_version=2" in result.stdout
     assert "DRY_RUN_NO_SBATCH_CALLED" in result.stdout

@@ -141,6 +141,11 @@ if [[ "${EV_GNN_FULL_DIAGNOSTIC_DRY_RUN:-0}" == "1" ]]; then
   echo "formal_complete_bundle=${FORMAL_COMPLETE_BUNDLE}"
   echo "task_dir=${TASK_DIR}"
   echo "package_path=${PACKAGE_PATH}"
+  echo "same_pass_canonical_eval30=diagnostics/same_pass_canonical_eval30.csv"
+  echo "same_pass_reconciliation=validation/same_pass_canonical_reconciliation.csv"
+  echo "historical_drift=validation/historical_canonical_drift.csv"
+  echo "reconciliation_summary=runtime_metadata/reconciliation_summary.json"
+  echo "reconciliation_contract_version=2"
   for index in 0 1 2 3 4; do
     training_seed="${TRAINING_SEED_ARRAY[${index}]}"
     formal_task_id="${FORMAL_TASK_ID_ARRAY[${index}]}"
@@ -306,8 +311,13 @@ for index in 0 1 2 3 4; do
   python "${VALIDATOR}" \
     prepare-seed-validation \
     --diagnostic-dir "${diagnostic_dir}" \
-    --canonical-csv "${canonical_dir}/complete_eval30.csv" \
+    --historical-canonical-csv "${canonical_dir}/complete_eval30.csv" \
     --validation-dir "${validation_dir}" \
+    --runtime-metadata-dir "${runtime_dir}" \
+    --formal-validation-json "${runtime_dir}/formal_package_validation.json" \
+    --stage-d-source-commit-sha "${SOURCE_COMMIT_SHA}" \
+    --config-path "${config_dir}/formal_config.yaml" \
+    --checkpoint-prefix "${checkpoint_prefix}" \
     --task-id "${TASK_ID}" \
     --training-seed "${training_seed}" \
     > "${runtime_dir}/seed_validation_preparation.json"

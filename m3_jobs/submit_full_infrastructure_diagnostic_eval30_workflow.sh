@@ -276,6 +276,8 @@ run_preflight() {
       SLURM_JOB_ID="123456_${task_id}" \
       bash "${ARRAY_SCRIPT}" > "${PREFLIGHT_DIR}/runner_task${task_id}_dry_run.out"
     grep -q "expected_episode_count=150" "${PREFLIGHT_DIR}/runner_task${task_id}_dry_run.out"
+    grep -q "same_pass_canonical_eval30.csv" "${PREFLIGHT_DIR}/runner_task${task_id}_dry_run.out"
+    grep -q "reconciliation_contract_version=2" "${PREFLIGHT_DIR}/runner_task${task_id}_dry_run.out"
     [[ "$(grep -c '^EVALUATOR_COMMAND_SEED_' "${PREFLIGHT_DIR}/runner_task${task_id}_dry_run.out")" == "5" ]] || die "runner dry-run task ${task_id} did not print five evaluator commands"
   done
   EV_GNN_FULL_DIAGNOSTIC_REDUCER_DRY_RUN=1 \
@@ -283,6 +285,10 @@ run_preflight() {
     SLURM_JOB_ID=789012 \
     bash "${REDUCER_SCRIPT}" > "${PREFLIGHT_DIR}/reducer_dry_run.out"
   grep -q "episode_count=1200" "${PREFLIGHT_DIR}/reducer_dry_run.out"
+  grep -q "reconciliation_contract_version=2" "${PREFLIGHT_DIR}/reducer_dry_run.out"
+  grep -q "same_pass_canonical_reconciliation_summary.csv" "${PREFLIGHT_DIR}/reducer_dry_run.out"
+  grep -q "historical_canonical_drift_summary.csv" "${PREFLIGHT_DIR}/reducer_dry_run.out"
+  grep -q "reconciliation_summary_inventory.csv" "${PREFLIGHT_DIR}/reducer_dry_run.out"
 }
 
 run_preflight
@@ -299,6 +305,7 @@ if [[ "${EXECUTE}" -eq 0 ]]; then
   echo "formal_complete_bundle=${FORMAL_COMPLETE_BUNDLE}"
   echo "output_root=${OUTPUT_ROOT}"
   echo "run_root=${RUN_ROOT}"
+  echo "reconciliation_contract_version=2"
   print_task_mapping
   echo "SBATCH_ARRAY_COMMAND=sbatch --parsable --export=$(array_export_vars) ${ARRAY_SCRIPT}"
   echo "SBATCH_REDUCER_COMMAND=sbatch --parsable --dependency=afterok:<array_job_id> --export=$(reducer_export_vars "<array_job_id>") ${REDUCER_SCRIPT}"
