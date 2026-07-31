@@ -3973,6 +3973,120 @@ def test_complete_bundle_contains_no_checkpoints_or_failed_job_58656380_reuse(
     assert "58656380" not in "\n".join(payloads.values())
 
 
+SOURCE_BUNDLE_RUNTIME_MEMBERS = [
+    "evaluate_td3_gnn.py",
+    "evaluate_td3_gnn_infrastructure_diagnostics.py",
+    "TD3/TD3_ActionGNN_Controlled.py",
+    "TD3/TD3_HierarchicalActionGNN.py",
+    "config_files/PublicPST_25cp.yaml",
+    "config_files/PublicPST_100.yaml",
+    "config_files/PublicPST_500.yaml",
+    "config_files/PublicPST_1000.yaml",
+    "m3_jobs/21_full_infrastructure_diagnostic_eval30.slurm",
+    "m3_jobs/22_full_infrastructure_diagnostic_eval30_reduce_bundle.slurm",
+    "m3_jobs/create_full_infrastructure_diagnostic_eval30_source_bundle.sh",
+    "m3_jobs/submit_full_infrastructure_diagnostic_eval30_workflow.sh",
+    "scripts/validate_full_infrastructure_diagnostic_eval30.py",
+    "utils/ev2gym_training_utils.py",
+    "utils/infrastructure_diagnostics.py",
+    "utils/state_public_pst_gnn.py",
+]
+
+
+def create_synthetic_source_bundle_repo(tmp_path, *, branch="main"):
+    repo = tmp_path / f"source-repo-{branch}"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "checkout", "-b", "main"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    for relative_name in SOURCE_BUNDLE_RUNTIME_MEMBERS:
+        output_path = repo / relative_name
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(PROJECT_ROOT / relative_name, output_path)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Stage D Test",
+            "-c",
+            "user.email=stage-d-test@example.invalid",
+            "commit",
+            "-m",
+            "synthetic source bundle repo",
+        ],
+        cwd=repo,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if branch != "main":
+        subprocess.run(
+            ["git", "switch", "-c", branch],
+            cwd=repo,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    return repo, head
+
+
+def run_source_bundle_script(repo, output_root, *, expected_sha=None):
+    env = {
+        **os.environ,
+        **SUBPROCESS_OPENMP_ENV_DEFAULTS,
+        "EV_GNN_FULL_DIAGNOSTIC_SOURCE_OUTPUT_ROOT": str(output_root),
+    }
+    if expected_sha is not None:
+        env["EV_GNN_FULL_DIAGNOSTIC_SOURCE_EXPECTED_HEAD_SHA"] = expected_sha
+    return subprocess.run(
+        ["bash", str(repo / "m3_jobs" / TASK6_SOURCE_BUNDLE.name)],
+        cwd=repo,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        check=False,
+    )
+
+
+def test_task6_source_bundle_real_mode_defaults_to_main_branch(tmp_path):
+    repo, head = create_synthetic_source_bundle_repo(tmp_path, branch="repair")
+    output_root = tmp_path / "output"
+
+    result = run_source_bundle_script(repo, output_root, expected_sha=head)
+
+    assert result.returncode != 0
+    assert "source bundle must be created on branch main; got repair" in result.stderr
+    assert not list(output_root.glob("*.tar.gz"))
+
+
+def test_task6_source_bundle_real_mode_requires_expected_head_sha(tmp_path):
+    repo, _head = create_synthetic_source_bundle_repo(tmp_path, branch="main")
+    output_root = tmp_path / "output"
+
+    result = run_source_bundle_script(repo, output_root)
+
+    assert result.returncode != 0
+    assert "EV_GNN_FULL_DIAGNOSTIC_SOURCE_EXPECTED_HEAD_SHA is required" in result.stderr
+    assert not list(output_root.glob("*.tar.gz"))
+
+
+def test_task6_source_bundle_real_mode_creates_archive_on_main_with_exact_expected_sha(tmp_path):
+    repo, head = create_synthetic_source_bundle_repo(tmp_path, branch="main")
+    output_root = tmp_path / "output"
+
+    result = run_source_bundle_script(repo, output_root, expected_sha=head)
+
+    assert result.returncode == 0, result.stderr
+    assert "SOURCE_BUNDLE_OK" in result.stdout
+    archive = output_root / f"EV-GNN-full-infrastructure-diagnostics-eval30-{head}.tar.gz"
+    sidecar = archive.with_name(archive.name + ".sha256")
+    assert archive.is_file()
+    assert sidecar.is_file()
+    assert sidecar.read_text(encoding="utf-8").endswith(f"  {archive.name}\n")
+
+
 def test_task6_source_bundle_dry_run_lists_full_eval30_runtime_files():
     env = {
         **os.environ,

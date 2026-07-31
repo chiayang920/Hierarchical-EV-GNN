@@ -7,7 +7,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 CURRENT_DIR="$(pwd -P)"
 OUTPUT_ROOT="${EV_GNN_FULL_DIAGNOSTIC_SOURCE_OUTPUT_ROOT:-${HOME}/Downloads/EVGNN_Formal_Evidence}"
 SOURCE_EXPECTED_HEAD_SHA="${EV_GNN_FULL_DIAGNOSTIC_SOURCE_EXPECTED_HEAD_SHA:-}"
-BRANCH_REQUIRED="${EV_GNN_FULL_DIAGNOSTIC_SOURCE_REQUIRED_BRANCH:-impl/full-per-infrastructure-diagnostics-eval30-compact}"
+BRANCH_REQUIRED="${EV_GNN_FULL_DIAGNOSTIC_SOURCE_REQUIRED_BRANCH:-main}"
 RECORDED_HEAD_SHA=""
 TOP_LEVEL=""
 ARCHIVE_PATH=""
@@ -136,7 +136,8 @@ CURRENT_BRANCH="$(git branch --show-current)"
 [[ "${CURRENT_BRANCH}" == "${BRANCH_REQUIRED}" ]] || die "source bundle must be created on branch ${BRANCH_REQUIRED}; got ${CURRENT_BRANCH}"
 
 HEAD_SHA="$(git rev-parse HEAD)"
-if [[ -n "${SOURCE_EXPECTED_HEAD_SHA}" && "${HEAD_SHA}" != "${SOURCE_EXPECTED_HEAD_SHA}" ]]; then
+[[ -n "${SOURCE_EXPECTED_HEAD_SHA}" ]] || die "EV_GNN_FULL_DIAGNOSTIC_SOURCE_EXPECTED_HEAD_SHA is required in real mode"
+if [[ "${HEAD_SHA}" != "${SOURCE_EXPECTED_HEAD_SHA}" ]]; then
   die "HEAD ${HEAD_SHA} does not match required ${SOURCE_EXPECTED_HEAD_SHA}"
 fi
 git diff-index --quiet HEAD -- || die "tracked worktree is dirty"
