@@ -398,27 +398,42 @@ def read_csv_rows(path):
         return list(reader.fieldnames or []), list(reader)
 
 
-def passing_same_pass_reconciliation_rows():
+PASSING_SAME_PASS_VALUES = {
+    "episode_reward": "-1.0",
+    "tracking_error": "1.0",
+    "energy_tracking_error": "1.0",
+    "power_tracker_violation": "1.0",
+    "total_energy_charged": "1.0",
+    "total_energy_discharged": "0.0",
+    "average_user_satisfaction": "1.0",
+    "energy_user_satisfaction": "100.0",
+    "total_transformer_overload": "0.0",
+    "action_mean": "0.5",
+    "action_fraction_at_max": "0.5",
+    "active_action_count_mean": "1.0",
+}
+
+
+def passing_same_pass_reconciliation_rows(*, scale="25cp"):
     rows = []
+    denominator = 112 * int(scale.replace("cp", ""))
+    at_max_count = denominator // 2
     for episode_index in range(EVAL_EPISODES):
         for canonical_field, _diagnostic_field, comparison_type in SAME_PASS_FIELD_MAP:
             is_fraction = comparison_type == "fraction_count_exact"
+            value = PASSING_SAME_PASS_VALUES[canonical_field]
             rows.append({
                 "reconciliation_contract_version": "2",
                 "episode_index": str(episode_index),
                 "field": canonical_field,
                 "comparison_type": comparison_type,
-                "same_pass_canonical_value": (
-                    "0.5" if canonical_field.startswith("action") else "-1.0"
-                ),
-                "diagnostic_value": (
-                    "0.5" if canonical_field.startswith("action") else "-1.0"
-                ),
+                "same_pass_canonical_value": value,
+                "diagnostic_value": value,
                 "absolute_difference": "0.0",
                 "relative_difference": "0.0",
-                "same_pass_count": "1400" if is_fraction else "",
-                "diagnostic_count": "1400" if is_fraction else "",
-                "total_action_decision_denominator": "2800" if is_fraction else "",
+                "same_pass_count": str(at_max_count) if is_fraction else "",
+                "diagnostic_count": str(at_max_count) if is_fraction else "",
+                "total_action_decision_denominator": str(denominator) if is_fraction else "",
                 "status": "pass",
                 "failure_category": "",
             })
@@ -788,7 +803,7 @@ def build_seed_output(
         json.dumps({"status": "ok"}),
         encoding="utf-8",
     )
-    same_pass_rows = passing_same_pass_reconciliation_rows()
+    same_pass_rows = passing_same_pass_reconciliation_rows(scale=scale)
     historical_rows = passing_historical_drift_rows(
         scale=scale,
         algorithm=algorithm,
@@ -983,6 +998,38 @@ def test_validate_seed_output_rejects_failed_same_pass_reconciliation(tmp_path):
 
     mutate_csv(path, fail)
     with pytest.raises(ValueError, match="same-pass reconciliation"):
+        validate_seed_output_directory(seed_dir, task_id=0, training_seed=0)
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "field"),
+    [
+        ("diagnostics/same_pass_canonical_eval30.csv", "action_mean"),
+        ("diagnostics/episode_diagnostics.csv", "global_action_mean_all_slots"),
+    ],
+)
+def test_validate_seed_output_rejects_stale_same_pass_reconciliation_when_raw_overlapping_value_changes(
+    tmp_path,
+    relative_path,
+    field,
+):
+    seed_dir = build_seed_output(tmp_path / "seed0")
+    path = seed_dir / relative_path
+
+    def mutate_first_episode(fieldnames, rows):
+        assert field in fieldnames
+        for row in rows:
+            if row.get("row_type", "episode") == "episode" and row["episode_index"] == "0":
+                row[field] = "0.5000001192092896"
+                return
+        raise AssertionError("synthetic episode 0 row not found")
+
+    mutate_csv(path, mutate_first_episode)
+
+    with pytest.raises(
+        ValueError,
+        match="stale or inconsistent same-pass reconciliation evidence",
+    ):
         validate_seed_output_directory(seed_dir, task_id=0, training_seed=0)
 
 

@@ -597,6 +597,76 @@ def _require_unique_keys(
         seen.add(key)
 
 
+def _csv_normalized_rows(
+    rows: list[dict[str, object]],
+    fieldnames: tuple[str, ...],
+) -> tuple[list[str], list[dict[str, str]]]:
+    text = csv_text(rows, fieldnames)
+    reader = csv.DictReader(io.StringIO(text))
+    return list(reader.fieldnames or []), list(reader)
+
+
+def _require_same_pass_reconciliation_matches_raw_inputs(
+    *,
+    stored_fields: list[str],
+    stored_rows: list[dict[str, str]],
+    diagnostic_rows: list[dict[str, str]],
+    transformer_rows: list[dict[str, str]],
+    charger_rows: list[dict[str, str]],
+    same_pass_canonical_rows: list[dict[str, str]],
+    scale: str,
+    algorithm: str,
+    task_id: int,
+    training_seed: int,
+) -> None:
+    inputs = SeedReconciliationInputs(
+        diagnostic_rows=diagnostic_rows,
+        transformer_rows=transformer_rows,
+        charger_rows=charger_rows,
+        historical_canonical_rows=[],
+        same_pass_canonical_rows=same_pass_canonical_rows,
+        formal_validation={},
+        scale=scale,
+        algorithm=algorithm,
+        task_id=task_id,
+        training_seed=training_seed,
+        stage_d_source_commit_sha="",
+        config_path=None,
+        checkpoint_prefix=None,
+    )
+    try:
+        expected_fields, expected_rows = _csv_normalized_rows(
+            build_same_pass_reconciliation_rows(inputs),
+            SAME_PASS_RECONCILIATION_COLUMNS,
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "stale or inconsistent same-pass reconciliation evidence: "
+            f"cannot rebuild expected rows: {exc}"
+        ) from exc
+
+    message_prefix = "stale or inconsistent same-pass reconciliation evidence"
+    if stored_fields != expected_fields:
+        raise ValueError(f"{message_prefix}: column order mismatch")
+    if len(stored_rows) != len(expected_rows):
+        raise ValueError(f"{message_prefix}: row count mismatch")
+    for row_index, (stored, expected) in enumerate(zip(stored_rows, expected_rows)):
+        stored_key = (stored.get("episode_index", ""), stored.get("field", ""))
+        expected_key = (expected.get("episode_index", ""), expected.get("field", ""))
+        if stored_key != expected_key:
+            raise ValueError(
+                f"{message_prefix}: row {row_index} key mismatch "
+                f"{stored_key!r} != {expected_key!r}"
+            )
+        for column in SAME_PASS_RECONCILIATION_COLUMNS:
+            if stored.get(column, "") != expected.get(column, ""):
+                raise ValueError(
+                    f"{message_prefix}: row {row_index} "
+                    f"episode_index={stored_key[0]} field={stored_key[1]} "
+                    f"column {column} mismatch"
+                )
+
+
 def validate_seed_output_directory(
     path: Path,
     task_id: int,
@@ -746,6 +816,18 @@ def validate_seed_output_directory(
     )
     if any(row.get("status") != "pass" for row in same_pass_reconciliation_rows):
         raise ValueError("same-pass reconciliation status mismatch")
+    _require_same_pass_reconciliation_matches_raw_inputs(
+        stored_fields=same_pass_reconciliation_fields,
+        stored_rows=same_pass_reconciliation_rows,
+        diagnostic_rows=episode_rows,
+        transformer_rows=transformer_rows,
+        charger_rows=charger_rows,
+        same_pass_canonical_rows=same_pass_rows,
+        scale=scale,
+        algorithm=algorithm,
+        task_id=task_id,
+        training_seed=training_seed,
+    )
 
     historical_fields, historical_rows = _read_reconciliation_csv(
         validation / HISTORICAL_DRIFT_FILENAME,
