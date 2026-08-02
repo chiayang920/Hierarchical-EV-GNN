@@ -1567,6 +1567,263 @@ def test_diagnostic_evaluator_rejects_invalid_active_slots_before_env_step(
     assert env.step_called is False
 
 
+class TwoStepDiagnosticEnv:
+    def __init__(self):
+        self.charging_stations = [fake_charger(0, 2, 0)]
+        self.action_space = SimpleNamespace(
+            low=np.array([0.0, 0.0], dtype=float),
+            high=np.array([1.0, 1.0], dtype=float),
+        )
+        self.states = [
+            fake_state(
+                [0, 1],
+                [
+                    [0.5, 0.0, 1.0, 0.0, 0.0, 0.0],
+                    [0.5, 0.0, 1.0, 0.0, 0.0, 0.0],
+                ],
+            ),
+            fake_state(
+                [0, 1],
+                [
+                    [0.5, 0.0, 1.0, 0.0, 0.0, 0.0],
+                    [0.5, 0.0, 1.0, 0.0, 0.0, 0.0],
+                ],
+            ),
+        ]
+        self.step_index = 0
+
+    def reset(self, seed=None):
+        self.step_index = 0
+        return self.states[0], {}
+
+    def step(self, mapped_action):
+        self.step_index += 1
+        done = self.step_index == 2
+        stats = {
+            "tracking_error": 4.0,
+            "energy_tracking_error": 5.0,
+            "power_tracker_violation": 6.0,
+            "total_energy_charged": 7.0,
+            "total_energy_discharged": 0.0,
+            "average_user_satisfaction": 0.9,
+            "energy_user_satisfaction": 99.0,
+            "total_transformer_overload": 0.0,
+            "total_ev_served": 2,
+        }
+        next_state = self.states[min(self.step_index, 1)]
+        return next_state, 1.5, done, stats
+
+
+class SequenceActionPolicy:
+    def __init__(self, mapped_actions):
+        self.mapped_actions = [
+            np.asarray(action, dtype=np.float32)
+            for action in mapped_actions
+        ]
+        self.index = 0
+
+    def select_action(self, state, expl_noise=0.0, return_mapped_action=False):
+        assert return_mapped_action is True
+        action = self.mapped_actions[self.index]
+        self.index += 1
+        return action
+
+
+def test_diagnostic_episode_returns_same_pass_canonical_record_from_one_mapped_action_stream():
+    from evaluate_td3_gnn_infrastructure_diagnostics import (
+        canonical_overlapping_action_metrics,
+        evaluate_diagnostic_episode,
+    )
+
+    mapped_actions = [
+        np.array([1.0, 0.5], dtype=np.float32),
+        np.array([0.0, 1.0], dtype=np.float32),
+    ]
+    episode = evaluate_diagnostic_episode(
+        policy=SequenceActionPolicy(mapped_actions),
+        env=TwoStepDiagnosticEnv(),
+        seed=710000,
+        max_action=1.0,
+        max_action_tolerance=1e-6,
+    )
+
+    assert [
+        action.tolist()
+        for action in episode["mapped_actions_by_step"]
+    ] == [[1.0, 0.5], [0.0, 1.0]]
+    assert episode["mapped_action_dimension"] == 2
+    same_pass = episode["same_pass_canonical_episode_record"]
+    assert same_pass["episode_reward"] == pytest.approx(3.0)
+    assert same_pass["episode_steps"] == 2
+    assert same_pass["done"] is True
+    assert same_pass["stats"]["tracking_error"] == pytest.approx(4.0)
+    assert same_pass["stats"]["mapped_action_dimension"] == 2
+    assert same_pass["stats"]["same_pass_at_max_count"] == 2
+    assert same_pass["stats"]["total_action_decision_denominator"] == 4
+    expected_metrics = canonical_overlapping_action_metrics(
+        mapped_actions,
+        max_action=1.0,
+        tolerance=1e-6,
+    )
+    assert episode["same_pass_overlapping_action_metrics"] == expected_metrics
+    assert same_pass["action_mean"] == expected_metrics["action_mean"]
+    assert same_pass["action_fraction_at_max"] == expected_metrics["action_fraction_at_max"]
+    assert same_pass["active_action_count_mean"] == expected_metrics["active_action_count_mean"]
+    assert episode["action_summary"]["global"]["action_mean_all_slots"] == expected_metrics["action_mean"]
+    assert (
+        episode["action_summary"]["global"]["action_fraction_at_max_all_slots"]
+        == expected_metrics["action_fraction_at_max"]
+    )
+    assert (
+        episode["action_summary"]["global"]["nonzero_action_count_mean_all_slots"]
+        == expected_metrics["active_action_count_mean"]
+    )
+
+
+def test_overlapping_action_metrics_are_identical_after_same_pass_and_diagnostic_csv_roundtrip(tmp_path):
+    import csv
+
+    from evaluate_td3_gnn_infrastructure_diagnostics import (
+        evaluate_diagnostic_episode,
+        write_csv,
+        write_same_pass_canonical_eval30,
+    )
+    from utils.infrastructure_diagnostics import (
+        EPISODE_DIAGNOSTIC_COLUMNS,
+        build_episode_row,
+    )
+
+    mapped_actions = [
+        np.array([0.1, 0.2], dtype=np.float32),
+        np.array([0.3, 1.0], dtype=np.float32),
+    ]
+    independent_float64_mean = float(np.mean(np.asarray(mapped_actions, dtype=float)))
+    episode = evaluate_diagnostic_episode(
+        policy=SequenceActionPolicy(mapped_actions),
+        env=TwoStepDiagnosticEnv(),
+        seed=710000,
+        max_action=1.0,
+        max_action_tolerance=1e-6,
+    )
+    shared_metrics = episode["same_pass_overlapping_action_metrics"]
+    assert independent_float64_mean != shared_metrics["action_mean"]
+
+    canonical_record = dict(episode["same_pass_canonical_episode_record"])
+    canonical_record["episode_index"] = 0
+    canonical_record["episode_seed"] = 710000
+    canonical_path = write_same_pass_canonical_eval30(
+        tmp_path,
+        {
+            "run_name": "same_pass_roundtrip",
+            "algorithm": "actiongnn",
+            "config": "config_files/PublicPST_25cp.yaml",
+            "seed": 0,
+            "checkpoint": "checkpoint/model.best",
+        },
+        [canonical_record],
+    )
+    diagnostic_row = build_episode_row(
+        {
+            "matrix_job_id": "same_pass",
+            "scale": "25cp",
+            "algorithm": "actiongnn",
+            "training_seed": 0,
+            "config": "config_files/PublicPST_25cp.yaml",
+            "checkpoint_prefix": "checkpoint/model.best",
+            "run_name": "same_pass_roundtrip",
+        },
+        0,
+        710000,
+        episode,
+        episode["action_summary"],
+        episode["stats"],
+        1.0,
+        1e-6,
+    )
+    diagnostic_path = tmp_path / "episode_diagnostics.csv"
+    write_csv(diagnostic_path, EPISODE_DIAGNOSTIC_COLUMNS, [diagnostic_row])
+
+    with canonical_path.open(newline="", encoding="utf-8") as handle:
+        canonical_episode = next(
+            row for row in csv.DictReader(handle)
+            if row["row_type"] == "episode"
+        )
+    with diagnostic_path.open(newline="", encoding="utf-8") as handle:
+        diagnostic_episode = next(csv.DictReader(handle))
+
+    assert canonical_episode["action_mean"] == diagnostic_episode["global_action_mean_all_slots"]
+    assert (
+        canonical_episode["action_fraction_at_max"]
+        == diagnostic_episode["global_action_fraction_at_max_all_slots"]
+    )
+    assert (
+        canonical_episode["active_action_count_mean"]
+        == diagnostic_episode["nonzero_action_count_mean_all_slots"]
+    )
+
+
+def test_same_pass_canonical_eval30_csv_uses_canonical_required_columns_and_summary(tmp_path):
+    import csv
+
+    from evaluate_td3_gnn import REQUIRED_COLUMNS
+    from evaluate_td3_gnn_infrastructure_diagnostics import write_same_pass_canonical_eval30
+
+    episode_records = []
+    for episode_index in range(30):
+        episode_records.append(
+            {
+                "episode_index": episode_index,
+                "episode_seed": 710000 + episode_index,
+                "episode_reward": float(episode_index),
+                "episode_steps": 112,
+                "done": True,
+                "stats": {
+                    "tracking_error": float(episode_index) + 0.5,
+                    "mapped_action_dimension": 25,
+                    "same_pass_at_max_count": episode_index,
+                    "total_action_decision_denominator": 2800,
+                },
+                "action_mean": 0.5,
+                "action_std": 0.0,
+                "action_min": 0.0,
+                "action_max": 1.0,
+                "action_fraction_zero": 0.5,
+                "action_fraction_at_max": 0.5,
+                "active_action_count_mean": 1.0,
+            }
+        )
+    output_path = write_same_pass_canonical_eval30(
+        tmp_path,
+        {
+            "run_name": "same_pass",
+            "algorithm": "actiongnn",
+            "config": "config_files/PublicPST_25cp.yaml",
+            "seed": 0,
+            "checkpoint": "checkpoint/model.best",
+        },
+        episode_records,
+    )
+
+    with output_path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        rows = list(reader)
+
+    assert output_path == tmp_path / "same_pass_canonical_eval30.csv"
+    assert reader.fieldnames[: len(REQUIRED_COLUMNS)] == REQUIRED_COLUMNS
+    assert "row_type" in reader.fieldnames
+    assert "tracking_error" in reader.fieldnames
+    assert "mapped_action_dimension" in reader.fieldnames
+    assert "same_pass_at_max_count" in reader.fieldnames
+    assert "total_action_decision_denominator" in reader.fieldnames
+    assert sum(row["row_type"] == "episode" for row in rows) == 30
+    assert sum(row["row_type"] == "summary" for row in rows) == 1
+    assert [
+        int(row["episode_seed"])
+        for row in rows
+        if row["row_type"] == "episode"
+    ] == list(range(710000, 710030))
+
+
 def test_standalone_aggregation_rejects_invalid_active_slots_without_filtering():
     from utils.infrastructure_diagnostics import aggregate_infrastructure_actions
 
@@ -1967,6 +2224,36 @@ def test_schema_v3_keeps_existing_schema_v2_action_and_service_columns():
     assert "user_satisfaction_observation_count" in TRANSFORMER_DIAGNOSTIC_COLUMNS
 
 
+def test_schema_v3_headers_remain_byte_for_byte_unchanged():
+    import hashlib
+    from utils.infrastructure_diagnostics import (
+        CHARGER_DIAGNOSTIC_COLUMNS,
+        EPISODE_DIAGNOSTIC_COLUMNS,
+        SEED_SUMMARY_DIAGNOSTIC_COLUMNS,
+        TRANSFORMER_DIAGNOSTIC_COLUMNS,
+    )
+
+    def digest(columns):
+        return hashlib.sha256(("\n".join(columns) + "\n").encode("utf-8")).hexdigest()
+
+    assert len(EPISODE_DIAGNOSTIC_COLUMNS) == 68
+    assert digest(EPISODE_DIAGNOSTIC_COLUMNS) == (
+        "13f1276e0e8ad9a6f69c68aadb922c726f0b8024a6dd3471780ea17e952dd978"
+    )
+    assert len(CHARGER_DIAGNOSTIC_COLUMNS) == 38
+    assert digest(CHARGER_DIAGNOSTIC_COLUMNS) == (
+        "88f2045630d8d534fa71012fccbe87ce3887b439b4ff1a052db4ae49c85c0677"
+    )
+    assert len(TRANSFORMER_DIAGNOSTIC_COLUMNS) == 44
+    assert digest(TRANSFORMER_DIAGNOSTIC_COLUMNS) == (
+        "58298be54e47444cc9397c6621553a6cb3907a062eb4081022a7da10bbab474e"
+    )
+    assert len(SEED_SUMMARY_DIAGNOSTIC_COLUMNS) == 53
+    assert digest(SEED_SUMMARY_DIAGNOSTIC_COLUMNS) == (
+        "6b481917df764e802dc4163124942dd707d828c943745f0b49c352c1718f51c4"
+    )
+
+
 def test_diagnostic_scale_choices_are_exact_and_closed():
     import evaluate_td3_gnn_infrastructure_diagnostics as evaluator
 
@@ -2174,6 +2461,7 @@ def test_explicit_scale_is_the_only_episode_and_summary_metadata_authority(
             "stats": {},
             "reset_info": {},
             "action_summary": {},
+            "same_pass_canonical_episode_record": {},
         },
     )
 
@@ -2191,6 +2479,11 @@ def test_explicit_scale_is_the_only_episode_and_summary_metadata_authority(
     monkeypatch.setattr(evaluator, "validate_diagnostic_reconciliation", lambda **_kwargs: None)
     monkeypatch.setattr(evaluator, "build_seed_summary_row", capture_summary_row)
     monkeypatch.setattr(evaluator, "write_csv", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        evaluator,
+        "write_same_pass_canonical_eval30",
+        lambda *_args, **_kwargs: None,
+    )
 
     evaluator.main(diagnostic_cli_args(config_path, tmp_path / "out", scale="100cp"))
 

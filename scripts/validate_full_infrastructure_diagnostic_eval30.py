@@ -4,10 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import collections
 import contextlib
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Final
 import io
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -120,6 +124,24 @@ from typing import TypeAlias
 
 EpisodeKey: TypeAlias = tuple[str, str, int, int]
 
+
+@dataclass(frozen=True)
+class SeedReconciliationInputs:
+    diagnostic_rows: list[dict[str, str]]
+    transformer_rows: list[dict[str, str]]
+    charger_rows: list[dict[str, str]]
+    historical_canonical_rows: list[dict[str, str]]
+    same_pass_canonical_rows: list[dict[str, str]]
+    formal_validation: dict[str, object]
+    scale: str
+    algorithm: str
+    task_id: int
+    training_seed: int
+    stage_d_source_commit_sha: str
+    config_path: Path | None
+    checkpoint_prefix: Path | None
+
+
 TOPOLOGY: Final[dict[str, tuple[int, int]]] = {
     "25cp": (25, 3),
     "100cp": (100, 7),
@@ -129,6 +151,113 @@ TOPOLOGY: Final[dict[str, tuple[int, int]]] = {
 
 ALGORITHMS: Final[tuple[str, ...]] = ("actiongnn", "hierarchical")
 SCHEMA_VERSION: Final[str] = "3"
+RECONCILIATION_CONTRACT_VERSION: Final[int] = 2
+SAME_PASS_CANONICAL_FILENAME: Final[str] = "same_pass_canonical_eval30.csv"
+SAME_PASS_RECONCILIATION_FILENAME: Final[str] = (
+    "same_pass_canonical_reconciliation.csv"
+)
+HISTORICAL_DRIFT_FILENAME: Final[str] = "historical_canonical_drift.csv"
+RECONCILIATION_SUMMARY_FILENAME: Final[str] = "reconciliation_summary.json"
+SATURATION_RECONSTRUCTION_RESIDUAL_LIMIT: Final[Decimal] = Decimal("1e-9")
+
+SAME_PASS_RECONCILIATION_COLUMNS: Final[tuple[str, ...]] = (
+    "reconciliation_contract_version",
+    "episode_index",
+    "field",
+    "comparison_type",
+    "same_pass_canonical_value",
+    "diagnostic_value",
+    "absolute_difference",
+    "relative_difference",
+    "same_pass_count",
+    "diagnostic_count",
+    "total_action_decision_denominator",
+    "status",
+    "failure_category",
+)
+
+SAME_PASS_FIELD_MAP: Final[tuple[tuple[str, str, str], ...]] = (
+    ("episode_reward", "episode_reward", "float_exact"),
+    ("tracking_error", "tracking_error", "float_exact"),
+    ("energy_tracking_error", "energy_tracking_error", "float_exact"),
+    ("power_tracker_violation", "power_tracker_violation", "float_exact"),
+    ("total_energy_charged", "total_energy_charged", "float_exact"),
+    ("total_energy_discharged", "total_energy_discharged", "float_exact"),
+    ("average_user_satisfaction", "average_user_satisfaction", "float_exact"),
+    ("energy_user_satisfaction", "energy_user_satisfaction", "float_exact"),
+    ("total_transformer_overload", "total_transformer_overload", "float_exact"),
+    ("action_mean", "global_action_mean_all_slots", "float_exact"),
+    (
+        "action_fraction_at_max",
+        "global_action_fraction_at_max_all_slots",
+        "fraction_count_exact",
+    ),
+    ("active_action_count_mean", "nonzero_action_count_mean_all_slots", "float_exact"),
+)
+
+HISTORICAL_DRIFT_COLUMNS: Final[tuple[str, ...]] = (
+    "reconciliation_contract_version",
+    "scale",
+    "algorithm",
+    "training_seed",
+    "formal_task_id",
+    "episode_index",
+    "episode_seed",
+    "field",
+    "historical_source_label",
+    "stage_d_source_label",
+    "historical_value",
+    "stage_d_same_pass_value",
+    "absolute_difference",
+    "relative_difference",
+    "classification",
+    "historical_at_max_count",
+    "stage_d_at_max_count",
+    "total_action_decision_denominator",
+    "count_difference",
+    "fraction_difference",
+)
+
+HISTORICAL_IDENTITY_FIELDS: Final[tuple[tuple[str, str, str, str], ...]] = (
+    ("algorithm", "algorithm", "algorithm", "string"),
+    ("training_seed", "seed", "seed", "integer"),
+    ("episode_index", "episode_index", "episode_index", "integer"),
+    ("episode_seed", "episode_seed", "episode_seed", "integer"),
+    ("episode_steps", "episode_steps", "episode_steps", "integer"),
+    ("done", "done", "done", "boolean"),
+    ("total_ev_served", "total_ev_served", "total_ev_served", "integer"),
+)
+
+HISTORICAL_FLOAT_FIELDS: Final[tuple[tuple[str, str], ...]] = (
+    ("episode_reward", "episode_reward"),
+    ("tracking_error", "tracking_error"),
+    ("energy_tracking_error", "energy_tracking_error"),
+    ("power_tracker_violation", "power_tracker_violation"),
+    ("total_energy_charged", "total_energy_charged"),
+    ("total_energy_discharged", "total_energy_discharged"),
+    ("average_user_satisfaction", "average_user_satisfaction"),
+    ("energy_user_satisfaction", "energy_user_satisfaction"),
+    ("total_transformer_overload", "total_transformer_overload"),
+    ("action_mean", "action_mean"),
+    ("action_fraction_at_max", "action_fraction_at_max"),
+    ("active_action_count_mean", "active_action_count_mean"),
+)
+
+PROVENANCE_IDENTITY_FIELDS: Final[tuple[str, ...]] = (
+    "formal_job_id",
+    "task_id",
+    "formal_task_id",
+    "scale",
+    "algorithm",
+    "training_seed",
+    "stage_d_source_commit_sha",
+    "config_sha256",
+    "checkpoint_member_sha256:model.best_actor",
+    "checkpoint_member_sha256:model.best_actor_optimizer",
+    "checkpoint_member_sha256:model.best_critic",
+    "checkpoint_member_sha256:model.best_critic_optimizer",
+    "checkpoint_member_sha256:kwargs.yaml",
+)
 
 EPISODE_REQUIRED_NUMERIC_FIELDS: Final[tuple[str, ...]] = (
     "episode_index",
@@ -207,7 +336,7 @@ def _require_exact_columns(
     expected_columns: list[str],
     label: str,
 ) -> None:
-    if fieldnames != expected_columns:
+    if tuple(fieldnames) != tuple(expected_columns):
         missing = sorted(set(expected_columns) - set(fieldnames))
         unexpected = sorted(set(fieldnames) - set(expected_columns))
         raise ValueError(
@@ -434,6 +563,110 @@ def _validate_status_csv(
     return len(rows)
 
 
+def _read_reconciliation_csv(
+    path: Path,
+    label: str,
+) -> tuple[list[str], list[dict[str, str]]]:
+    try:
+        return _read_csv(path)
+    except ValueError as exc:
+        raise ValueError(f"{label} reconciliation evidence error: {exc}") from exc
+
+
+def _require_contract_version(rows: list[dict[str, str]], label: str) -> None:
+    bad = [
+        row
+        for row in rows
+        if str(row.get("reconciliation_contract_version"))
+        != str(RECONCILIATION_CONTRACT_VERSION)
+    ]
+    if bad:
+        raise ValueError(f"{label} reconciliation contract version mismatch")
+
+
+def _require_unique_keys(
+    rows: list[dict[str, str]],
+    key_fields: tuple[str, ...],
+    label: str,
+) -> None:
+    seen: set[tuple[str, ...]] = set()
+    for row in rows:
+        key = tuple(row.get(field, "") for field in key_fields)
+        if key in seen:
+            raise ValueError(f"duplicate {label} key: {key}")
+        seen.add(key)
+
+
+def _csv_normalized_rows(
+    rows: list[dict[str, object]],
+    fieldnames: tuple[str, ...],
+) -> tuple[list[str], list[dict[str, str]]]:
+    text = csv_text(rows, fieldnames)
+    reader = csv.DictReader(io.StringIO(text))
+    return list(reader.fieldnames or []), list(reader)
+
+
+def _require_same_pass_reconciliation_matches_raw_inputs(
+    *,
+    stored_fields: list[str],
+    stored_rows: list[dict[str, str]],
+    diagnostic_rows: list[dict[str, str]],
+    transformer_rows: list[dict[str, str]],
+    charger_rows: list[dict[str, str]],
+    same_pass_canonical_rows: list[dict[str, str]],
+    scale: str,
+    algorithm: str,
+    task_id: int,
+    training_seed: int,
+) -> None:
+    inputs = SeedReconciliationInputs(
+        diagnostic_rows=diagnostic_rows,
+        transformer_rows=transformer_rows,
+        charger_rows=charger_rows,
+        historical_canonical_rows=[],
+        same_pass_canonical_rows=same_pass_canonical_rows,
+        formal_validation={},
+        scale=scale,
+        algorithm=algorithm,
+        task_id=task_id,
+        training_seed=training_seed,
+        stage_d_source_commit_sha="",
+        config_path=None,
+        checkpoint_prefix=None,
+    )
+    try:
+        expected_fields, expected_rows = _csv_normalized_rows(
+            build_same_pass_reconciliation_rows(inputs),
+            SAME_PASS_RECONCILIATION_COLUMNS,
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "stale or inconsistent same-pass reconciliation evidence: "
+            f"cannot rebuild expected rows: {exc}"
+        ) from exc
+
+    message_prefix = "stale or inconsistent same-pass reconciliation evidence"
+    if stored_fields != expected_fields:
+        raise ValueError(f"{message_prefix}: column order mismatch")
+    if len(stored_rows) != len(expected_rows):
+        raise ValueError(f"{message_prefix}: row count mismatch")
+    for row_index, (stored, expected) in enumerate(zip(stored_rows, expected_rows)):
+        stored_key = (stored.get("episode_index", ""), stored.get("field", ""))
+        expected_key = (expected.get("episode_index", ""), expected.get("field", ""))
+        if stored_key != expected_key:
+            raise ValueError(
+                f"{message_prefix}: row {row_index} key mismatch "
+                f"{stored_key!r} != {expected_key!r}"
+            )
+        for column in SAME_PASS_RECONCILIATION_COLUMNS:
+            if stored.get(column, "") != expected.get(column, ""):
+                raise ValueError(
+                    f"{message_prefix}: row {row_index} "
+                    f"episode_index={stored_key[0]} field={stored_key[1]} "
+                    f"column {column} mismatch"
+                )
+
+
 def validate_seed_output_directory(
     path: Path,
     task_id: int,
@@ -452,6 +685,7 @@ def validate_seed_output_directory(
     diagnostics = root / "diagnostics"
     validation = root / "validation"
     logs = root / "logs"
+    runtime_metadata = root / "runtime_metadata"
 
     episode_path = diagnostics / "episode_diagnostics.csv"
     seed_summary_path = diagnostics / "seed_summary_diagnostics.csv"
@@ -520,16 +754,169 @@ def validate_seed_output_directory(
         expected_rows_per_episode=expected_chargers,
     )
 
-    canonical_rows = _validate_status_csv(
-        validation / "canonical_reconciliation.csv",
-        label="canonical reconciliation",
-        required_status_fields=("status",),
+    same_pass_fields, same_pass_rows = _read_reconciliation_csv(
+        diagnostics / SAME_PASS_CANONICAL_FILENAME,
+        "same-pass canonical eval30",
     )
+    _require_columns(
+        same_pass_fields,
+        {
+            "row_type",
+            "algorithm",
+            "seed",
+            "episode_index",
+            "episode_seed",
+            "episode_steps",
+            "done",
+            "episode_reward",
+            "tracking_error",
+            "action_mean",
+            "action_fraction_at_max",
+            "active_action_count_mean",
+            "mapped_action_dimension",
+            "same_pass_at_max_count",
+            "total_action_decision_denominator",
+        },
+        "same-pass canonical eval30",
+    )
+    same_pass_episode_count = sum(
+        row.get("row_type") == "episode" for row in same_pass_rows
+    )
+    same_pass_summary_count = sum(
+        row.get("row_type") == "summary" for row in same_pass_rows
+    )
+    if same_pass_episode_count != EVAL_EPISODES or same_pass_summary_count != 1:
+        raise ValueError(
+            "same-pass canonical reconciliation evidence must contain "
+            "30 episodes and one summary"
+        )
+
+    same_pass_reconciliation_fields, same_pass_reconciliation_rows = (
+        _read_reconciliation_csv(
+            validation / SAME_PASS_RECONCILIATION_FILENAME,
+            "same-pass canonical reconciliation",
+        )
+    )
+    _require_exact_columns(
+        same_pass_reconciliation_fields,
+        SAME_PASS_RECONCILIATION_COLUMNS,
+        "same-pass canonical reconciliation",
+    )
+    _require_contract_version(
+        same_pass_reconciliation_rows,
+        "same-pass canonical reconciliation",
+    )
+    expected_same_pass_rows = EVAL_EPISODES * len(SAME_PASS_FIELD_MAP)
+    if len(same_pass_reconciliation_rows) != expected_same_pass_rows:
+        raise ValueError("same-pass reconciliation row count mismatch")
+    _require_unique_keys(
+        same_pass_reconciliation_rows,
+        ("episode_index", "field"),
+        "same-pass reconciliation",
+    )
+    if any(row.get("status") != "pass" for row in same_pass_reconciliation_rows):
+        raise ValueError("same-pass reconciliation status mismatch")
+    _require_same_pass_reconciliation_matches_raw_inputs(
+        stored_fields=same_pass_reconciliation_fields,
+        stored_rows=same_pass_reconciliation_rows,
+        diagnostic_rows=episode_rows,
+        transformer_rows=transformer_rows,
+        charger_rows=charger_rows,
+        same_pass_canonical_rows=same_pass_rows,
+        scale=scale,
+        algorithm=algorithm,
+        task_id=task_id,
+        training_seed=training_seed,
+    )
+
+    historical_fields, historical_rows = _read_reconciliation_csv(
+        validation / HISTORICAL_DRIFT_FILENAME,
+        "historical canonical drift",
+    )
+    _require_exact_columns(
+        historical_fields,
+        HISTORICAL_DRIFT_COLUMNS,
+        "historical canonical drift",
+    )
+    _require_contract_version(historical_rows, "historical canonical drift")
+    _require_unique_keys(
+        historical_rows,
+        ("episode_index", "episode_seed", "field"),
+        "historical drift",
+    )
+    expected_historical_rows = len(PROVENANCE_IDENTITY_FIELDS) + EVAL_EPISODES * (
+        len(HISTORICAL_IDENTITY_FIELDS) + len(HISTORICAL_FLOAT_FIELDS)
+    )
+    if len(historical_rows) != expected_historical_rows:
+        raise ValueError("historical drift row count mismatch")
+    expected_provenance_fields = set(PROVENANCE_IDENTITY_FIELDS)
+    actual_provenance_fields = {
+        row["field"]
+        for row in historical_rows
+        if row.get("episode_index", "") == ""
+    }
+    if actual_provenance_fields != expected_provenance_fields:
+        raise ValueError("historical provenance field coverage mismatch")
+    expected_episode_fields = {
+        field for field, *_rest in HISTORICAL_IDENTITY_FIELDS
+    } | {field for field, _stage_d_field in HISTORICAL_FLOAT_FIELDS}
+    for episode_index in range(EVAL_EPISODES):
+        fields = {
+            row["field"]
+            for row in historical_rows
+            if row.get("episode_index") == str(episode_index)
+        }
+        if fields != expected_episode_fields:
+            raise ValueError(
+                "historical drift field coverage mismatch for episode "
+                f"{episode_index}"
+            )
+    historical_classification_counts = collections.Counter(
+        row["classification"] for row in historical_rows
+    )
+    reconciliation_summary = _read_json_object(
+        runtime_metadata / RECONCILIATION_SUMMARY_FILENAME,
+        "reconciliation summary",
+    )
+    if (
+        reconciliation_summary.get("reconciliation_contract_version")
+        != RECONCILIATION_CONTRACT_VERSION
+    ):
+        raise ValueError("reconciliation contract version mismatch")
+    for field, expected in {
+        "status": "ok",
+        "hard_gate_status": "pass",
+        "same_pass_metric_status": "pass",
+        "historical_identity_status": "pass",
+        "evidence_write_status": "complete",
+    }.items():
+        if reconciliation_summary.get(field) != expected:
+            raise ValueError(f"reconciliation summary {field} mismatch")
+
     service_rows = _validate_status_csv(
         validation / "service_reconciliation.csv",
         label="service reconciliation",
         required_status_fields=SERVICE_STATUS_FIELDS,
     )
+    expected_counts = {
+        "same_pass_canonical_rows": len(same_pass_rows),
+        "same_pass_reconciliation_rows": len(same_pass_reconciliation_rows),
+        "historical_drift_rows": len(historical_rows),
+        "historical_identity_failure_count": historical_classification_counts[
+            "historical_identity_mismatch"
+        ],
+        "historical_float_drift_count": historical_classification_counts[
+            "historical_float_drift"
+        ],
+        "historical_saturation_count_drift_count": historical_classification_counts[
+            "historical_saturation_count_drift"
+        ],
+        "same_pass_metric_failure_count": 0,
+        "service_reconciliation_rows": service_rows,
+    }
+    for field, expected in expected_counts.items():
+        if int(reconciliation_summary.get(field, -1)) != int(expected):
+            raise ValueError(f"reconciliation summary count mismatch for {field}")
 
     mapping_path = validation / "mapping_validation.json"
     if not mapping_path.is_file():
@@ -578,9 +965,12 @@ def validate_seed_output_directory(
         "episode_count": len(episode_rows),
         "transformer_row_count": len(transformer_rows),
         "charger_row_count": len(charger_rows),
-        "canonical_reconciliation_rows": canonical_rows,
+        "same_pass_canonical_rows": len(same_pass_rows),
+        "same_pass_reconciliation_rows": len(same_pass_reconciliation_rows),
+        "historical_drift_rows": len(historical_rows),
         "service_reconciliation_rows": service_rows,
         "diagnostic_schema_version": SCHEMA_VERSION,
+        "reconciliation_contract_version": RECONCILIATION_CONTRACT_VERSION,
     }
 
 
@@ -607,9 +997,12 @@ SEED_PACKAGE_FILES: Final[tuple[str, ...]] = (
     "diagnostics/seed_summary_diagnostics.csv",
     "diagnostics/transformer_diagnostics.csv",
     "diagnostics/charger_diagnostics.csv",
-    "validation/canonical_reconciliation.csv",
+    "diagnostics/same_pass_canonical_eval30.csv",
+    "validation/same_pass_canonical_reconciliation.csv",
+    "validation/historical_canonical_drift.csv",
     "validation/service_reconciliation.csv",
     "validation/mapping_validation.json",
+    "runtime_metadata/reconciliation_summary.json",
     "logs/stderr.log",
 )
 TASK_PACKAGE_TOP_LEVEL_FILES: Final[tuple[str, ...]] = (
@@ -771,6 +1164,7 @@ def _validate_task_metadata(root: Path, task_id: int) -> tuple[str, str]:
         "formal_task_ids": [formal_task_id(task_id, seed) for seed in TRAINING_SEEDS],
         "eval_episodes_per_seed": EVAL_EPISODES,
         "diagnostic_schema_version": SCHEMA_VERSION,
+        "reconciliation_contract_version": RECONCILIATION_CONTRACT_VERSION,
     }
     for field, expected in expected_fields.items():
         if payload.get(field) != expected:
@@ -887,6 +1281,7 @@ def _validate_task_validation(root, task_id) -> None:
         "checkpoint_groups": len(TRAINING_SEEDS),
         "episode_count": len(TRAINING_SEEDS) * EVAL_EPISODES,
         "diagnostic_schema_version": SCHEMA_VERSION,
+        "reconciliation_contract_version": RECONCILIATION_CONTRACT_VERSION,
     }
     for field, value in expected.items():
         if payload.get(field) != value:
@@ -965,6 +1360,14 @@ def validate_stage_d_task_package(package: Path, task_id: int) -> dict[str, obje
             for training_seed in TRAINING_SEEDS:
                 seed_root = root / f"seed{training_seed}"
                 validate_seed_output_directory(seed_root, task_id, training_seed)
+                reconciliation_summary = _read_json_object(
+                    seed_root
+                    / "runtime_metadata"
+                    / RECONCILIATION_SUMMARY_FILENAME,
+                    "reconciliation summary",
+                )
+                if reconciliation_summary.get("stage_d_source_commit_sha") != source_commit:
+                    raise ValueError("Stage D source commit mismatch")
                 _, rows = _read_csv(seed_root / "diagnostics" / "episode_diagnostics.csv")
                 for row in rows:
                     actual_keys.add((
@@ -984,6 +1387,7 @@ def validate_stage_d_task_package(package: Path, task_id: int) -> dict[str, obje
         "checkpoint_groups": len(TRAINING_SEEDS),
         "episode_count": len(TRAINING_SEEDS) * EVAL_EPISODES,
         "diagnostic_schema_version": SCHEMA_VERSION,
+        "reconciliation_contract_version": RECONCILIATION_CONTRACT_VERSION,
         "source_commit_sha": source_commit,
         "array_job_id": array_job_id,
     }
@@ -1248,6 +1652,8 @@ def validate_seed_formal_package(
                 )
             raise ValueError(f"missing required formal package member(s): {missing}")
 
+        config_sha256 = ""
+        checkpoint_member_sha256: dict[str, str] = {}
         temporary_context = (
             tempfile.TemporaryDirectory(prefix="stage_d_formal_package_")
             if extract_dir is None
@@ -1262,10 +1668,27 @@ def validate_seed_formal_package(
             _validate_named_manifest(root, FORMAL_PACKAGE_MANIFEST_PATH, regular_names)
             validate_formal_source_manifest(root)
             validate_formal_task_runtime_metadata(root, task_id, training_seed)
-            config_values = validate_formal_config(
-                root / config_member(task_id, training_seed),
-                task_id,
-            )
+            config_path = root / config_member(task_id, training_seed)
+            checkpoint_members = {
+                basename: root / formal_train_member(
+                    task_id,
+                    training_seed,
+                    basename,
+                )
+                for basename in (
+                    "model.best_actor",
+                    "model.best_actor_optimizer",
+                    "model.best_critic",
+                    "model.best_critic_optimizer",
+                    "kwargs.yaml",
+                )
+            }
+            config_values = validate_formal_config(config_path, task_id)
+            config_sha256 = sha256_file(config_path)
+            checkpoint_member_sha256 = {
+                basename: sha256_file(path)
+                for basename, path in checkpoint_members.items()
+            }
 
     task = stage_d_task(task_id)
     return {
@@ -1285,6 +1708,8 @@ def validate_seed_formal_package(
             training_seed,
             "model.best",
         ),
+        "config_sha256": config_sha256,
+        "checkpoint_member_sha256": checkpoint_member_sha256,
         **config_values,
     }
 
@@ -1440,7 +1865,7 @@ def _pass_if_close(observed: float, expected: float, *, tolerance: float = 1e-6)
     return "pass" if abs(observed - expected) <= tolerance else "fail"
 
 
-def service_reconciliation_rows(
+def build_service_reconciliation_rows(
     episode_rows: list[dict[str, str]],
     transformer_rows: list[dict[str, str]],
     charger_rows: list[dict[str, str]],
@@ -1543,14 +1968,715 @@ def service_reconciliation_rows(
                 "transformer_energy_discharged_kwh_sum": transformer_discharged,
             }
         )
-    failures = [
-        row
+    return rows
+
+
+def evaluate_service_reconciliation_rows(rows: list[dict[str, object]]) -> int:
+    return sum(
+        1
         for row in rows
         if any(row[field] != "pass" for field in SERVICE_STATUS_FIELDS)
-    ]
-    if failures:
-        raise ValueError("service reconciliation failed")
+    )
+
+
+def build_mapping_validation_payload(
+    inputs: SeedReconciliationInputs,
+    transformer_rows: list[dict[str, str]],
+    charger_rows: list[dict[str, str]],
+) -> dict[str, object]:
+    expected_charger_count, expected_transformer_count = TOPOLOGY[inputs.scale]
+    episode_indexes = {
+        _exact_integer(row.get("episode_index"), "episode_index")
+        for row in inputs.diagnostic_rows
+    }
+    transformer_episode_indexes = {
+        _exact_integer(row.get("episode_index"), "episode_index")
+        for row in transformer_rows
+    }
+    charger_episode_indexes = {
+        _exact_integer(row.get("episode_index"), "episode_index")
+        for row in charger_rows
+    }
+    charger_keys = {
+        (row.get("episode_index"), row.get("charger_id"))
+        for row in charger_rows
+    }
+    transformer_keys = {
+        (row.get("episode_index"), row.get("transformer_id"))
+        for row in transformer_rows
+    }
+    schema_versions = {
+        row.get("diagnostic_schema_version")
+        for row in [*inputs.diagnostic_rows, *transformer_rows, *charger_rows]
+    }
+    checks = {
+        "episode_count": len(episode_indexes) == EVAL_EPISODES,
+        "transformer_episode_coverage": transformer_episode_indexes == episode_indexes,
+        "charger_episode_coverage": charger_episode_indexes == episode_indexes,
+        "charger_row_count": len(charger_rows)
+        == EVAL_EPISODES * expected_charger_count,
+        "transformer_row_count": len(transformer_rows)
+        == EVAL_EPISODES * expected_transformer_count,
+        "unique_charger_keys": len(charger_keys) == len(charger_rows),
+        "unique_transformer_keys": len(transformer_keys) == len(transformer_rows),
+        "schema_version": schema_versions == {SCHEMA_VERSION},
+    }
+    return {
+        "reconciliation_contract_version": RECONCILIATION_CONTRACT_VERSION,
+        "status": "ok" if all(checks.values()) else "failed",
+        "failure_category": "" if all(checks.values()) else "mapping_validation_mismatch",
+        "scale": inputs.scale,
+        "algorithm": inputs.algorithm,
+        "task_id": inputs.task_id,
+        "training_seed": inputs.training_seed,
+        "episode_count": len(episode_indexes),
+        "expected_episode_count": EVAL_EPISODES,
+        "expected_charger_count": expected_charger_count,
+        "expected_transformer_count": expected_transformer_count,
+        "charger_row_count": len(charger_rows),
+        "transformer_row_count": len(transformer_rows),
+        "checks": checks,
+    }
+
+
+def _episode_rows_by_index(
+    rows: list[dict[str, str]],
+    label: str,
+) -> dict[int, dict[str, str]]:
+    by_index: dict[int, dict[str, str]] = {}
+    for row in rows:
+        if row.get("row_type", "episode") != "episode":
+            continue
+        episode_index = _exact_integer(row.get("episode_index"), "episode_index")
+        if episode_index in by_index:
+            raise ValueError(f"{label} duplicate episode index: {episode_index}")
+        by_index[episode_index] = row
+    missing = sorted(set(range(EVAL_EPISODES)) - set(by_index))
+    if missing:
+        raise ValueError(f"{label} missing episode index(es): {missing}")
+    return by_index
+
+
+def load_seed_reconciliation_inputs(
+    *,
+    diagnostic_dir: Path,
+    historical_canonical_csv: Path,
+    validation_dir: Path,
+    task_id: int,
+    training_seed: int,
+    require_historical: bool = True,
+    formal_validation_json: Path | None = None,
+    stage_d_source_commit_sha: str = "",
+    config_path: Path | None = None,
+    checkpoint_prefix: Path | None = None,
+) -> SeedReconciliationInputs:
+    task = stage_d_task(task_id)
+    scale = str(task["scale"])
+    algorithm = str(task["algorithm"])
+    diagnostic_root = Path(diagnostic_dir)
+    Path(validation_dir)
+    _, diagnostic_rows = _read_csv(diagnostic_root / "episode_diagnostics.csv")
+    _, transformer_rows = _read_csv(diagnostic_root / "transformer_diagnostics.csv")
+    _, charger_rows = _read_csv(diagnostic_root / "charger_diagnostics.csv")
+    _, same_pass_rows = _read_csv(diagnostic_root / SAME_PASS_CANONICAL_FILENAME)
+    historical_rows: list[dict[str, str]] = []
+    if require_historical:
+        _, historical_rows = _read_csv(Path(historical_canonical_csv))
+    formal_validation = (
+        _read_json_object(Path(formal_validation_json), "formal package validation")
+        if formal_validation_json is not None
+        else {}
+    )
+    if require_historical and (config_path is None or checkpoint_prefix is None):
+        raise ValueError("formal provenance inputs are required")
+    if config_path is not None and not Path(config_path).is_file():
+        raise ValueError(f"missing staged config path: {config_path}")
+    if checkpoint_prefix is not None:
+        for basename in (
+            "model.best_actor",
+            "model.best_actor_optimizer",
+            "model.best_critic",
+            "model.best_critic_optimizer",
+            "kwargs.yaml",
+        ):
+            candidate = Path(checkpoint_prefix).parent / basename
+            if not candidate.is_file():
+                raise ValueError(f"missing staged checkpoint member: {candidate}")
+    return SeedReconciliationInputs(
+        diagnostic_rows=diagnostic_rows,
+        transformer_rows=transformer_rows,
+        charger_rows=charger_rows,
+        historical_canonical_rows=historical_rows,
+        same_pass_canonical_rows=same_pass_rows,
+        formal_validation=formal_validation,
+        scale=scale,
+        algorithm=algorithm,
+        task_id=task_id,
+        training_seed=training_seed,
+        stage_d_source_commit_sha=stage_d_source_commit_sha,
+        config_path=Path(config_path) if config_path is not None else None,
+        checkpoint_prefix=Path(checkpoint_prefix) if checkpoint_prefix is not None else None,
+    )
+
+
+def _same_pass_float_row(
+    episode_index: int,
+    canonical_field: str,
+    diagnostic_field: str,
+    comparison_type: str,
+    canonical_value: object,
+    diagnostic_value: object,
+) -> dict[str, object]:
+    expected = _finite_number(canonical_value, canonical_field)
+    observed = _finite_number(diagnostic_value, diagnostic_field)
+    absolute_difference = abs(observed - expected)
+    relative_difference = absolute_difference / max(abs(expected), 1e-12)
+    status = "pass" if observed == expected else "fail"
+    return {
+        "reconciliation_contract_version": RECONCILIATION_CONTRACT_VERSION,
+        "episode_index": episode_index,
+        "field": canonical_field,
+        "comparison_type": comparison_type,
+        "same_pass_canonical_value": expected,
+        "diagnostic_value": observed,
+        "absolute_difference": absolute_difference,
+        "relative_difference": relative_difference,
+        "same_pass_count": "",
+        "diagnostic_count": "",
+        "total_action_decision_denominator": "",
+        "status": status,
+        "failure_category": "" if status == "pass" else "same_pass_metric_mismatch",
+    }
+
+
+def _count_from_fraction(value: float, denominator: int) -> int:
+    if denominator <= 0:
+        raise ValueError(
+            "total_action_decision_denominator must be positive: "
+            f"{denominator!r}"
+        )
+    return int(
+        Decimal(str(value * denominator)).to_integral_value(
+            rounding=ROUND_HALF_UP,
+        )
+    )
+
+
+def build_same_pass_reconciliation_rows(
+    inputs: SeedReconciliationInputs,
+) -> list[dict[str, object]]:
+    diagnostic_by_index = _episode_rows_by_index(
+        inputs.diagnostic_rows,
+        "diagnostic rows",
+    )
+    same_pass_by_index = _episode_rows_by_index(
+        inputs.same_pass_canonical_rows,
+        "same-pass canonical rows",
+    )
+    rows: list[dict[str, object]] = []
+    for episode_index in range(EVAL_EPISODES):
+        diagnostic = diagnostic_by_index[episode_index]
+        same_pass = same_pass_by_index[episode_index]
+        for canonical_field, diagnostic_field, comparison_type in SAME_PASS_FIELD_MAP:
+            if comparison_type == "fraction_count_exact":
+                expected = _finite_number(
+                    same_pass.get(canonical_field),
+                    canonical_field,
+                )
+                observed = _finite_number(
+                    diagnostic.get(diagnostic_field),
+                    diagnostic_field,
+                )
+                denominator = _exact_integer(
+                    same_pass.get("total_action_decision_denominator"),
+                    "total_action_decision_denominator",
+                )
+                same_pass_count = _exact_integer(
+                    same_pass.get("same_pass_at_max_count"),
+                    "same_pass_at_max_count",
+                )
+                diagnostic_count = _count_from_fraction(observed, denominator)
+                absolute_difference = abs(observed - expected)
+                relative_difference = absolute_difference / max(abs(expected), 1e-12)
+                status = (
+                    "pass"
+                    if expected == observed and same_pass_count == diagnostic_count
+                    else "fail"
+                )
+                rows.append({
+                    "reconciliation_contract_version": RECONCILIATION_CONTRACT_VERSION,
+                    "episode_index": episode_index,
+                    "field": canonical_field,
+                    "comparison_type": comparison_type,
+                    "same_pass_canonical_value": expected,
+                    "diagnostic_value": observed,
+                    "absolute_difference": absolute_difference,
+                    "relative_difference": relative_difference,
+                    "same_pass_count": same_pass_count,
+                    "diagnostic_count": diagnostic_count,
+                    "total_action_decision_denominator": denominator,
+                    "status": status,
+                    "failure_category": (
+                        ""
+                        if status == "pass"
+                        else "same_pass_metric_mismatch"
+                    ),
+                })
+            else:
+                rows.append(
+                    _same_pass_float_row(
+                        episode_index,
+                        canonical_field,
+                        diagnostic_field,
+                        comparison_type,
+                        same_pass.get(canonical_field),
+                        diagnostic.get(diagnostic_field),
+                    )
+                )
     return rows
+
+
+def _historical_base_row(
+    inputs: SeedReconciliationInputs,
+    episode_index: int | str,
+    episode_seed_value: object,
+    field: str,
+) -> dict[str, object]:
+    return {
+        "reconciliation_contract_version": RECONCILIATION_CONTRACT_VERSION,
+        "scale": inputs.scale,
+        "algorithm": inputs.algorithm,
+        "training_seed": inputs.training_seed,
+        "formal_task_id": formal_task_id(inputs.task_id, inputs.training_seed),
+        "episode_index": episode_index,
+        "episode_seed": episode_seed_value,
+        "field": field,
+        "historical_source_label": "formal_job_58513929_canonical_eval30",
+        "stage_d_source_label": "stage_d_same_pass_canonical_eval30",
+        "historical_value": "",
+        "stage_d_same_pass_value": "",
+        "absolute_difference": "",
+        "relative_difference": "",
+        "classification": "",
+        "historical_at_max_count": "",
+        "stage_d_at_max_count": "",
+        "total_action_decision_denominator": "",
+        "count_difference": "",
+        "fraction_difference": "",
+    }
+
+
+def _identity_classification(
+    historical: object,
+    stage_d: object,
+    value_type: str,
+    field: str,
+) -> tuple[str, str, str]:
+    try:
+        if value_type == "integer":
+            historical_value: object = _exact_integer(historical, field)
+            stage_d_value: object = _exact_integer(stage_d, field)
+        elif value_type == "boolean":
+            historical_value = _parse_bool(historical, field)
+            stage_d_value = _parse_bool(stage_d, field)
+        else:
+            historical_value = str(historical)
+            stage_d_value = str(stage_d)
+    except ValueError:
+        return str(historical), str(stage_d), "historical_identity_mismatch"
+    classification = (
+        "historical_identity_match"
+        if historical_value == stage_d_value
+        else "historical_identity_mismatch"
+    )
+    return str(historical_value), str(stage_d_value), classification
+
+
+def _checkpoint_member_path(checkpoint_prefix: Path, basename: str) -> Path:
+    if basename == "kwargs.yaml":
+        return checkpoint_prefix.parent / "kwargs.yaml"
+    return checkpoint_prefix.parent / basename
+
+
+def _provenance_row(
+    field: str,
+    expected: object,
+    observed: object,
+    matches: bool,
+) -> dict[str, object]:
+    return {
+        "reconciliation_contract_version": RECONCILIATION_CONTRACT_VERSION,
+        "scale": "",
+        "algorithm": "",
+        "training_seed": "",
+        "formal_task_id": "",
+        "episode_index": "",
+        "episode_seed": "",
+        "field": field,
+        "historical_source_label": "formal_job_58513929_package_validation",
+        "stage_d_source_label": "stage_d_runtime_metadata",
+        "historical_value": str(expected),
+        "stage_d_same_pass_value": str(observed),
+        "absolute_difference": "",
+        "relative_difference": "",
+        "classification": (
+            "historical_identity_match"
+            if matches
+            else "historical_identity_mismatch"
+        ),
+        "historical_at_max_count": "",
+        "stage_d_at_max_count": "",
+        "total_action_decision_denominator": "",
+        "count_difference": "",
+        "fraction_difference": "",
+    }
+
+
+def build_historical_provenance_identity_rows(
+    inputs: SeedReconciliationInputs,
+) -> list[dict[str, object]]:
+    formal_validation = inputs.formal_validation
+    if not formal_validation:
+        raise ValueError(
+            "input_contract_mismatch: missing formal package validation"
+        )
+    if inputs.config_path is None or inputs.checkpoint_prefix is None:
+        raise ValueError(
+            "input_contract_mismatch: missing staged config or checkpoint path"
+        )
+
+    observed_config_sha256 = sha256_file(inputs.config_path)
+    checkpoint_basenames = (
+        "model.best_actor",
+        "model.best_actor_optimizer",
+        "model.best_critic",
+        "model.best_critic_optimizer",
+        "kwargs.yaml",
+    )
+    observed_checkpoint_sha256 = {
+        basename: sha256_file(_checkpoint_member_path(inputs.checkpoint_prefix, basename))
+        for basename in checkpoint_basenames
+    }
+    expected_checkpoint_sha256 = formal_validation.get("checkpoint_member_sha256")
+    if not isinstance(expected_checkpoint_sha256, dict):
+        raise ValueError(
+            "input_contract_mismatch: formal checkpoint digests missing"
+        )
+
+    source_commit_is_valid = bool(
+        re.fullmatch(r"[0-9a-f]{40}", inputs.stage_d_source_commit_sha)
+    )
+    rows = [
+        _provenance_row(
+            "formal_job_id",
+            FORMAL_JOB_ID,
+            formal_validation.get("formal_job_id"),
+            formal_validation.get("formal_job_id") == FORMAL_JOB_ID,
+        ),
+        _provenance_row(
+            "task_id",
+            inputs.task_id,
+            formal_validation.get("task_id"),
+            formal_validation.get("task_id") == inputs.task_id,
+        ),
+        _provenance_row(
+            "formal_task_id",
+            formal_task_id(inputs.task_id, inputs.training_seed),
+            formal_validation.get("formal_task_id"),
+            formal_validation.get("formal_task_id")
+            == formal_task_id(inputs.task_id, inputs.training_seed),
+        ),
+        _provenance_row(
+            "scale",
+            inputs.scale,
+            formal_validation.get("scale"),
+            formal_validation.get("scale") == inputs.scale,
+        ),
+        _provenance_row(
+            "algorithm",
+            inputs.algorithm,
+            formal_validation.get("algorithm"),
+            formal_validation.get("algorithm") == inputs.algorithm,
+        ),
+        _provenance_row(
+            "training_seed",
+            inputs.training_seed,
+            formal_validation.get("training_seed"),
+            formal_validation.get("training_seed") == inputs.training_seed,
+        ),
+        _provenance_row(
+            "stage_d_source_commit_sha",
+            "40 lowercase hex",
+            inputs.stage_d_source_commit_sha,
+            source_commit_is_valid,
+        ),
+        _provenance_row(
+            "config_sha256",
+            formal_validation.get("config_sha256"),
+            observed_config_sha256,
+            formal_validation.get("config_sha256") == observed_config_sha256,
+        ),
+    ]
+    for basename in checkpoint_basenames:
+        rows.append(
+            _provenance_row(
+                f"checkpoint_member_sha256:{basename}",
+                expected_checkpoint_sha256.get(basename),
+                observed_checkpoint_sha256[basename],
+                expected_checkpoint_sha256.get(basename)
+                == observed_checkpoint_sha256[basename],
+            )
+        )
+    return rows
+
+
+def reconstruct_saturation_count(
+    fraction_text: str,
+    denominator: int,
+) -> tuple[int | None, Decimal, bool]:
+    if denominator <= 0:
+        return None, Decimal("Infinity"), False
+    try:
+        fraction = Decimal(str(fraction_text))
+    except InvalidOperation:
+        return None, Decimal("Infinity"), False
+    product = fraction * Decimal(int(denominator))
+    nearest_count = int(product.to_integral_value(rounding=ROUND_HALF_UP))
+    residual = abs(product - Decimal(nearest_count))
+    if nearest_count < 0 or nearest_count > denominator:
+        return None, residual, False
+    if residual >= SATURATION_RECONSTRUCTION_RESIDUAL_LIMIT:
+        return None, residual, False
+    return nearest_count, residual, True
+
+
+def build_historical_canonical_drift_rows(
+    inputs: SeedReconciliationInputs,
+) -> list[dict[str, object]]:
+    historical_by_index = _episode_rows_by_index(
+        inputs.historical_canonical_rows,
+        "historical canonical rows",
+    )
+    same_pass_by_index = _episode_rows_by_index(
+        inputs.same_pass_canonical_rows,
+        "same-pass canonical rows",
+    )
+    rows: list[dict[str, object]] = build_historical_provenance_identity_rows(inputs)
+    for episode_index in range(EVAL_EPISODES):
+        historical = historical_by_index[episode_index]
+        stage_d = same_pass_by_index[episode_index]
+        episode_seed_value = stage_d.get("episode_seed", "")
+        for field, historical_field, stage_d_field, value_type in HISTORICAL_IDENTITY_FIELDS:
+            historical_value, stage_d_value, classification = _identity_classification(
+                historical.get(historical_field, ""),
+                stage_d.get(stage_d_field, ""),
+                value_type,
+                field,
+            )
+            row = _historical_base_row(
+                inputs,
+                episode_index,
+                episode_seed_value,
+                field,
+            )
+            row.update({
+                "historical_value": historical_value,
+                "stage_d_same_pass_value": stage_d_value,
+                "classification": classification,
+            })
+            rows.append(row)
+        for historical_field, stage_d_field in HISTORICAL_FLOAT_FIELDS:
+            row = _historical_base_row(
+                inputs,
+                episode_index,
+                episode_seed_value,
+                historical_field,
+            )
+            try:
+                if historical_field == "action_fraction_at_max":
+                    denominator = _exact_integer(
+                        stage_d.get("total_action_decision_denominator"),
+                        "total_action_decision_denominator",
+                    )
+                    stage_d_count = _exact_integer(
+                        stage_d.get("same_pass_at_max_count"),
+                        "same_pass_at_max_count",
+                    )
+                    historical_count, _residual, comparable = (
+                        reconstruct_saturation_count(
+                            str(historical.get(historical_field, "")),
+                            denominator,
+                        )
+                    )
+                    if not comparable or historical_count is None:
+                        row.update({
+                            "historical_value": historical.get(historical_field, ""),
+                            "stage_d_same_pass_value": stage_d.get(stage_d_field, ""),
+                            "classification": "not_comparable",
+                            "stage_d_at_max_count": stage_d_count,
+                            "total_action_decision_denominator": denominator,
+                        })
+                        rows.append(row)
+                        continue
+                    historical_value = _finite_number(
+                        historical.get(historical_field),
+                        historical_field,
+                    )
+                    stage_d_value = _finite_number(
+                        stage_d.get(stage_d_field),
+                        stage_d_field,
+                    )
+                    count_difference = int(stage_d_count - historical_count)
+                    fraction_difference = float(stage_d_value - historical_value)
+                    if count_difference != 0:
+                        classification = "historical_saturation_count_drift"
+                    elif stage_d_value == historical_value:
+                        classification = "exact_match"
+                    else:
+                        classification = "historical_float_drift"
+                    row.update({
+                        "historical_value": historical_value,
+                        "stage_d_same_pass_value": stage_d_value,
+                        "absolute_difference": abs(stage_d_value - historical_value),
+                        "relative_difference": abs(stage_d_value - historical_value)
+                        / max(abs(historical_value), 1e-12),
+                        "classification": classification,
+                        "historical_at_max_count": historical_count,
+                        "stage_d_at_max_count": stage_d_count,
+                        "total_action_decision_denominator": denominator,
+                        "count_difference": count_difference,
+                        "fraction_difference": fraction_difference,
+                    })
+                    rows.append(row)
+                    continue
+                historical_value = _finite_number(
+                    historical.get(historical_field),
+                    historical_field,
+                )
+                stage_d_value = _finite_number(
+                    stage_d.get(stage_d_field),
+                    stage_d_field,
+                )
+            except ValueError:
+                row.update({
+                    "historical_value": historical.get(historical_field, ""),
+                    "stage_d_same_pass_value": stage_d.get(stage_d_field, ""),
+                    "classification": "not_comparable",
+                })
+                rows.append(row)
+                continue
+            absolute_difference = abs(stage_d_value - historical_value)
+            relative_difference = absolute_difference / max(
+                abs(historical_value),
+                1e-12,
+            )
+            row.update({
+                "historical_value": historical_value,
+                "stage_d_same_pass_value": stage_d_value,
+                "absolute_difference": absolute_difference,
+                "relative_difference": relative_difference,
+                "classification": (
+                    "exact_match"
+                    if stage_d_value == historical_value
+                    else "historical_float_drift"
+                ),
+            })
+            rows.append(row)
+    canonical_identity_fields_with_mismatch = {
+        row["field"]
+        for row in rows
+        if row.get("historical_source_label")
+        == "formal_job_58513929_canonical_eval30"
+        and row.get("classification") == "historical_identity_mismatch"
+        and row.get("field")
+        in {field for field, _historical, _stage_d, _kind in HISTORICAL_IDENTITY_FIELDS}
+    }
+    if canonical_identity_fields_with_mismatch:
+        for row in rows:
+            if (
+                row.get("historical_source_label")
+                == "formal_job_58513929_canonical_eval30"
+                and row.get("field") in canonical_identity_fields_with_mismatch
+            ):
+                row["classification"] = "historical_identity_mismatch"
+    return rows
+
+
+def build_reconciliation_summary_payload(
+    *,
+    inputs: SeedReconciliationInputs,
+    same_pass_rows: list[dict[str, object]],
+    historical_rows: list[dict[str, object]],
+    service_rows: list[dict[str, object]],
+    mapping_payload: dict[str, object],
+) -> dict[str, object]:
+    same_pass_failures = sum(row["status"] != "pass" for row in same_pass_rows)
+    identity_failures = sum(
+        row["classification"] == "historical_identity_mismatch"
+        for row in historical_rows
+    )
+    service_failures = evaluate_service_reconciliation_rows(service_rows)
+    mapping_failures = 0 if mapping_payload.get("status") == "ok" else 1
+    failure_categories = []
+    if identity_failures:
+        failure_categories.append("historical_identity_mismatch")
+    if same_pass_failures:
+        failure_categories.append("same_pass_metric_mismatch")
+    if service_failures:
+        failure_categories.append("service_reconciliation_mismatch")
+    if mapping_failures:
+        failure_categories.append("mapping_validation_mismatch")
+    hard_failure_count = (
+        identity_failures
+        + same_pass_failures
+        + service_failures
+        + mapping_failures
+    )
+    return {
+        "reconciliation_contract_version": RECONCILIATION_CONTRACT_VERSION,
+        "stage_d_source_commit_sha": inputs.stage_d_source_commit_sha,
+        "status": "ok" if hard_failure_count == 0 else "failed",
+        "hard_gate_status": "pass" if hard_failure_count == 0 else "fail",
+        "historical_identity_status": "pass" if identity_failures == 0 else "fail",
+        "same_pass_metric_status": "pass" if same_pass_failures == 0 else "fail",
+        "service_reconciliation_status": (
+            "pass" if service_failures == 0 else "fail"
+        ),
+        "mapping_validation_status": "pass" if mapping_failures == 0 else "fail",
+        "historical_drift_audit_status": "written",
+        "evidence_write_status": "complete",
+        "failure_categories": failure_categories,
+        "hard_failure_count": hard_failure_count,
+        "historical_identity_failure_count": identity_failures,
+        "same_pass_metric_failure_count": same_pass_failures,
+        "service_reconciliation_failure_count": service_failures,
+        "mapping_validation_failure_count": mapping_failures,
+        "same_pass_canonical_rows": EVAL_EPISODES + 1,
+        "same_pass_reconciliation_rows": len(same_pass_rows),
+        "historical_drift_rows": len(historical_rows),
+        "historical_float_drift_count": sum(
+            row["classification"] == "historical_float_drift"
+            for row in historical_rows
+        ),
+        "historical_saturation_count_drift_count": sum(
+            row["classification"] == "historical_saturation_count_drift"
+            for row in historical_rows
+        ),
+        "service_reconciliation_rows": len(service_rows),
+        "mapping_validation_present": True,
+        "source_labels": {
+            "historical_source_label": "formal_job_58513929_canonical_eval30",
+            "stage_d_source_label": "stage_d_same_pass_canonical_eval30",
+        },
+    }
+
+
+def raise_reconciliation_contract_error(failure_categories: list[str]) -> None:
+    if failure_categories:
+        raise ValueError(
+            "Stage D reconciliation contract failed: "
+            + ",".join(failure_categories)
+        )
 
 
 def _canonical_exact_values(
@@ -1619,115 +2745,65 @@ def _canonical_float_row(
 def prepare_seed_validation_files(
     *,
     diagnostic_dir: Path,
-    canonical_csv: Path,
+    historical_canonical_csv: Path,
     validation_dir: Path,
+    runtime_metadata_dir: Path,
     task_id: int,
     training_seed: int,
+    formal_validation_json: Path | None = None,
+    stage_d_source_commit_sha: str = "",
+    config_path: Path | None = None,
+    checkpoint_prefix: Path | None = None,
 ) -> dict[str, object]:
-    task = stage_d_task(task_id)
-    scale = str(task["scale"])
-    algorithm = str(task["algorithm"])
     validation_dir = Path(validation_dir)
-    validation_dir.mkdir(parents=True, exist_ok=True)
+    runtime_metadata_dir = Path(runtime_metadata_dir)
+    try:
+        inputs = load_seed_reconciliation_inputs(
+            diagnostic_dir=diagnostic_dir,
+            historical_canonical_csv=historical_canonical_csv,
+            validation_dir=validation_dir,
+            task_id=task_id,
+            training_seed=training_seed,
+            formal_validation_json=formal_validation_json,
+            stage_d_source_commit_sha=stage_d_source_commit_sha,
+            config_path=config_path,
+            checkpoint_prefix=checkpoint_prefix,
+        )
+        same_pass_rows = build_same_pass_reconciliation_rows(inputs)
+        historical_rows = build_historical_canonical_drift_rows(inputs)
+        service_rows = build_service_reconciliation_rows(
+            inputs.diagnostic_rows,
+            inputs.transformer_rows,
+            inputs.charger_rows,
+        )
+        mapping_payload = build_mapping_validation_payload(
+            inputs,
+            inputs.transformer_rows,
+            inputs.charger_rows,
+        )
+        summary_payload = build_reconciliation_summary_payload(
+            inputs=inputs,
+            same_pass_rows=same_pass_rows,
+            historical_rows=historical_rows,
+            service_rows=service_rows,
+            mapping_payload=mapping_payload,
+        )
+    except ValueError as exc:
+        if str(exc).startswith("input_contract_mismatch:"):
+            raise
+        raise ValueError(f"input_contract_mismatch: {exc}") from exc
 
-    diagnostic_root = Path(diagnostic_dir)
-    _, diagnostic_rows = _read_csv(diagnostic_root / "episode_diagnostics.csv")
-    transformer_fields, transformer_rows = _read_csv(
-        diagnostic_root / "transformer_diagnostics.csv"
+    atomic_write_csv_rows(
+        validation_dir / SAME_PASS_RECONCILIATION_FILENAME,
+        SAME_PASS_RECONCILIATION_COLUMNS,
+        same_pass_rows,
     )
-    charger_fields, charger_rows = _read_csv(diagnostic_root / "charger_diagnostics.csv")
-    canonical_fields, canonical_rows = _read_csv(Path(canonical_csv))
-    canonical_by_index = {
-        _exact_integer(row.get("episode_index"), "episode_index"): row
-        for row in canonical_rows
-        if row.get("row_type", "episode") == "episode"
-    }
-    if len(canonical_by_index) < EVAL_EPISODES:
-        raise ValueError("canonical eval30 CSV does not contain 30 episode rows")
-
-    reconciliation_rows: list[dict[str, object]] = []
-    for diagnostic in diagnostic_rows:
-        episode_index = _exact_integer(diagnostic.get("episode_index"), "episode_index")
-        canonical = canonical_by_index.get(episode_index)
-        if canonical is None:
-            raise ValueError(f"missing canonical episode row: {episode_index}")
-        for field, canonical_field, diagnostic_field, value_type in CANONICAL_EXACT_RECONCILIATION:
-            expected, observed, status = _canonical_exact_values(
-                canonical,
-                diagnostic,
-                canonical_field,
-                diagnostic_field,
-                value_type,
-            )
-            reconciliation_rows.append(
-                {
-                    "episode_index": episode_index,
-                    "field": field,
-                    "comparison_type": "exact",
-                    "canonical_value": expected,
-                    "diagnostic_value": observed,
-                    "absolute_difference": "",
-                    "relative_difference": "",
-                    "absolute_tolerance": "0",
-                    "relative_tolerance": "0",
-                    "status": status,
-                }
-            )
-        for diagnostic_field, canonical_field, absolute_tolerance, relative_tolerance in CANONICAL_FLOAT_RECONCILIATION:
-            reconciliation_rows.append(
-                _canonical_float_row(
-                    episode_index,
-                    diagnostic_field,
-                    canonical.get(canonical_field, ""),
-                    diagnostic.get(diagnostic_field, ""),
-                    absolute_tolerance,
-                    relative_tolerance,
-                )
-            )
-    if any(row["status"] != "pass" for row in reconciliation_rows):
-        raise ValueError("canonical reconciliation failed")
-    write_csv_rows(
-        validation_dir / "canonical_reconciliation.csv",
-        [
-            "episode_index",
-            "field",
-            "comparison_type",
-            "canonical_value",
-            "diagnostic_value",
-            "absolute_difference",
-            "relative_difference",
-            "absolute_tolerance",
-            "relative_tolerance",
-            "status",
-        ],
-        reconciliation_rows,
+    atomic_write_csv_rows(
+        validation_dir / HISTORICAL_DRIFT_FILENAME,
+        HISTORICAL_DRIFT_COLUMNS,
+        historical_rows,
     )
-
-    expected_chargers, expected_transformers = TOPOLOGY[scale]
-    _validate_infrastructure_rows(
-        transformer_rows,
-        transformer_fields,
-        scale=scale,
-        algorithm=algorithm,
-        training_seed=training_seed,
-        infrastructure_label="transformer diagnostics",
-        expected_rows_per_episode=expected_transformers,
-    )
-    _validate_infrastructure_rows(
-        charger_rows,
-        charger_fields,
-        scale=scale,
-        algorithm=algorithm,
-        training_seed=training_seed,
-        infrastructure_label="charger diagnostics",
-        expected_rows_per_episode=expected_chargers,
-    )
-    service_rows = service_reconciliation_rows(
-        diagnostic_rows,
-        transformer_rows,
-        charger_rows,
-    )
-    write_csv_rows(
+    atomic_write_csv_rows(
         validation_dir / "service_reconciliation.csv",
         [
             "episode_index",
@@ -1747,34 +2823,19 @@ def prepare_seed_validation_files(
         ],
         service_rows,
     )
-    episode_keys = sorted(
-        _exact_integer(row.get("episode_index"), "episode_index")
-        for row in diagnostic_rows
+    atomic_write_json(validation_dir / "mapping_validation.json", mapping_payload)
+    atomic_write_json(
+        runtime_metadata_dir / RECONCILIATION_SUMMARY_FILENAME,
+        summary_payload,
     )
-    (validation_dir / "mapping_validation.json").write_text(
-        json.dumps(
-            {
-                "status": "ok",
-                "scale": scale,
-                "algorithm": algorithm,
-                "training_seed": training_seed,
-                "episode_count": len(diagnostic_rows),
-                "transformer_row_count": len(transformer_rows),
-                "charger_row_count": len(charger_rows),
-                "expected_transformer_rows": expected_transformers * EVAL_EPISODES,
-                "expected_charger_rows": expected_chargers * EVAL_EPISODES,
-                "episode_indices": episode_keys,
-                "diagnostic_schema_version": SCHEMA_VERSION,
-            },
-            sort_keys=True,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
+    raise_reconciliation_contract_error(summary_payload["failure_categories"])
     return {
         "status": "ok",
-        "canonical_reconciliation_rows": len(reconciliation_rows),
+        "reconciliation_contract_version": RECONCILIATION_CONTRACT_VERSION,
+        "same_pass_reconciliation_rows": len(same_pass_rows),
+        "historical_drift_rows": len(historical_rows),
         "service_reconciliation_rows": len(service_rows),
+        "hard_gate_status": summary_payload["hard_gate_status"],
     }
 
 
@@ -1786,13 +2847,35 @@ def csv_text(rows: list[dict[str, object]], fieldnames: list[str] | tuple[str, .
     return output.getvalue()
 
 
+def atomic_write_text(path: Path, text: str) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}.{time.time_ns()}")
+    try:
+        temp_path.write_text(text, encoding="utf-8")
+        os.replace(temp_path, path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def atomic_write_csv_rows(
+    path: Path,
+    fieldnames: list[str] | tuple[str, ...],
+    rows: list[dict[str, object]],
+) -> None:
+    atomic_write_text(Path(path), csv_text(rows, fieldnames))
+
+
+def atomic_write_json(path: Path, payload: dict[str, object]) -> None:
+    atomic_write_text(Path(path), json.dumps(payload, sort_keys=True) + "\n")
+
+
 def write_csv_rows(
     path: Path,
     fieldnames: list[str] | tuple[str, ...],
     rows: list[dict[str, object]],
 ) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(csv_text(rows, fieldnames), encoding="utf-8")
+    atomic_write_csv_rows(path, fieldnames, rows)
 
 
 def _copy_required_seed_files(task_root: Path, staging_root: Path) -> None:
@@ -1826,6 +2909,7 @@ def _write_task_package_metadata(
         "formal_task_ids": [formal_task_id(task_id, seed) for seed in TRAINING_SEEDS],
         "eval_episodes_per_seed": EVAL_EPISODES,
         "diagnostic_schema_version": SCHEMA_VERSION,
+        "reconciliation_contract_version": RECONCILIATION_CONTRACT_VERSION,
     }
     (staging_root / "task_metadata").mkdir(parents=True, exist_ok=True)
     (staging_root / "task_metadata" / "task.json").write_text(
@@ -1919,6 +3003,7 @@ def _write_task_package_metadata(
         "checkpoint_groups": len(TRAINING_SEEDS),
         "episode_count": len(TRAINING_SEEDS) * EVAL_EPISODES,
         "diagnostic_schema_version": SCHEMA_VERSION,
+        "reconciliation_contract_version": RECONCILIATION_CONTRACT_VERSION,
     }
     (staging_root / "validation").mkdir(parents=True, exist_ok=True)
     (staging_root / "validation" / "task_validation.json").write_text(
@@ -2064,7 +3149,9 @@ COMPLETE_REQUIRED_FILES: Final[tuple[str, ...]] = (
     "summaries/checkpoint_inventory.csv",
     "summaries/episode_inventory.csv",
     "summaries/runtime_summary.csv",
-    "summaries/canonical_reconciliation_summary.csv",
+    "summaries/same_pass_canonical_reconciliation_summary.csv",
+    "summaries/historical_canonical_drift_summary.csv",
+    "summaries/reconciliation_summary_inventory.csv",
     "summaries/service_reconciliation_summary.csv",
     "summaries/source_provenance_summary.csv",
     "summaries/warning_inventory.csv",
@@ -2308,37 +3395,93 @@ def _read_task_package_details(
     safe_extract_tar(package_path, task_extract)
     _, checkpoint_rows = _read_csv(task_extract / "summaries" / "checkpoint_inventory.csv")
     _, episode_rows = _read_csv(task_extract / "summaries" / "episode_inventory.csv")
-    canonical_rows: list[dict[str, str]] = []
+    same_pass_rows: list[dict[str, str]] = []
+    historical_drift_rows: list[dict[str, str]] = []
+    reconciliation_summary_rows: list[dict[str, str]] = []
     service_rows: list[dict[str, str]] = []
     for seed in TRAINING_SEEDS:
         seed_root = task_extract / f"seed{seed}"
-        _, canonical = _read_csv(seed_root / "validation" / "canonical_reconciliation.csv")
+        _, same_pass = _read_csv(
+            seed_root / "validation" / SAME_PASS_RECONCILIATION_FILENAME
+        )
+        _, historical_drift = _read_csv(
+            seed_root / "validation" / HISTORICAL_DRIFT_FILENAME
+        )
+        reconciliation_summary = _read_json_object(
+            seed_root / "runtime_metadata" / RECONCILIATION_SUMMARY_FILENAME,
+            "reconciliation summary",
+        )
         _, service = _read_csv(seed_root / "validation" / "service_reconciliation.csv")
-        for row in canonical:
-            enriched = {
-                "task_id": str(task_id),
-                "scale": str(validation["scale"]),
-                "algorithm": str(validation["algorithm"]),
-                "training_seed": str(seed),
-                "formal_task_id": str(formal_task_id(task_id, seed)),
-            }
+        common = {
+            "task_id": str(task_id),
+            "scale": str(validation["scale"]),
+            "algorithm": str(validation["algorithm"]),
+            "training_seed": str(seed),
+            "formal_task_id": str(formal_task_id(task_id, seed)),
+        }
+        for row in same_pass:
+            enriched = dict(common)
             enriched.update(row)
-            canonical_rows.append(enriched)
-        for row in service:
-            enriched = {
+            same_pass_rows.append(enriched)
+        for row in historical_drift:
+            enriched = dict(row)
+            enriched.update(common)
+            historical_drift_rows.append(enriched)
+        reconciliation_summary_rows.append(
+            {
                 "task_id": str(task_id),
                 "scale": str(validation["scale"]),
                 "algorithm": str(validation["algorithm"]),
                 "training_seed": str(seed),
                 "formal_task_id": str(formal_task_id(task_id, seed)),
+                "reconciliation_contract_version": str(
+                    reconciliation_summary["reconciliation_contract_version"]
+                ),
+                "stage_d_source_commit_sha": str(
+                    reconciliation_summary["stage_d_source_commit_sha"]
+                ),
+                "status": str(reconciliation_summary["status"]),
+                "hard_gate_status": str(reconciliation_summary["hard_gate_status"]),
+                "historical_identity_status": str(
+                    reconciliation_summary["historical_identity_status"]
+                ),
+                "same_pass_metric_status": str(
+                    reconciliation_summary["same_pass_metric_status"]
+                ),
+                "same_pass_reconciliation_rows": str(
+                    reconciliation_summary["same_pass_reconciliation_rows"]
+                ),
+                "historical_drift_rows": str(
+                    reconciliation_summary["historical_drift_rows"]
+                ),
+                "historical_identity_failure_count": str(
+                    reconciliation_summary.get("historical_identity_failure_count", 0)
+                ),
+                "same_pass_metric_failure_count": str(
+                    reconciliation_summary.get("same_pass_metric_failure_count", 0)
+                ),
+                "historical_float_drift_count": str(
+                    reconciliation_summary.get("historical_float_drift_count", 0)
+                ),
+                "historical_saturation_count_drift_count": str(
+                    reconciliation_summary.get(
+                        "historical_saturation_count_drift_count",
+                        0,
+                    )
+                ),
             }
+        )
+        for row in service:
+            enriched = dict(common)
             enriched.update(row)
             service_rows.append(enriched)
     return {
         "validation": validation,
         "checkpoint_rows": checkpoint_rows,
         "episode_rows": episode_rows,
-        "canonical_rows": canonical_rows,
+        "same_pass_rows": same_pass_rows,
+        "historical_drift_rows": historical_drift_rows,
+        "reconciliation_summary_rows": reconciliation_summary_rows,
         "service_rows": service_rows,
     }
 
@@ -2371,6 +3514,161 @@ def write_complete_manifest(staging_root: Path) -> None:
 
 def create_complete_bundle(staging_root: Path, bundle_path: Path) -> None:
     create_tar_from_staging(staging_root, bundle_path)
+
+
+def _inventory_int_sum(rows: list[dict[str, str]], field: str) -> int:
+    return sum(_exact_integer(row.get(field), field) for row in rows)
+
+
+def _validate_complete_reconciliation_summaries(
+    root: Path,
+    expected_source_commit: str,
+) -> None:
+    same_pass_fields, same_pass_rows = _read_csv(
+        root / "summaries" / "same_pass_canonical_reconciliation_summary.csv"
+    )
+    historical_fields, historical_rows = _read_csv(
+        root / "summaries" / "historical_canonical_drift_summary.csv"
+    )
+    inventory_fields, inventory_rows = _read_csv(
+        root / "summaries" / "reconciliation_summary_inventory.csv"
+    )
+    same_pass_expected_fields = sorted(
+        {
+            "task_id",
+            "scale",
+            "algorithm",
+            "training_seed",
+            "formal_task_id",
+            *SAME_PASS_RECONCILIATION_COLUMNS,
+        }
+    )
+    historical_expected_fields = sorted({"task_id", *HISTORICAL_DRIFT_COLUMNS})
+    inventory_expected_fields = [
+        "task_id",
+        "scale",
+        "algorithm",
+        "training_seed",
+        "formal_task_id",
+        "reconciliation_contract_version",
+        "stage_d_source_commit_sha",
+        "status",
+        "hard_gate_status",
+        "historical_identity_status",
+        "same_pass_metric_status",
+        "same_pass_reconciliation_rows",
+        "historical_drift_rows",
+        "historical_identity_failure_count",
+        "same_pass_metric_failure_count",
+        "historical_float_drift_count",
+        "historical_saturation_count_drift_count",
+    ]
+    _require_exact_columns(
+        same_pass_fields,
+        same_pass_expected_fields,
+        "same-pass reconciliation summary",
+    )
+    _require_exact_columns(
+        historical_fields,
+        historical_expected_fields,
+        "historical drift summary",
+    )
+    _require_exact_columns(
+        inventory_fields,
+        inventory_expected_fields,
+        "reconciliation inventory",
+    )
+    _require_contract_version(same_pass_rows, "same-pass reconciliation summary")
+    _require_contract_version(historical_rows, "historical drift summary")
+    _require_contract_version(inventory_rows, "reconciliation inventory")
+    if len(inventory_rows) != len(STAGE_D_TASKS) * len(TRAINING_SEEDS):
+        raise ValueError("reconciliation inventory row count mismatch")
+    _require_unique_keys(
+        inventory_rows,
+        ("task_id", "training_seed"),
+        "reconciliation inventory",
+    )
+    _require_unique_keys(
+        same_pass_rows,
+        ("task_id", "training_seed", "episode_index", "field"),
+        "same-pass reconciliation summary",
+    )
+    _require_unique_keys(
+        historical_rows,
+        ("task_id", "training_seed", "episode_index", "episode_seed", "field"),
+        "historical drift summary",
+    )
+    expected_inventory_keys = {
+        (str(task_id), str(seed))
+        for task_id in STAGE_D_TASKS
+        for seed in TRAINING_SEEDS
+    }
+    observed_inventory_keys = {
+        (row["task_id"], row["training_seed"]) for row in inventory_rows
+    }
+    if observed_inventory_keys != expected_inventory_keys:
+        raise ValueError("reconciliation inventory key mismatch")
+    expected_same_pass_rows = (
+        len(STAGE_D_TASKS)
+        * len(TRAINING_SEEDS)
+        * EVAL_EPISODES
+        * len(SAME_PASS_FIELD_MAP)
+    )
+    expected_historical_rows = len(STAGE_D_TASKS) * len(TRAINING_SEEDS) * (
+        len(PROVENANCE_IDENTITY_FIELDS)
+        + EVAL_EPISODES * (len(HISTORICAL_IDENTITY_FIELDS) + len(HISTORICAL_FLOAT_FIELDS))
+    )
+    if len(same_pass_rows) != expected_same_pass_rows:
+        raise ValueError("same-pass reconciliation summary row count mismatch")
+    if len(historical_rows) != expected_historical_rows:
+        raise ValueError("historical drift summary row count mismatch")
+    if any(row.get("status") != "pass" for row in same_pass_rows):
+        raise ValueError("same-pass reconciliation summary status mismatch")
+    if any(
+        row.get("status") != "ok" or row.get("hard_gate_status") != "pass"
+        for row in inventory_rows
+    ):
+        raise ValueError("reconciliation inventory hard gate mismatch")
+    source_commits = {row["stage_d_source_commit_sha"] for row in inventory_rows}
+    if (
+        source_commits != {expected_source_commit}
+        or not PACKAGE_HEX_SHA1.fullmatch(expected_source_commit)
+    ):
+        raise ValueError("Stage D source commit mismatch")
+    inventory_same_pass_total = _inventory_int_sum(
+        inventory_rows,
+        "same_pass_reconciliation_rows",
+    )
+    inventory_historical_total = _inventory_int_sum(
+        inventory_rows,
+        "historical_drift_rows",
+    )
+    if inventory_same_pass_total != len(same_pass_rows):
+        raise ValueError("inventory count mismatch for same-pass reconciliation rows")
+    if inventory_historical_total != len(historical_rows):
+        raise ValueError("inventory count mismatch for historical drift rows")
+    if _inventory_int_sum(inventory_rows, "same_pass_metric_failure_count") != sum(
+        row.get("status") != "pass" for row in same_pass_rows
+    ):
+        raise ValueError("inventory count mismatch for same-pass failures")
+    historical_counts = collections.Counter(
+        row["classification"] for row in historical_rows
+    )
+    if (
+        _inventory_int_sum(inventory_rows, "historical_identity_failure_count")
+        != historical_counts["historical_identity_mismatch"]
+    ):
+        raise ValueError("inventory count mismatch for historical identity failures")
+    if (
+        _inventory_int_sum(inventory_rows, "historical_float_drift_count")
+        != historical_counts["historical_float_drift"]
+    ):
+        raise ValueError("inventory count mismatch for historical float drift")
+    if (
+        _inventory_int_sum(inventory_rows, "historical_saturation_count_drift_count")
+        != historical_counts["historical_saturation_count_drift"]
+    ):
+        raise ValueError("inventory count mismatch for historical saturation drift")
 
 
 def validate_complete_bundle_file(bundle_path: Path) -> dict[str, object]:
@@ -2413,11 +3711,6 @@ def validate_complete_bundle_file(bundle_path: Path) -> dict[str, object]:
         )
         if listed != sorted(regular_names):
             raise ValueError("complete_file_list.txt does not exactly match bundle members")
-        _validate_named_manifest(
-            extract_root,
-            "runtime_metadata/complete_file_checksums.sha256",
-            regular_names,
-        )
         for stderr_member in stderr_logs:
             if (extract_root / stderr_member).read_bytes():
                 raise ValueError(f"complete bundle stderr log must be empty: {stderr_member}")
@@ -2435,6 +3728,7 @@ def validate_complete_bundle_file(bundle_path: Path) -> dict[str, object]:
             "episode_count": 1200,
             "formal_job_id": FORMAL_JOB_ID,
             "schema_version": SCHEMA_VERSION,
+            "reconciliation_contract_version": RECONCILIATION_CONTRACT_VERSION,
         }
         for field, value in expected.items():
             if validation.get(field) != value:
@@ -2450,6 +3744,18 @@ def validate_complete_bundle_file(bundle_path: Path) -> dict[str, object]:
         _, task_rows = _read_csv(extract_root / "summaries" / "task_inventory.csv")
         if len(task_rows) != 8:
             raise ValueError("task inventory must contain exactly 8 rows")
+        expected_source_commit = (
+            extract_root / "runtime_metadata" / "source_commit_sha.txt"
+        ).read_text(encoding="utf-8").strip()
+        _validate_complete_reconciliation_summaries(
+            extract_root,
+            expected_source_commit,
+        )
+        _validate_named_manifest(
+            extract_root,
+            "runtime_metadata/complete_file_checksums.sha256",
+            regular_names,
+        )
         for task_id in sorted(STAGE_D_TASKS):
             expected_name = f"task_packages/{task_package_name(task_id, validation['array_job_id'])}"
             if expected_name not in regular_names:
@@ -2464,6 +3770,7 @@ def validate_complete_bundle_file(bundle_path: Path) -> dict[str, object]:
         "episode_count": 1200,
         "formal_job_id": FORMAL_JOB_ID,
         "schema_version": SCHEMA_VERSION,
+        "reconciliation_contract_version": RECONCILIATION_CONTRACT_VERSION,
     }
 
 
@@ -2529,7 +3836,9 @@ def reduce_complete_workflow(args) -> dict[str, object]:
     task_inventory_rows: list[dict[str, object]] = []
     checkpoint_rows: list[dict[str, object]] = []
     episode_rows: list[dict[str, object]] = []
-    canonical_rows: list[dict[str, object]] = []
+    same_pass_rows: list[dict[str, object]] = []
+    historical_drift_rows: list[dict[str, object]] = []
+    reconciliation_summary_rows: list[dict[str, object]] = []
     service_rows: list[dict[str, object]] = []
     source_rows: list[dict[str, object]] = []
     with tempfile.TemporaryDirectory(prefix="stage_d_reduce_tasks_") as temporary:
@@ -2561,7 +3870,9 @@ def reduce_complete_workflow(args) -> dict[str, object]:
             )
             checkpoint_rows.extend(details["checkpoint_rows"])
             episode_rows.extend(details["episode_rows"])
-            canonical_rows.extend(details["canonical_rows"])
+            same_pass_rows.extend(details["same_pass_rows"])
+            historical_drift_rows.extend(details["historical_drift_rows"])
+            reconciliation_summary_rows.extend(details["reconciliation_summary_rows"])
             service_rows.extend(details["service_rows"])
             source_rows.append(
                 {
@@ -2626,12 +3937,44 @@ def reduce_complete_workflow(args) -> dict[str, object]:
         COMPLETE_RUNTIME_SUMMARY_FIELDS,
         runtime_rows,
     )
-    canonical_fields = sorted({field for row in canonical_rows for field in row})
+    same_pass_fields = sorted({field for row in same_pass_rows for field in row})
+    historical_drift_fields = sorted(
+        {field for row in historical_drift_rows for field in row}
+    )
+    reconciliation_inventory_fields = [
+        "task_id",
+        "scale",
+        "algorithm",
+        "training_seed",
+        "formal_task_id",
+        "reconciliation_contract_version",
+        "stage_d_source_commit_sha",
+        "status",
+        "hard_gate_status",
+        "historical_identity_status",
+        "same_pass_metric_status",
+        "same_pass_reconciliation_rows",
+        "historical_drift_rows",
+        "historical_identity_failure_count",
+        "same_pass_metric_failure_count",
+        "historical_float_drift_count",
+        "historical_saturation_count_drift_count",
+    ]
     service_fields = sorted({field for row in service_rows for field in row})
     write_csv_rows(
-        staging_root / "summaries" / "canonical_reconciliation_summary.csv",
-        canonical_fields,
-        canonical_rows,
+        staging_root / "summaries" / "same_pass_canonical_reconciliation_summary.csv",
+        same_pass_fields,
+        same_pass_rows,
+    )
+    write_csv_rows(
+        staging_root / "summaries" / "historical_canonical_drift_summary.csv",
+        historical_drift_fields,
+        historical_drift_rows,
+    )
+    write_csv_rows(
+        staging_root / "summaries" / "reconciliation_summary_inventory.csv",
+        reconciliation_inventory_fields,
+        reconciliation_summary_rows,
     )
     write_csv_rows(
         staging_root / "summaries" / "service_reconciliation_summary.csv",
@@ -2694,6 +4037,7 @@ def reduce_complete_workflow(args) -> dict[str, object]:
         "episode_count": 1200,
         "formal_job_id": FORMAL_JOB_ID,
         "schema_version": SCHEMA_VERSION,
+        "reconciliation_contract_version": RECONCILIATION_CONTRACT_VERSION,
     }
     (staging_root / "validation" / "complete_workflow_validation.json").write_text(
         json.dumps(validation_payload, sort_keys=True) + "\n",
@@ -2720,6 +4064,7 @@ def reduce_complete_workflow(args) -> dict[str, object]:
         "episode_count": 1200,
         "formal_job_id": FORMAL_JOB_ID,
         "schema_version": SCHEMA_VERSION,
+        "reconciliation_contract_version": RECONCILIATION_CONTRACT_VERSION,
         **{f"validated_{key}": value for key, value in validation.items() if key != "status"},
     }
 
@@ -2790,8 +4135,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Create canonical/service/mapping validation files for one seed.",
     )
     seed_validation_parser.add_argument("--diagnostic-dir", required=True, type=Path)
-    seed_validation_parser.add_argument("--canonical-csv", required=True, type=Path)
+    seed_validation_parser.add_argument(
+        "--historical-canonical-csv",
+        "--canonical-csv",
+        dest="historical_canonical_csv",
+        required=True,
+        type=Path,
+    )
     seed_validation_parser.add_argument("--validation-dir", required=True, type=Path)
+    seed_validation_parser.add_argument("--runtime-metadata-dir", required=True, type=Path)
+    seed_validation_parser.add_argument("--formal-validation-json", type=Path)
+    seed_validation_parser.add_argument("--stage-d-source-commit-sha", required=True)
+    seed_validation_parser.add_argument("--config-path", type=Path)
+    seed_validation_parser.add_argument("--checkpoint-prefix", type=Path)
     seed_validation_parser.add_argument("--task-id", required=True, type=int)
     seed_validation_parser.add_argument("--training-seed", required=True, type=int)
 
@@ -2832,8 +4188,26 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _option_values(argv: list[str], option: str) -> list[str]:
+    values: list[str] = []
+    for index, token in enumerate(argv):
+        if token == option and index + 1 < len(argv):
+            values.append(argv[index + 1])
+    return values
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    effective_argv = sys.argv[1:] if argv is None else list(argv)
+    args = parser.parse_args(effective_argv)
+    historical_values = _option_values(effective_argv, "--historical-canonical-csv")
+    legacy_values = _option_values(effective_argv, "--canonical-csv")
+    if (
+        historical_values
+        and legacy_values
+        and Path(historical_values[-1]) != Path(legacy_values[-1])
+    ):
+        parser.error("conflicting canonical CSV arguments")
 
     if args.command == "task-mapping":
         for line in task_mapping_lines(args.task_id):
@@ -2897,10 +4271,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "prepare-seed-validation":
         result = prepare_seed_validation_files(
             diagnostic_dir=args.diagnostic_dir,
-            canonical_csv=args.canonical_csv,
+            historical_canonical_csv=args.historical_canonical_csv,
             validation_dir=args.validation_dir,
+            runtime_metadata_dir=args.runtime_metadata_dir,
             task_id=args.task_id,
             training_seed=args.training_seed,
+            formal_validation_json=args.formal_validation_json,
+            stage_d_source_commit_sha=args.stage_d_source_commit_sha,
+            config_path=args.config_path,
+            checkpoint_prefix=args.checkpoint_prefix,
         )
         print(json.dumps(result, sort_keys=True))
         return 0

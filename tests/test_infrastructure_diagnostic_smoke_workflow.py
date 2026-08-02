@@ -23,6 +23,16 @@ SOURCE_BUNDLE_SCRIPT = (
 ARRAY_SCRIPT = PROJECT_ROOT / "m3_jobs" / "19_infrastructure_diagnostic_smoke_eval.slurm"
 REDUCER_SCRIPT = PROJECT_ROOT / "m3_jobs" / "20_infrastructure_diagnostic_smoke_reduce_bundle.slurm"
 SUBMIT_SCRIPT = PROJECT_ROOT / "m3_jobs" / "submit_infrastructure_diagnostic_smoke_workflow.sh"
+SUBPROCESS_OPENMP_ENV_DEFAULTS = {
+    "OMP_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+    "KMP_INIT_AT_FORK": "FALSE",
+    "KMP_DUPLICATE_LIB_OK": "TRUE",
+}
+for key, value in SUBPROCESS_OPENMP_ENV_DEFAULTS.items():
+    os.environ.setdefault(key, value)
 
 TASKS = [
     (0, "25cp", "actiongnn", 0, 710000, 25, 3),
