@@ -21,6 +21,8 @@ ARRAY_JOB_ID="${EV_GNN_FULL_DIAGNOSTIC_ARRAY_JOB_ID:-}"
 EXPECTED_SOURCE_COMMIT="${EV_GNN_FULL_DIAGNOSTIC_EXPECTED_SOURCE_COMMIT:-}"
 SOURCE_COMMIT_FILE="${REPO_ROOT}/SOURCE_COMMIT_SHA.txt"
 VALIDATOR="${REPO_ROOT}/scripts/validate_full_infrastructure_diagnostic_eval30.py"
+M3_CONDA_ENV="${EV_GNN_FULL_DIAGNOSTIC_M3_CONDA_ENV:-/scratch2/fr57/cche0357/conda/envs/evgnn_m3_cpu}"
+PYTHON_BIN="${M3_CONDA_ENV}/bin/python"
 REDUCER_JOB_ID="${SLURM_JOB_ID:-manual}"
 WORK_ROOT_BASE="${EV_GNN_FULL_DIAGNOSTIC_REDUCER_WORK_ROOT:-${RUN_ROOT}/reducer}"
 WORK_ROOT="${WORK_ROOT_BASE}/reducer_job${REDUCER_JOB_ID}"
@@ -34,6 +36,54 @@ SACCT_FIELDS="JobIDRaw,JobID,JobName,State,ExitCode,ElapsedRaw,AllocCPUS,MaxRSS,
 FINAL_BUNDLE_PATH="${OUTPUT_ROOT}/full_infrastructure_diagnostic_eval30_complete_evidence_job${ARRAY_JOB_ID}.tar.gz"
 FINAL_BUNDLE_CHECKSUM_PATH="${FINAL_BUNDLE_PATH}.sha256"
 
+export PYTHONDONTWRITEBYTECODE=1
+export PYTHONUNBUFFERED=1
+
+STAGE_D_PYTHON_RUNTIME_OUTPUT=""
+
+require_python_runtime() {
+  if [[ ! -x "${PYTHON_BIN}" ]]; then
+    echo "ERROR: Stage D Python interpreter is required and executable at ${PYTHON_BIN}" >&2
+    exit 2
+  fi
+
+  local runtime_output
+  if ! runtime_output="$("${PYTHON_BIN}" - "${PYTHON_BIN}" <<'PY'
+import sys
+from pathlib import Path
+from typing import TypeAlias
+
+expected = Path(sys.argv[1]).resolve()
+actual = Path(sys.executable).resolve()
+if actual != expected:
+    raise SystemExit(
+        f"Stage D Python interpreter mismatch: expected {expected}, got {actual}"
+    )
+if sys.version_info < (3, 10):
+    raise SystemExit(
+        f"Stage D Python >=3.10 is required, got {sys.version.split()[0]}"
+    )
+print(f"python_bin={sys.argv[1]}")
+print(f"python_executable={sys.executable}")
+print(f"python_executable_resolved={actual}")
+print(f"python_version={sys.version.split()[0]}")
+PY
+  )"; then
+    echo "ERROR: Stage D Python interpreter contract failed for ${PYTHON_BIN}" >&2
+    if [[ -n "${runtime_output}" ]]; then
+      printf '%s\n' "${runtime_output}" >&2
+    fi
+    exit 2
+  fi
+
+  STAGE_D_PYTHON_RUNTIME_OUTPUT="${runtime_output}"
+}
+
+report_python_runtime() {
+  echo "m3_conda_env=${M3_CONDA_ENV}"
+  printf '%s\n' "${STAGE_D_PYTHON_RUNTIME_OUTPUT}"
+}
+
 if [[ -z "${ARRAY_JOB_ID}" ]]; then
   echo "ERROR: EV_GNN_FULL_DIAGNOSTIC_ARRAY_JOB_ID is required" >&2
   exit 2
@@ -43,9 +93,11 @@ if [[ ! "${ARRAY_JOB_ID}" =~ ^[0-9]+$ ]]; then
   exit 2
 fi
 
+require_python_runtime
+
 print_reduce_command() {
   printf "%q " \
-    python "${VALIDATOR}" \
+    "${PYTHON_BIN}" "${VALIDATOR}" \
     validate-complete-workflow \
     --array-job-id "${ARRAY_JOB_ID}" \
     --task-package-root "${TASK_PACKAGE_ROOT}" \
@@ -68,6 +120,7 @@ if [[ "${EV_GNN_FULL_DIAGNOSTIC_REDUCER_DRY_RUN:-0}" == "1" ]]; then
   echo "array_job_id=${ARRAY_JOB_ID}"
   echo "reducer_job_id=${REDUCER_JOB_ID}"
   echo "repo_root=${REPO_ROOT}"
+  report_python_runtime
   echo "task_package_root=${TASK_PACKAGE_ROOT}"
   echo "slurm_log_root=${SLURM_LOG_ROOT}"
   echo "output_root=${OUTPUT_ROOT}"
@@ -102,27 +155,25 @@ if [[ "${SOURCE_COMMIT_SHA}" != "${EXPECTED_SOURCE_COMMIT}" ]]; then
   exit 3
 fi
 
-export PYTHONDONTWRITEBYTECODE=1
-export PYTHONUNBUFFERED=1
-
 mkdir -p "${JOB_WORK_ROOT}" "${OUTPUT_ROOT}"
 exec > >(tee -a "${INTERNAL_STDOUT_LOG}") 2> >(tee -a "${INTERNAL_STDERR_LOG}" >&2)
 
 if command -v module >/dev/null 2>&1; then
   module load miniforge3/24.3.0-0
-  conda activate /scratch2/fr57/cche0357/conda/envs/evgnn_m3_cpu
+  conda activate "${M3_CONDA_ENV}"
 fi
 
 echo "FULL_INFRASTRUCTURE_DIAGNOSTIC_REDUCER_START"
 echo "array_job_id=${ARRAY_JOB_ID}"
 echo "reducer_job_id=${REDUCER_JOB_ID}"
 echo "source_commit_sha=${SOURCE_COMMIT_SHA}"
+report_python_runtime
 echo "task_package_root=${TASK_PACKAGE_ROOT}"
 echo "slurm_log_root=${SLURM_LOG_ROOT}"
 echo "output_root=${OUTPUT_ROOT}"
 echo "work_root=${WORK_ROOT}"
 
-python "${VALIDATOR}" \
+"${PYTHON_BIN}" "${VALIDATOR}" \
   validate-complete-workflow \
   --array-job-id "${ARRAY_JOB_ID}" \
   --task-package-root "${TASK_PACKAGE_ROOT}" \
