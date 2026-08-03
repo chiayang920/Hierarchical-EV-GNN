@@ -2559,7 +2559,60 @@ TASK4_RUNNER = (
 )
 
 
+def _shell_quote(value):
+    return "'" + str(value).replace("'", "'\\''") + "'"
+
+
+def create_test_m3_python_env(tmp_path, *, log_path=None):
+    env_root = tmp_path / "m3_conda_env"
+    bin_dir = env_root / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    python_bin = bin_dir / "python"
+    log_line = ""
+    if log_path is not None:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_line = f"printf '%s\\n' \"$0 $*\" >> {_shell_quote(log_path)}\n"
+    python_bin.write_text(
+        "#!/bin/bash\n"
+        f"{log_line}"
+        f"exec -a \"$0\" {_shell_quote(sys.executable)} \"$@\"\n",
+        encoding="utf-8",
+    )
+    python_bin.chmod(0o755)
+    return env_root, python_bin
+
+
+def hostile_python_path(tmp_path):
+    fake_bin = tmp_path / "hostile_python_bin"
+    fake_bin.mkdir(exist_ok=True)
+    fake_python = fake_bin / "python"
+    fake_python.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' "
+        "'ImportError: cannot import name '\\''TypeAlias'\\'' from '\\''typing'\\'' "
+        "(/usr/lib64/python3.9/typing.py)' >&2\n"
+        "exit 87\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    return f"{fake_bin}{os.pathsep}{os.environ['PATH']}"
+
+
+def create_non_executable_m3_python_env(tmp_path):
+    env_root = tmp_path / "non_executable_m3_conda_env"
+    bin_dir = env_root / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    python_bin = bin_dir / "python"
+    python_bin.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+    python_bin.chmod(0o644)
+    return env_root, python_bin
+
+
 def run_task4_dry_run(task_id, tmp_path, *, dry_run=True, extra_env=None):
+    extra_env = extra_env or {}
+    m3_conda_env = extra_env.get("EV_GNN_FULL_DIAGNOSTIC_M3_CONDA_ENV")
+    if m3_conda_env is None:
+        m3_conda_env, _ = create_test_m3_python_env(tmp_path)
     env = {
         **os.environ,
         "SLURM_ARRAY_TASK_ID": str(task_id),
@@ -2573,6 +2626,7 @@ def run_task4_dry_run(task_id, tmp_path, *, dry_run=True, extra_env=None):
         "EV_GNN_FULL_DIAGNOSTIC_FORMAL_COMPLETE_BUNDLE": (
             "/formal/controlled_multiscale_formal_complete_evidence_job58513929.tar.gz"
         ),
+        "EV_GNN_FULL_DIAGNOSTIC_M3_CONDA_ENV": str(m3_conda_env),
         "KMP_INIT_AT_FORK": "FALSE",
         "OMP_NUM_THREADS": "1",
         "MKL_NUM_THREADS": "1",
@@ -2580,8 +2634,7 @@ def run_task4_dry_run(task_id, tmp_path, *, dry_run=True, extra_env=None):
     }
     if dry_run:
         env["EV_GNN_FULL_DIAGNOSTIC_DRY_RUN"] = "1"
-    if extra_env:
-        env.update(extra_env)
+    env.update(extra_env)
     return subprocess.run(
         ["bash", str(TASK4_RUNNER)],
         cwd=PROJECT_ROOT,
@@ -2666,6 +2719,98 @@ def test_task4_runner_dry_run_is_side_effect_free(tmp_path):
     assert result.returncode == 0, result.stderr
     assert not (tmp_path / "runs").exists()
     assert not (tmp_path / "outputs").exists()
+
+
+def test_task4_runner_dry_run_uses_explicit_m3_python_under_hostile_path(tmp_path):
+    m3_conda_env, python_bin = create_test_m3_python_env(tmp_path)
+    result = run_task4_dry_run(
+        0,
+        tmp_path,
+        extra_env={
+            "PATH": hostile_python_path(tmp_path),
+            "EV_GNN_FULL_DIAGNOSTIC_M3_CONDA_ENV": str(m3_conda_env),
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert f"python_bin={python_bin}" in result.stdout
+    assert f"EVALUATOR_COMMAND_SEED_0={python_bin} " in result.stdout
+    assert "ImportError: cannot import name 'TypeAlias'" not in result.stderr
+
+
+def test_task4_runner_real_mode_first_python_invocation_uses_m3_interpreter(tmp_path):
+    invocation_log = tmp_path / "python_invocations.log"
+    m3_conda_env, python_bin = create_test_m3_python_env(
+        tmp_path,
+        log_path=invocation_log,
+    )
+    result = run_task4_dry_run(
+        0,
+        tmp_path,
+        dry_run=False,
+        extra_env={
+            "PATH": hostile_python_path(tmp_path),
+            "EV_GNN_FULL_DIAGNOSTIC_M3_CONDA_ENV": str(m3_conda_env),
+        },
+    )
+    assert result.returncode != 0
+    assert "EXPECTED_SOURCE_COMMIT" in result.stderr
+    invocations = invocation_log.read_text(encoding="utf-8").splitlines()
+    assert invocations[0].startswith(str(python_bin))
+    assert any(
+        f"{VALIDATOR} task-mapping --task-id 0" in line
+        for line in invocations[:3]
+    )
+    assert "ImportError: cannot import name 'TypeAlias'" not in result.stderr
+    assert not (tmp_path / "runs").exists()
+    assert not (tmp_path / "outputs").exists()
+
+
+def test_task4_runner_missing_m3_python_fails_before_side_effects(tmp_path):
+    missing_env = tmp_path / "missing_m3_conda_env"
+    result = run_task4_dry_run(
+        0,
+        tmp_path,
+        dry_run=False,
+        extra_env={"EV_GNN_FULL_DIAGNOSTIC_M3_CONDA_ENV": str(missing_env)},
+    )
+    assert result.returncode != 0
+    assert "Stage D Python interpreter" in result.stderr
+    assert str(missing_env / "bin" / "python") in result.stderr
+    assert "EXPECTED_SOURCE_COMMIT" not in result.stderr
+    assert not (tmp_path / "runs").exists()
+    assert not (tmp_path / "outputs").exists()
+
+
+def test_task4_runner_non_executable_m3_python_fails_before_side_effects(tmp_path):
+    m3_conda_env, python_bin = create_non_executable_m3_python_env(tmp_path)
+    result = run_task4_dry_run(
+        0,
+        tmp_path,
+        dry_run=False,
+        extra_env={"EV_GNN_FULL_DIAGNOSTIC_M3_CONDA_ENV": str(m3_conda_env)},
+    )
+    assert result.returncode != 0
+    assert "Stage D Python interpreter" in result.stderr
+    assert str(python_bin) in result.stderr
+    assert not (tmp_path / "runs").exists()
+    assert not (tmp_path / "outputs").exists()
+
+
+def test_task4_runner_uses_explicit_python_for_all_python_invocations():
+    text = TASK4_RUNNER.read_text(encoding="utf-8")
+    assert 'M3_CONDA_ENV="${EV_GNN_FULL_DIAGNOSTIC_M3_CONDA_ENV:-' in text
+    assert 'PYTHON_BIN="${M3_CONDA_ENV}/bin/python"' in text
+    assert '"${PYTHON_BIN}" "${VALIDATOR}" task-mapping' in text
+    assert '"${PYTHON_BIN}" -c' in text
+    assert text.count('"${PYTHON_BIN}" "${VALIDATOR}"') >= 6
+    assert "resolve-formal-package" in text
+    assert "validate-formal-package" in text
+    assert '"${PYTHON_BIN}" "${EVALUATOR_SCRIPT}"' in text
+    assert "validate-seed-output" in text
+    assert "publish-task-package" in text
+    assert 'python "${VALIDATOR}"' not in text
+    assert 'python -c' not in text
+    assert 'python "${EVALUATOR_SCRIPT}"' not in text
 
 
 @pytest.mark.parametrize("task_id", ["invalid", "-1", "8"])
@@ -2996,6 +3141,7 @@ write_csv(output / "charger_diagnostics.csv", CHARGER_DIAGNOSTIC_COLUMNS, charge
         encoding="utf-8",
     )
 
+    m3_conda_env, _ = create_test_m3_python_env(tmp_path)
     env = {
         **os.environ,
         "SLURM_ARRAY_TASK_ID": "0",
@@ -3008,6 +3154,7 @@ write_csv(output / "charger_diagnostics.csv", CHARGER_DIAGNOSTIC_COLUMNS, charge
         "EV_GNN_FULL_DIAGNOSTIC_FORMAL_COMPLETE_BUNDLE": str(tmp_path / "missing.tar.gz"),
         "EV_GNN_FULL_DIAGNOSTIC_EXPECTED_SOURCE_COMMIT": source_commit,
         "EV_GNN_FULL_DIAGNOSTIC_EVALUATOR_SCRIPT": str(evaluator_stub),
+        "EV_GNN_FULL_DIAGNOSTIC_M3_CONDA_ENV": str(m3_conda_env),
     }
     result = subprocess.run(
         ["bash", str(TASK4_RUNNER)],
@@ -3059,6 +3206,7 @@ def test_task4_runner_real_mode_packages_reconciliation_v2_evidence(tmp_path):
         ).read_text(encoding="utf-8"),
         encoding="utf-8",
     )
+    m3_conda_env, _ = create_test_m3_python_env(tmp_path)
     env = {
         **os.environ,
         "SLURM_ARRAY_TASK_ID": "0",
@@ -3073,6 +3221,7 @@ def test_task4_runner_real_mode_packages_reconciliation_v2_evidence(tmp_path):
         ),
         "EV_GNN_FULL_DIAGNOSTIC_EXPECTED_SOURCE_COMMIT": source_commit,
         "EV_GNN_FULL_DIAGNOSTIC_EVALUATOR_SCRIPT": str(evaluator_stub),
+        "EV_GNN_FULL_DIAGNOSTIC_M3_CONDA_ENV": str(m3_conda_env),
     }
     result = subprocess.run(
         ["bash", str(TASK4_RUNNER)],
@@ -3713,12 +3862,14 @@ def test_task4_validate_formal_package_rejects_source_manifest_coverage(tmp_path
     assert "source manifest coverage" in result.stderr
 
 
-def test_task5_reducer_dry_run_prints_exact_counts_and_scoped_sacct():
+def test_task5_reducer_dry_run_prints_exact_counts_and_scoped_sacct(tmp_path):
+    m3_conda_env, _ = create_test_m3_python_env(tmp_path)
     env = {
         **os.environ,
         "EV_GNN_FULL_DIAGNOSTIC_REDUCER_DRY_RUN": "1",
         "EV_GNN_FULL_DIAGNOSTIC_ARRAY_JOB_ID": "777777",
         "SLURM_JOB_ID": "888888",
+        "EV_GNN_FULL_DIAGNOSTIC_M3_CONDA_ENV": str(m3_conda_env),
     }
     result = subprocess.run(
         ["bash", str(TASK5_REDUCER)],
@@ -3739,6 +3890,89 @@ def test_task5_reducer_dry_run_prints_exact_counts_and_scoped_sacct():
     assert "historical_canonical_drift_summary.csv" in result.stdout
     assert "reconciliation_summary_inventory.csv" in result.stdout
     assert "DRY_RUN_NO_REDUCTION_OR_PACKAGING" in result.stdout
+
+
+def test_task5_reducer_dry_run_uses_explicit_m3_python_under_hostile_path(tmp_path):
+    m3_conda_env, python_bin = create_test_m3_python_env(tmp_path)
+    env = {
+        **os.environ,
+        "PATH": hostile_python_path(tmp_path),
+        "EV_GNN_FULL_DIAGNOSTIC_REDUCER_DRY_RUN": "1",
+        "EV_GNN_FULL_DIAGNOSTIC_ARRAY_JOB_ID": "777777",
+        "SLURM_JOB_ID": "888888",
+        "EV_GNN_FULL_DIAGNOSTIC_M3_CONDA_ENV": str(m3_conda_env),
+    }
+    result = subprocess.run(
+        ["bash", str(TASK5_REDUCER)],
+        cwd=PROJECT_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert f"python_bin={python_bin}" in result.stdout
+    assert f"REDUCER_COMMAND={python_bin} " in result.stdout
+    assert "ImportError: cannot import name 'TypeAlias'" not in result.stderr
+
+
+def test_task5_reducer_missing_m3_python_fails_before_output_roots(tmp_path):
+    missing_env = tmp_path / "missing_m3_conda_env"
+    output_root = tmp_path / "reducer_output"
+    work_root = tmp_path / "reducer_work"
+    env = {
+        **os.environ,
+        "EV_GNN_FULL_DIAGNOSTIC_REDUCER_DRY_RUN": "1",
+        "EV_GNN_FULL_DIAGNOSTIC_ARRAY_JOB_ID": "777777",
+        "SLURM_JOB_ID": "888888",
+        "EV_GNN_FULL_DIAGNOSTIC_M3_CONDA_ENV": str(missing_env),
+        "EV_GNN_FULL_DIAGNOSTIC_OUTPUT_ROOT": str(output_root),
+        "EV_GNN_FULL_DIAGNOSTIC_REDUCER_WORK_ROOT": str(work_root),
+    }
+    result = subprocess.run(
+        ["bash", str(TASK5_REDUCER)],
+        cwd=PROJECT_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "Stage D Python interpreter" in result.stderr
+    assert str(missing_env / "bin" / "python") in result.stderr
+    assert not output_root.exists()
+    assert not work_root.exists()
+
+
+def test_task5_reducer_non_executable_m3_python_fails_before_output_roots(tmp_path):
+    m3_conda_env, python_bin = create_non_executable_m3_python_env(tmp_path)
+    output_root = tmp_path / "reducer_output"
+    work_root = tmp_path / "reducer_work"
+    env = {
+        **os.environ,
+        "EV_GNN_FULL_DIAGNOSTIC_REDUCER_DRY_RUN": "1",
+        "EV_GNN_FULL_DIAGNOSTIC_ARRAY_JOB_ID": "777777",
+        "SLURM_JOB_ID": "888888",
+        "EV_GNN_FULL_DIAGNOSTIC_M3_CONDA_ENV": str(m3_conda_env),
+        "EV_GNN_FULL_DIAGNOSTIC_OUTPUT_ROOT": str(output_root),
+        "EV_GNN_FULL_DIAGNOSTIC_REDUCER_WORK_ROOT": str(work_root),
+    }
+    result = subprocess.run(
+        ["bash", str(TASK5_REDUCER)],
+        cwd=PROJECT_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "Stage D Python interpreter" in result.stderr
+    assert str(python_bin) in result.stderr
+    assert not output_root.exists()
+    assert not work_root.exists()
 
 
 def test_task5_complete_workflow_accepts_synthetic_8_task_packages(tmp_path):
@@ -4193,6 +4427,17 @@ def test_task6_submit_default_dry_run_does_not_invoke_sbatch(tmp_path):
         encoding="utf-8",
     )
     fake_sbatch.chmod(0o755)
+    fake_python = fake_bin / "python"
+    fake_python.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' "
+        "'ImportError: cannot import name '\\''TypeAlias'\\'' from '\\''typing'\\'' "
+        "(/usr/lib64/python3.9/typing.py)' >&2\n"
+        "exit 87\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    m3_conda_env, python_bin = create_test_m3_python_env(tmp_path)
     env = {
         **os.environ,
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
@@ -4203,6 +4448,7 @@ def test_task6_submit_default_dry_run_does_not_invoke_sbatch(tmp_path):
         "EV_GNN_FULL_DIAGNOSTIC_FORMAL_COMPLETE_BUNDLE": str(tmp_path / "unused_complete.tar.gz"),
         "EV_GNN_FULL_DIAGNOSTIC_OUTPUT_ROOT": str(tmp_path / "output"),
         "EV_GNN_FULL_DIAGNOSTIC_RUN_ROOT": str(tmp_path / "runs"),
+        "EV_GNN_FULL_DIAGNOSTIC_M3_CONDA_ENV": str(m3_conda_env),
     }
     result = subprocess.run(
         ["bash", str(source_root / "m3_jobs" / TASK6_SUBMIT.name)],
@@ -4216,5 +4462,7 @@ def test_task6_submit_default_dry_run_does_not_invoke_sbatch(tmp_path):
     assert result.returncode == 0, result.stderr
     assert "SBATCH_ARRAY_COMMAND=sbatch --parsable" in result.stdout
     assert "--dependency=afterok:<array_job_id>" in result.stdout
+    assert f"python_bin={python_bin}" in result.stdout
+    assert "ImportError: cannot import name 'TypeAlias'" not in result.stderr
     assert "reconciliation_contract_version=2" in result.stdout
     assert "DRY_RUN_NO_SBATCH_CALLED" in result.stdout

@@ -23,6 +23,56 @@ EXPECTED_SOURCE_COMMIT="${EV_GNN_FULL_DIAGNOSTIC_EXPECTED_SOURCE_COMMIT:-}"
 SOURCE_COMMIT_FILE="${REPO_ROOT}/SOURCE_COMMIT_SHA.txt"
 VALIDATOR="${REPO_ROOT}/scripts/validate_full_infrastructure_diagnostic_eval30.py"
 EVALUATOR_SCRIPT="${EV_GNN_FULL_DIAGNOSTIC_EVALUATOR_SCRIPT:-${REPO_ROOT}/evaluate_td3_gnn_infrastructure_diagnostics.py}"
+M3_CONDA_ENV="${EV_GNN_FULL_DIAGNOSTIC_M3_CONDA_ENV:-/scratch2/fr57/cche0357/conda/envs/evgnn_m3_cpu}"
+PYTHON_BIN="${M3_CONDA_ENV}/bin/python"
+
+export PYTHONDONTWRITEBYTECODE=1
+export PYTHONUNBUFFERED=1
+
+STAGE_D_PYTHON_RUNTIME_OUTPUT=""
+
+require_python_runtime() {
+  if [[ ! -x "${PYTHON_BIN}" ]]; then
+    echo "ERROR: Stage D Python interpreter is required and executable at ${PYTHON_BIN}" >&2
+    exit 2
+  fi
+
+  local runtime_output
+  if ! runtime_output="$("${PYTHON_BIN}" - "${PYTHON_BIN}" <<'PY'
+import sys
+from pathlib import Path
+from typing import TypeAlias
+
+expected = Path(sys.argv[1]).resolve()
+actual = Path(sys.executable).resolve()
+if actual != expected:
+    raise SystemExit(
+        f"Stage D Python interpreter mismatch: expected {expected}, got {actual}"
+    )
+if sys.version_info < (3, 10):
+    raise SystemExit(
+        f"Stage D Python >=3.10 is required, got {sys.version.split()[0]}"
+    )
+print(f"python_bin={sys.argv[1]}")
+print(f"python_executable={sys.executable}")
+print(f"python_executable_resolved={actual}")
+print(f"python_version={sys.version.split()[0]}")
+PY
+  )"; then
+    echo "ERROR: Stage D Python interpreter contract failed for ${PYTHON_BIN}" >&2
+    if [[ -n "${runtime_output}" ]]; then
+      printf '%s\n' "${runtime_output}" >&2
+    fi
+    exit 2
+  fi
+
+  STAGE_D_PYTHON_RUNTIME_OUTPUT="${runtime_output}"
+}
+
+report_python_runtime() {
+  echo "m3_conda_env=${M3_CONDA_ENV}"
+  printf '%s\n' "${STAGE_D_PYTHON_RUNTIME_OUTPUT}"
+}
 
 FORMAL_JOB_ID="58513929"
 DEVICE="cpu"
@@ -43,7 +93,10 @@ if [[ ! -f "${VALIDATOR}" ]]; then
   exit 3
 fi
 
-MAPPING_OUTPUT="$(python "${VALIDATOR}" task-mapping --task-id "${TASK_ID}")"
+require_python_runtime
+report_python_runtime
+
+MAPPING_OUTPUT="$("${PYTHON_BIN}" "${VALIDATOR}" task-mapping --task-id "${TASK_ID}")"
 
 MAPPED_TASK_ID=""
 SCALE=""
@@ -120,7 +173,7 @@ print_shell_command() {
 }
 
 json_get() {
-  python -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get(sys.argv[2], ""))' "$1" "$2"
+  "${PYTHON_BIN}" -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get(sys.argv[2], ""))' "$1" "$2"
 }
 
 if [[ "${EV_GNN_FULL_DIAGNOSTIC_DRY_RUN:-0}" == "1" ]]; then
@@ -156,21 +209,19 @@ if [[ "${EV_GNN_FULL_DIAGNOSTIC_DRY_RUN:-0}" == "1" ]]; then
     config_path="${seed_root}/config/formal_config.yaml"
     diagnostic_dir="${seed_root}/diagnostics"
     run_name="full_infrastructure_diagnostic_eval30_${SCALE}_${ALGORITHM}_seed${training_seed}_job${ARRAY_JOB_ID}_task${TASK_ID}"
-    echo "EVALUATOR_COMMAND_SEED_${training_seed}=python evaluate_td3_gnn_infrastructure_diagnostics.py --algorithm ${ALGORITHM} --scale ${SCALE} --config ${config_path} --seed ${training_seed} --eval_episodes 30 --checkpoint ${checkpoint_prefix} --output_dir ${diagnostic_dir} --run_name ${run_name} --device ${DEVICE} --max_episode_steps <validated_simulation_length> --deterministic ${DETERMINISTIC} --eval_expl_noise ${EVAL_EXPL_NOISE} --eval_seed_offset ${eval_seed_offset} --matrix_job_id ${ARRAY_JOB_ID} # formal_task_id=${formal_task_id} first_episode_seed=${first_episode_seed}"
+    echo "EVALUATOR_COMMAND_SEED_${training_seed}=${PYTHON_BIN} ${EVALUATOR_SCRIPT} --algorithm ${ALGORITHM} --scale ${SCALE} --config ${config_path} --seed ${training_seed} --eval_episodes 30 --checkpoint ${checkpoint_prefix} --output_dir ${diagnostic_dir} --run_name ${run_name} --device ${DEVICE} --max_episode_steps <validated_simulation_length> --deterministic ${DETERMINISTIC} --eval_expl_noise ${EVAL_EXPL_NOISE} --eval_seed_offset ${eval_seed_offset} --matrix_job_id ${ARRAY_JOB_ID} # formal_task_id=${formal_task_id} first_episode_seed=${first_episode_seed}"
   done
   echo "DRY_RUN_NO_EVALUATION_OR_PACKAGING"
   exit 0
 fi
 
-export PYTHONDONTWRITEBYTECODE=1
-export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=4
 export MKL_NUM_THREADS=4
 export NUMEXPR_NUM_THREADS=4
 
 if command -v module >/dev/null 2>&1; then
   module load miniforge3/24.3.0-0
-  conda activate /scratch2/fr57/cche0357/conda/envs/evgnn_m3_cpu
+  conda activate "${M3_CONDA_ENV}"
 fi
 
 if [[ -z "${EXPECTED_SOURCE_COMMIT}" ]]; then
@@ -244,7 +295,7 @@ for index in 0 1 2 3 4; do
     "${runtime_dir}"
   : > "${logs_dir}/stderr.log"
 
-  python "${VALIDATOR}" \
+  "${PYTHON_BIN}" "${VALIDATOR}" \
     resolve-formal-package \
     --task-id "${TASK_ID}" \
     --training-seed "${training_seed}" \
@@ -254,7 +305,7 @@ for index in 0 1 2 3 4; do
     > "${runtime_dir}/source_package_resolution.json"
   formal_package_path="$(json_get "${runtime_dir}/source_package_resolution.json" package_path)"
 
-  python "${VALIDATOR}" \
+  "${PYTHON_BIN}" "${VALIDATOR}" \
     validate-formal-package \
     --task-id "${TASK_ID}" \
     --training-seed "${training_seed}" \
@@ -278,7 +329,7 @@ for index in 0 1 2 3 4; do
 
   run_name="full_infrastructure_diagnostic_eval30_${SCALE}_${ALGORITHM}_seed${training_seed}_job${ARRAY_JOB_ID}_task${TASK_ID}"
   diagnostic_command=(
-    python "${EVALUATOR_SCRIPT}"
+    "${PYTHON_BIN}" "${EVALUATOR_SCRIPT}"
     --algorithm "${ALGORITHM}"
     --scale "${SCALE}"
     --config "${config_dir}/formal_config.yaml"
@@ -308,7 +359,7 @@ for index in 0 1 2 3 4; do
     exit 4
   fi
 
-  python "${VALIDATOR}" \
+  "${PYTHON_BIN}" "${VALIDATOR}" \
     prepare-seed-validation \
     --diagnostic-dir "${diagnostic_dir}" \
     --historical-canonical-csv "${canonical_dir}/complete_eval30.csv" \
@@ -322,7 +373,7 @@ for index in 0 1 2 3 4; do
     --training-seed "${training_seed}" \
     > "${runtime_dir}/seed_validation_preparation.json"
 
-  python "${VALIDATOR}" \
+  "${PYTHON_BIN}" "${VALIDATOR}" \
     validate-seed-output \
     --directory "${seed_root}" \
     --task-id "${TASK_ID}" \
@@ -332,7 +383,7 @@ for index in 0 1 2 3 4; do
   log_line "seed${training_seed}_completed=formal_task${formal_task_id}"
 done
 
-python "${VALIDATOR}" \
+"${PYTHON_BIN}" "${VALIDATOR}" \
   publish-task-package \
   --task-root "${TASK_DIR}" \
   --task-id "${TASK_ID}" \

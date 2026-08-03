@@ -16,10 +16,15 @@ FORMAL_COMPLETE_BUNDLE="${EV_GNN_FULL_DIAGNOSTIC_FORMAL_COMPLETE_BUNDLE:-${OUTPU
 ARRAY_SCRIPT="${REPO_ROOT}/m3_jobs/21_full_infrastructure_diagnostic_eval30.slurm"
 REDUCER_SCRIPT="${REPO_ROOT}/m3_jobs/22_full_infrastructure_diagnostic_eval30_reduce_bundle.slurm"
 VALIDATOR="${REPO_ROOT}/scripts/validate_full_infrastructure_diagnostic_eval30.py"
+M3_CONDA_ENV="${EV_GNN_FULL_DIAGNOSTIC_M3_CONDA_ENV:-/scratch2/fr57/cche0357/conda/envs/evgnn_m3_cpu}"
+PYTHON_BIN="${M3_CONDA_ENV}/bin/python"
 FORMAL_JOB_ID="58513929"
 SACCT_FIELDS="JobIDRaw,JobID,JobName,State,ExitCode,ElapsedRaw,AllocCPUS,MaxRSS,TotalCPU"
 EXECUTE=0
 PREFLIGHT_DIR=""
+
+export PYTHONDONTWRITEBYTECODE=1
+export PYTHONUNBUFFERED=1
 
 SOURCE_BUNDLE_REQUIRED_MEMBERS=(
   evaluate_td3_gnn.py
@@ -47,6 +52,49 @@ die() {
   exit 1
 }
 
+STAGE_D_PYTHON_RUNTIME_OUTPUT=""
+
+require_python_runtime() {
+  if [[ ! -x "${PYTHON_BIN}" ]]; then
+    die "Stage D Python interpreter is required and executable at ${PYTHON_BIN}"
+  fi
+
+  local runtime_output
+  if ! runtime_output="$("${PYTHON_BIN}" - "${PYTHON_BIN}" <<'PY'
+import sys
+from pathlib import Path
+from typing import TypeAlias
+
+expected = Path(sys.argv[1]).resolve()
+actual = Path(sys.executable).resolve()
+if actual != expected:
+    raise SystemExit(
+        f"Stage D Python interpreter mismatch: expected {expected}, got {actual}"
+    )
+if sys.version_info < (3, 10):
+    raise SystemExit(
+        f"Stage D Python >=3.10 is required, got {sys.version.split()[0]}"
+    )
+print(f"python_bin={sys.argv[1]}")
+print(f"python_executable={sys.executable}")
+print(f"python_executable_resolved={actual}")
+print(f"python_version={sys.version.split()[0]}")
+PY
+  )"; then
+    if [[ -n "${runtime_output}" ]]; then
+      printf '%s\n' "${runtime_output}" >&2
+    fi
+    die "Stage D Python interpreter contract failed for ${PYTHON_BIN}"
+  fi
+
+  STAGE_D_PYTHON_RUNTIME_OUTPUT="${runtime_output}"
+}
+
+report_python_runtime() {
+  echo "m3_conda_env=${M3_CONDA_ENV}"
+  printf '%s\n' "${STAGE_D_PYTHON_RUNTIME_OUTPUT}"
+}
+
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
     --execute) EXECUTE=1 ;;
@@ -65,6 +113,7 @@ array_export_vars() {
   printf ",EV_GNN_FULL_DIAGNOSTIC_FORMAL_COMPLETE_BUNDLE=%s" "${FORMAL_COMPLETE_BUNDLE}"
   printf ",EV_GNN_FULL_DIAGNOSTIC_OUTPUT_ROOT=%s" "${OUTPUT_ROOT}"
   printf ",EV_GNN_FULL_DIAGNOSTIC_RUN_ROOT=%s" "${RUN_ROOT}"
+  printf ",EV_GNN_FULL_DIAGNOSTIC_M3_CONDA_ENV=%s" "${M3_CONDA_ENV}"
 }
 
 reducer_export_vars() {
@@ -88,7 +137,7 @@ normalise_sbatch_job_id() {
 validate_source_sidecar() {
   [[ -s "${SOURCE_ARCHIVE}" ]] || die "source bundle is missing: ${SOURCE_ARCHIVE}"
   [[ -s "${SOURCE_ARCHIVE_SHA256}" ]] || die "source bundle sidecar is missing: ${SOURCE_ARCHIVE_SHA256}"
-  python - "${SOURCE_ARCHIVE}" "${SOURCE_ARCHIVE_SHA256}" "${EXPECTED_SOURCE_COMMIT}" "${SOURCE_BUNDLE_REQUIRED_MEMBERS[@]}" <<'PY'
+  "${PYTHON_BIN}" - "${SOURCE_ARCHIVE}" "${SOURCE_ARCHIVE_SHA256}" "${EXPECTED_SOURCE_COMMIT}" "${SOURCE_BUNDLE_REQUIRED_MEMBERS[@]}" <<'PY'
 import hashlib
 import tarfile
 import tempfile
@@ -232,7 +281,7 @@ validate_git_or_source_commit() {
 print_task_mapping() {
   local task_id
   for task_id in 0 1 2 3 4 5 6 7; do
-    python "${VALIDATOR}" task-mapping --task-id "${task_id}" | tr '\n' ' '
+    "${PYTHON_BIN}" "${VALIDATOR}" task-mapping --task-id "${task_id}" | tr '\n' ' '
     printf "\n"
   done
 }
@@ -243,6 +292,7 @@ run_preflight() {
   [[ -s "${REDUCER_SCRIPT}" ]] || die "missing reducer script: ${REDUCER_SCRIPT}"
   [[ -s "${VALIDATOR}" ]] || die "missing validator: ${VALIDATOR}"
   [[ "${FORMAL_JOB_ID}" == "58513929" ]] || die "formal source job must be 58513929"
+  require_python_runtime
   validate_git_or_source_commit
   validate_source_sidecar
   bash -n "${ARRAY_SCRIPT}"
@@ -252,7 +302,7 @@ run_preflight() {
   trap 'rm -rf "${PREFLIGHT_DIR}"' EXIT
   for task_id in 0 1 2 3 4 5 6 7; do
     for seed in 0 1 2 3 4; do
-      python "${VALIDATOR}" \
+      "${PYTHON_BIN}" "${VALIDATOR}" \
         resolve-formal-package \
         --task-id "${task_id}" \
         --training-seed "${seed}" \
@@ -261,8 +311,8 @@ run_preflight() {
         --staging-dir "${PREFLIGHT_DIR}/resolved" \
         > "${PREFLIGHT_DIR}/task${task_id}_seed${seed}_resolution.json"
       resolution="${PREFLIGHT_DIR}/task${task_id}_seed${seed}_resolution.json"
-      package_path="$(python -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["package_path"])' "${resolution}")"
-      python "${VALIDATOR}" \
+      package_path="$("${PYTHON_BIN}" -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["package_path"])' "${resolution}")"
+      "${PYTHON_BIN}" "${VALIDATOR}" \
         validate-formal-package \
         --task-id "${task_id}" \
         --training-seed "${seed}" \
@@ -271,6 +321,7 @@ run_preflight() {
         > "${PREFLIGHT_DIR}/task${task_id}_seed${seed}_formal_validation.json"
     done
     EV_GNN_FULL_DIAGNOSTIC_DRY_RUN=1 \
+      EV_GNN_FULL_DIAGNOSTIC_M3_CONDA_ENV="${M3_CONDA_ENV}" \
       SLURM_ARRAY_TASK_ID="${task_id}" \
       SLURM_ARRAY_JOB_ID=123456 \
       SLURM_JOB_ID="123456_${task_id}" \
@@ -282,6 +333,7 @@ run_preflight() {
   done
   EV_GNN_FULL_DIAGNOSTIC_REDUCER_DRY_RUN=1 \
     EV_GNN_FULL_DIAGNOSTIC_ARRAY_JOB_ID=123456 \
+    EV_GNN_FULL_DIAGNOSTIC_M3_CONDA_ENV="${M3_CONDA_ENV}" \
     SLURM_JOB_ID=789012 \
     bash "${REDUCER_SCRIPT}" > "${PREFLIGHT_DIR}/reducer_dry_run.out"
   grep -q "episode_count=1200" "${PREFLIGHT_DIR}/reducer_dry_run.out"
@@ -305,13 +357,14 @@ if [[ "${EXECUTE}" -eq 0 ]]; then
   echo "formal_complete_bundle=${FORMAL_COMPLETE_BUNDLE}"
   echo "output_root=${OUTPUT_ROOT}"
   echo "run_root=${RUN_ROOT}"
+  report_python_runtime
   echo "reconciliation_contract_version=2"
   print_task_mapping
   echo "SBATCH_ARRAY_COMMAND=sbatch --parsable --export=$(array_export_vars) ${ARRAY_SCRIPT}"
   echo "SBATCH_REDUCER_COMMAND=sbatch --parsable --dependency=afterok:<array_job_id> --export=$(reducer_export_vars "<array_job_id>") ${REDUCER_SCRIPT}"
   echo "SQUEUE_COMMAND=squeue -j <array_job_id>,<reducer_job_id>"
   echo "SACCT_COMMAND=sacct -j <array_job_id> --parsable2 --noheader --format=${SACCT_FIELDS}"
-  echo "M3_TAR_VALIDATION_COMMAND=python ${VALIDATOR} validate-complete-bundle --bundle ${OUTPUT_ROOT}/full_infrastructure_diagnostic_eval30_complete_evidence_job<array_job_id>.tar.gz"
+  echo "M3_TAR_VALIDATION_COMMAND=${PYTHON_BIN} ${VALIDATOR} validate-complete-bundle --bundle ${OUTPUT_ROOT}/full_infrastructure_diagnostic_eval30_complete_evidence_job<array_job_id>.tar.gz"
   echo "M3_CHECKSUM_VALIDATION_COMMAND=cd ${OUTPUT_ROOT} && sha256sum -c full_infrastructure_diagnostic_eval30_complete_evidence_job<array_job_id>.tar.gz.sha256"
   echo "LOCAL_SCP_COMMAND=scp cche0357@m3.massive.org.au:${OUTPUT_ROOT}/full_infrastructure_diagnostic_eval30_complete_evidence_job<array_job_id>.tar.gz cche0357@m3.massive.org.au:${OUTPUT_ROOT}/full_infrastructure_diagnostic_eval30_complete_evidence_job<array_job_id>.tar.gz.sha256 ."
   echo "DRY_RUN_NO_SBATCH_CALLED"
@@ -343,6 +396,6 @@ echo "expected_final_bundle=${FINAL_BUNDLE}"
 echo "expected_final_bundle_sha256=${FINAL_BUNDLE_SHA256}"
 echo "SQUEUE_COMMAND=squeue -j ${ARRAY_JOB_ID},${REDUCER_JOB_ID}"
 echo "SACCT_COMMAND=sacct -j ${ARRAY_JOB_ID} --parsable2 --noheader --format=${SACCT_FIELDS}"
-echo "M3_TAR_VALIDATION_COMMAND=python ${VALIDATOR} validate-complete-bundle --bundle ${FINAL_BUNDLE}"
+echo "M3_TAR_VALIDATION_COMMAND=${PYTHON_BIN} ${VALIDATOR} validate-complete-bundle --bundle ${FINAL_BUNDLE}"
 echo "M3_CHECKSUM_VALIDATION_COMMAND=cd ${OUTPUT_ROOT} && sha256sum -c $(basename "${FINAL_BUNDLE_SHA256}")"
 echo "LOCAL_SCP_COMMAND=scp cche0357@m3.massive.org.au:${FINAL_BUNDLE} cche0357@m3.massive.org.au:${FINAL_BUNDLE_SHA256} ."
