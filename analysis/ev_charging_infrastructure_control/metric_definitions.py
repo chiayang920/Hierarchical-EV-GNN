@@ -265,6 +265,24 @@ METRIC_DEFINITIONS = (
     ),
 )
 
+
+def validate_metric_definitions(
+    definitions: tuple[MetricDefinition, ...],
+) -> tuple[MetricDefinition, ...]:
+    observed_names: set[str] = set()
+    duplicate_names: list[str] = []
+    for definition in definitions:
+        if definition.name in observed_names:
+            duplicate_names.append(definition.name)
+        observed_names.add(definition.name)
+    if duplicate_names:
+        raise RuntimeError(
+            "duplicate metric definition name(s): " + ", ".join(duplicate_names)
+        )
+    return definitions
+
+
+METRIC_DEFINITIONS = validate_metric_definitions(METRIC_DEFINITIONS)
 _METRICS_BY_NAME = {definition.name: definition for definition in METRIC_DEFINITIONS}
 _KNOWN_TIERS = {
     PRIMARY,

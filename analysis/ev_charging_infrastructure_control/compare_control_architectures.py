@@ -29,6 +29,16 @@ from analysis.ev_charging_infrastructure_control.metric_definitions import (
 SCALES = ("25cp", "100cp", "500cp", "1000cp")
 ALGORITHMS = ("actiongnn", "hierarchical")
 TRAINING_SEEDS = tuple(range(5))
+EXPECTED_EPISODES_PER_TRAINING_SEED = 30
+EXPECTED_RECONCILIATION_CONTRACT_VERSION = 2
+EXPECTED_TASK_PACKAGE_COUNT = 8
+EXPECTED_CHECKPOINT_GROUP_COUNT = 40
+TOPOLOGY = {
+    "25cp": (3, 25),
+    "100cp": (7, 100),
+    "500cp": (35, 500),
+    "1000cp": (70, 1000),
+}
 
 
 @dataclass(frozen=True)
@@ -558,6 +568,236 @@ def read_csv_rows(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
+def expected_dataset_rows(expected_episodes_per_seed: int) -> dict[str, int]:
+    transformer_count = sum(counts[0] for counts in TOPOLOGY.values())
+    charger_count = sum(counts[1] for counts in TOPOLOGY.values())
+    scale_count = len(SCALES)
+    algorithm_count = len(ALGORITHMS)
+    seed_count = len(TRAINING_SEEDS)
+    return {
+        "episode_metrics": scale_count
+        * algorithm_count
+        * seed_count
+        * expected_episodes_per_seed,
+        "seed_metrics": scale_count * algorithm_count * seed_count,
+        "transformer_metrics": algorithm_count
+        * seed_count
+        * expected_episodes_per_seed
+        * transformer_count,
+        "charger_metrics": algorithm_count
+        * seed_count
+        * expected_episodes_per_seed
+        * charger_count,
+    }
+
+
+def require_provenance_contract(
+    provenance: dict[str, object],
+    expected_episodes_per_seed: int,
+) -> dict[str, int]:
+    expected_rows = expected_dataset_rows(expected_episodes_per_seed)
+    expected_episode_count = expected_rows["episode_metrics"]
+    required_values = {
+        "diagnostic_schema_version": "3",
+        "reconciliation_contract_version": EXPECTED_RECONCILIATION_CONTRACT_VERSION,
+        "task_package_count": EXPECTED_TASK_PACKAGE_COUNT,
+        "checkpoint_group_count": EXPECTED_CHECKPOINT_GROUP_COUNT,
+        "episode_count": expected_episode_count,
+    }
+    for field_name, expected_value in required_values.items():
+        if provenance.get(field_name) != expected_value:
+            fail(
+                f"provenance {field_name} mismatch: expected {expected_value!r}, "
+                f"observed {provenance.get(field_name)!r}"
+            )
+    dataset_rows = provenance.get("dataset_rows")
+    if not isinstance(dataset_rows, dict):
+        fail("provenance dataset_rows missing or invalid")
+    for dataset_name, expected_count in expected_rows.items():
+        observed_count = dataset_rows.get(dataset_name)
+        if observed_count != expected_count:
+            fail(
+                f"provenance dataset_rows {dataset_name} mismatch: "
+                f"expected {expected_count}, observed {observed_count!r}"
+            )
+    return expected_rows
+
+
+def require_row_count(
+    dataset_name: str,
+    rows: list[dict[str, str]],
+    expected_rows: dict[str, int],
+) -> None:
+    observed_count = len(rows)
+    expected_count = expected_rows[dataset_name]
+    if observed_count != expected_count:
+        fail(
+            f"{dataset_name} row count mismatch: expected {expected_count}, "
+            f"observed {observed_count}"
+        )
+
+
+def unique_key_set(
+    rows: list[dict[str, str]],
+    key_columns: tuple[str, ...],
+    dataset_name: str,
+) -> set[tuple[object, ...]]:
+    keys: set[tuple[object, ...]] = set()
+    for row in rows:
+        key_parts: list[object] = []
+        for column in key_columns:
+            if column in {"training_seed", "episode_index", "episode_seed", "transformer_id", "charger_id"}:
+                key_parts.append(parse_int(row[column], f"{dataset_name}: {column}"))
+            else:
+                key_parts.append(row[column])
+        key = tuple(key_parts)
+        if key in keys:
+            fail(f"duplicate {dataset_name.removesuffix('_metrics')} key: {key}")
+        keys.add(key)
+    return keys
+
+
+def validate_episode_matrix(
+    episode_keys: set[tuple[object, ...]],
+    expected_episodes_per_seed: int,
+) -> None:
+    for scale in SCALES:
+        for algorithm in ALGORITHMS:
+            for training_seed in TRAINING_SEEDS:
+                observed_indices = {
+                    episode_index
+                    for (
+                        observed_scale,
+                        observed_algorithm,
+                        observed_training_seed,
+                        episode_index,
+                        _episode_seed,
+                    ) in episode_keys
+                    if (
+                        observed_scale,
+                        observed_algorithm,
+                        observed_training_seed,
+                    )
+                    == (scale, algorithm, training_seed)
+                }
+                expected_indices = set(range(expected_episodes_per_seed))
+                if observed_indices != expected_indices:
+                    fail(
+                        "episode indices mismatch for "
+                        f"{scale}/{algorithm}/seed{training_seed}"
+                    )
+        for training_seed in TRAINING_SEEDS:
+            actiongnn_pairs = {
+                (episode_index, episode_seed)
+                for (
+                    observed_scale,
+                    observed_algorithm,
+                    observed_training_seed,
+                    episode_index,
+                    episode_seed,
+                ) in episode_keys
+                if (
+                    observed_scale,
+                    observed_algorithm,
+                    observed_training_seed,
+                )
+                == (scale, "actiongnn", training_seed)
+            }
+            hierarchical_pairs = {
+                (episode_index, episode_seed)
+                for (
+                    observed_scale,
+                    observed_algorithm,
+                    observed_training_seed,
+                    episode_index,
+                    episode_seed,
+                ) in episode_keys
+                if (
+                    observed_scale,
+                    observed_algorithm,
+                    observed_training_seed,
+                )
+                == (scale, "hierarchical", training_seed)
+            }
+            if actiongnn_pairs != hierarchical_pairs:
+                fail(
+                    "episode seed sets mismatch for "
+                    f"{scale}/seed{training_seed}"
+                )
+
+
+def validate_dataset_identities(
+    provenance: dict[str, object],
+    episode_rows: list[dict[str, str]],
+    seed_rows: list[dict[str, str]],
+    transformer_rows: list[dict[str, str]],
+    charger_rows: list[dict[str, str]],
+    expected_episodes_per_seed: int,
+) -> None:
+    expected_rows = require_provenance_contract(provenance, expected_episodes_per_seed)
+    rows_by_dataset = {
+        "episode_metrics": episode_rows,
+        "seed_metrics": seed_rows,
+        "transformer_metrics": transformer_rows,
+        "charger_metrics": charger_rows,
+    }
+    for dataset_name, rows in rows_by_dataset.items():
+        require_row_count(dataset_name, rows, expected_rows)
+
+    episode_keys = unique_key_set(
+        episode_rows,
+        ("scale", "algorithm", "training_seed", "episode_index", "episode_seed"),
+        "episode_metrics",
+    )
+    seed_keys = unique_key_set(
+        seed_rows,
+        ("scale", "algorithm", "training_seed"),
+        "seed_metrics",
+    )
+    transformer_keys = unique_key_set(
+        transformer_rows,
+        (
+            "scale",
+            "algorithm",
+            "training_seed",
+            "episode_index",
+            "episode_seed",
+            "transformer_id",
+        ),
+        "transformer_metrics",
+    )
+    charger_keys = unique_key_set(
+        charger_rows,
+        (
+            "scale",
+            "algorithm",
+            "training_seed",
+            "episode_index",
+            "episode_seed",
+            "transformer_id",
+            "charger_id",
+        ),
+        "charger_metrics",
+    )
+
+    expected_seed_keys = {
+        (scale, algorithm, training_seed)
+        for scale in SCALES
+        for algorithm in ALGORITHMS
+        for training_seed in TRAINING_SEEDS
+    }
+    if seed_keys != expected_seed_keys:
+        fail("seed key matrix mismatch")
+    validate_episode_matrix(episode_keys, expected_episodes_per_seed)
+
+    for transformer_key in transformer_keys:
+        if transformer_key[:5] not in episode_keys:
+            fail("transformer row must reference existing episode key")
+    for charger_key in charger_keys:
+        if charger_key[:5] not in episode_keys:
+            fail("charger row must reference existing episode key")
+
+
 def format_optional_float(value: float | None) -> str:
     if value is None:
         return ""
@@ -827,23 +1067,29 @@ def publish_results(
         raise
 
 
-def compare_control_architectures(
+def _compare_control_architectures_for_test(
     analysis_dir: str | Path,
     *,
-    expected_episodes_per_seed: int = 30,
+    expected_episodes_per_seed: int,
 ) -> dict[str, int]:
     resolved_analysis_dir = Path(analysis_dir).expanduser().resolve()
     provenance_path = resolved_analysis_dir / "provenance.json"
     if not provenance_path.is_file():
         fail(f"missing provenance.json: {provenance_path}")
     provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
-    if provenance.get("diagnostic_schema_version") != "3":
-        fail("provenance validation failed: diagnostic_schema_version")
     dataset_dir = resolved_analysis_dir / "datasets"
     episode_rows = read_csv_rows(dataset_dir / "episode_metrics.csv")
     seed_rows = read_csv_rows(dataset_dir / "seed_metrics.csv")
     transformer_rows = read_csv_rows(dataset_dir / "transformer_metrics.csv")
-    read_csv_rows(dataset_dir / "charger_metrics.csv")
+    charger_rows = read_csv_rows(dataset_dir / "charger_metrics.csv")
+    validate_dataset_identities(
+        provenance,
+        episode_rows,
+        seed_rows,
+        transformer_rows,
+        charger_rows,
+        expected_episodes_per_seed,
+    )
     observations = build_seed_level_metrics(episode_rows, transformer_rows, seed_rows)
     comparison_rows = build_comparison_rows(observations)
     summary_rows = build_scale_summary_rows(comparison_rows)
@@ -858,12 +1104,18 @@ def compare_control_architectures(
     }
 
 
+def compare_control_architectures(analysis_dir: str | Path) -> dict[str, int]:
+    return _compare_control_architectures_for_test(
+        analysis_dir,
+        expected_episodes_per_seed=EXPECTED_EPISODES_PER_TRAINING_SEED,
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Compare EV infrastructure control architectures.",
     )
     parser.add_argument("--analysis-dir", required=True, type=Path)
-    parser.add_argument("--expected-episodes-per-seed", type=int, default=30)
     return parser.parse_args()
 
 
@@ -872,7 +1124,6 @@ def main() -> int:
     print("EV_CHARGING_INFRASTRUCTURE_CONTROL_COMPARISON_START")
     row_counts = compare_control_architectures(
         args.analysis_dir,
-        expected_episodes_per_seed=args.expected_episodes_per_seed,
     )
     print("PROVENANCE_VALIDATION=PASS")
     print("SEED_LEVEL_AGGREGATION=PASS")

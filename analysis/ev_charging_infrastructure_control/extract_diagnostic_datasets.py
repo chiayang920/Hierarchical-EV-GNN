@@ -36,6 +36,7 @@ from utils.infrastructure_diagnostics import (
 SCALES = ("25cp", "100cp", "500cp", "1000cp")
 ALGORITHMS = ("actiongnn", "hierarchical")
 TRAINING_SEEDS = tuple(range(5))
+EXPECTED_EPISODES_PER_TRAINING_SEED = 30
 DIAGNOSTIC_SCHEMA_VERSION = "3"
 RECONCILIATION_CONTRACT_VERSION = 2
 EXPECTED_TASK_PACKAGE_COUNT = 8
@@ -186,6 +187,8 @@ def read_tar_regular_files(archive_bytes: bytes, archive_label: str) -> dict[str
                 if member.isdir():
                     continue
                 require(member.isfile(), f"unsupported archive member type: {member.name}")
+                if member.name in regular_files:
+                    fail(f"duplicate archive member name: {member.name}")
                 extracted = archive.extractfile(member)
                 require(
                     extracted is not None,
@@ -553,6 +556,8 @@ def collect_validated_dataset_rows(
     seed_keys: set[tuple[str, str, int]] = set()
     transformer_keys: set[tuple[str, str, int, int, int, int]] = set()
     charger_keys: set[tuple[str, str, int, int, int, int, int]] = set()
+    transformer_ids_by_episode: dict[tuple[str, str, int, int, int], set[int]] = {}
+    charger_ids_by_episode: dict[tuple[str, str, int, int, int], set[int]] = {}
 
     for task_package in evidence.task_packages:
         nested_files = read_tar_regular_files(
@@ -594,6 +599,8 @@ def collect_validated_dataset_rows(
                 if key in episode_keys:
                     fail(f"duplicate episode key: {key}")
                 episode_keys.add(key)
+                transformer_ids_by_episode[key] = set()
+                charger_ids_by_episode[key] = set()
                 episode_rows_out.append(output_row(row, EPISODE_OUTPUT_COLUMNS))
             if len(episode_rows) != expected_episodes_per_seed:
                 fail(
@@ -643,9 +650,24 @@ def collect_validated_dataset_rows(
                 episode_seed = parse_int(
                     row["episode_seed"], f"{transformer_member}: episode_seed"
                 )
+                episode_key = (
+                    task_package.scale,
+                    task_package.algorithm,
+                    training_seed,
+                    episode_index,
+                    episode_seed,
+                )
+                if episode_key not in episode_keys:
+                    fail(f"{transformer_member}: row must reference existing episode key")
                 transformer_id = parse_int(
                     row["transformer_id"], f"{transformer_member}: transformer_id"
                 )
+                transformer_count, _charger_count = TOPOLOGY[task_package.scale]
+                if transformer_id not in range(transformer_count):
+                    fail(
+                        f"{transformer_member}: transformer IDs must be exactly "
+                        f"0..{transformer_count - 1}"
+                    )
                 key = (
                     task_package.scale,
                     task_package.algorithm,
@@ -657,6 +679,7 @@ def collect_validated_dataset_rows(
                 if key in transformer_keys:
                     fail(f"duplicate transformer key: {key}")
                 transformer_keys.add(key)
+                transformer_ids_by_episode[episode_key].add(transformer_id)
                 transformer_rows_out.append(
                     output_row(row, tuple(TRANSFORMER_DIAGNOSTIC_COLUMNS))
                 )
@@ -678,10 +701,30 @@ def collect_validated_dataset_rows(
                 episode_seed = parse_int(
                     row["episode_seed"], f"{charger_member}: episode_seed"
                 )
+                episode_key = (
+                    task_package.scale,
+                    task_package.algorithm,
+                    training_seed,
+                    episode_index,
+                    episode_seed,
+                )
+                if episode_key not in episode_keys:
+                    fail(f"{charger_member}: row must reference existing episode key")
                 transformer_id = parse_int(
                     row["transformer_id"], f"{charger_member}: transformer_id"
                 )
                 charger_id = parse_int(row["charger_id"], f"{charger_member}: charger_id")
+                transformer_count, charger_count = TOPOLOGY[task_package.scale]
+                if transformer_id not in range(transformer_count):
+                    fail(
+                        f"{charger_member}: charger transformer_id must be within "
+                        f"0..{transformer_count - 1}"
+                    )
+                if charger_id not in range(charger_count):
+                    fail(
+                        f"{charger_member}: charger IDs must be exactly "
+                        f"0..{charger_count - 1}"
+                    )
                 key = (
                     task_package.scale,
                     task_package.algorithm,
@@ -694,9 +737,11 @@ def collect_validated_dataset_rows(
                 if key in charger_keys:
                     fail(f"duplicate charger key: {key}")
                 charger_keys.add(key)
+                charger_ids_by_episode[episode_key].add(charger_id)
                 charger_rows_out.append(output_row(row, tuple(CHARGER_DIAGNOSTIC_COLUMNS)))
 
     validate_complete_matrix(episode_keys, expected_episodes_per_seed)
+    validate_episode_topology(transformer_ids_by_episode, charger_ids_by_episode)
     rows_by_dataset = {
         "episode_metrics": episode_rows_out,
         "seed_metrics": seed_rows_out,
@@ -711,6 +756,27 @@ def collect_validated_dataset_rows(
                 f"found {len(rows)}"
             )
     return rows_by_dataset
+
+
+def validate_episode_topology(
+    transformer_ids_by_episode: dict[tuple[str, str, int, int, int], set[int]],
+    charger_ids_by_episode: dict[tuple[str, str, int, int, int], set[int]],
+) -> None:
+    for episode_key, observed_transformer_ids in transformer_ids_by_episode.items():
+        scale = episode_key[0]
+        transformer_count, charger_count = TOPOLOGY[scale]
+        expected_transformer_ids = set(range(transformer_count))
+        if observed_transformer_ids != expected_transformer_ids:
+            fail(
+                f"{episode_key}: transformer IDs must be exactly "
+                f"0..{transformer_count - 1}"
+            )
+        observed_charger_ids = charger_ids_by_episode.get(episode_key, set())
+        expected_charger_ids = set(range(charger_count))
+        if observed_charger_ids != expected_charger_ids:
+            fail(
+                f"{episode_key}: charger IDs must be exactly 0..{charger_count - 1}"
+            )
 
 
 def write_csv_file(path: Path, fieldnames: tuple[str, ...], rows: list[dict[str, str]]) -> None:
@@ -799,11 +865,11 @@ def publish_dataset_outputs(
         raise
 
 
-def extract_diagnostic_datasets(
+def _extract_diagnostic_datasets_for_test(
     bundle_path: str | Path,
     output_dir: str | Path,
     *,
-    expected_episodes_per_seed: int = 30,
+    expected_episodes_per_seed: int,
 ) -> dict[str, int]:
     resolved_output_dir = Path(output_dir).expanduser().resolve()
     if resolved_output_dir.exists():
@@ -821,13 +887,23 @@ def extract_diagnostic_datasets(
     return {dataset_name: len(rows) for dataset_name, rows in rows_by_dataset.items()}
 
 
+def extract_diagnostic_datasets(
+    bundle_path: str | Path,
+    output_dir: str | Path,
+) -> dict[str, int]:
+    return _extract_diagnostic_datasets_for_test(
+        bundle_path,
+        output_dir,
+        expected_episodes_per_seed=EXPECTED_EPISODES_PER_TRAINING_SEED,
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Extract EV infrastructure diagnostic analysis datasets.",
     )
     parser.add_argument("--bundle", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
-    parser.add_argument("--expected-episodes-per-seed", type=int, default=30)
     return parser.parse_args()
 
 
@@ -839,13 +915,13 @@ def main() -> int:
     print(f"TASK_PACKAGE_COUNT={len(evidence.task_packages)}")
     rows_by_dataset = collect_validated_dataset_rows(
         evidence,
-        args.expected_episodes_per_seed,
+        EXPECTED_EPISODES_PER_TRAINING_SEED,
     )
     publish_dataset_outputs(
         Path(args.output_dir).expanduser().resolve(),
         evidence,
         rows_by_dataset,
-        args.expected_episodes_per_seed,
+        EXPECTED_EPISODES_PER_TRAINING_SEED,
     )
     dataset_counts = {
         dataset_name: len(rows) for dataset_name, rows in rows_by_dataset.items()

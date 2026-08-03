@@ -103,6 +103,13 @@ def tar_gz_bytes(members):
     return archive_buffer.getvalue()
 
 
+def write_csv_rows(path, fieldnames, rows):
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def sha256_bytes(content):
     return hashlib.sha256(content).hexdigest()
 
@@ -194,6 +201,7 @@ def synthetic_transformer_row(
     *,
     diagnostic_schema_version="3",
     matrix_job_id=SYNTHETIC_DIAGNOSTIC_ARRAY_JOB_ID,
+    mismatched_episode_seed=False,
 ):
     row = {column: "1" for column in TRANSFORMER_DIAGNOSTIC_COLUMNS}
     row.update(
@@ -203,7 +211,11 @@ def synthetic_transformer_row(
             "algorithm": algorithm,
             "training_seed": str(training_seed),
             "episode_index": str(episode_index),
-            "episode_seed": str(710000 + training_seed * 1000 + episode_index),
+            "episode_seed": str(
+                999999
+                if mismatched_episode_seed
+                else 710000 + training_seed * 1000 + episode_index
+            ),
             "transformer_id": str(transformer_id),
             "user_satisfaction_source": "ev2gym",
             "diagnostic_schema_version": diagnostic_schema_version,
@@ -222,6 +234,7 @@ def synthetic_charger_row(
     *,
     diagnostic_schema_version="3",
     matrix_job_id=SYNTHETIC_DIAGNOSTIC_ARRAY_JOB_ID,
+    mismatched_episode_seed=False,
 ):
     row = {column: "1" for column in CHARGER_DIAGNOSTIC_COLUMNS}
     row.update(
@@ -231,7 +244,11 @@ def synthetic_charger_row(
             "algorithm": algorithm,
             "training_seed": str(training_seed),
             "episode_index": str(episode_index),
-            "episode_seed": str(710000 + training_seed * 1000 + episode_index),
+            "episode_seed": str(
+                999999
+                if mismatched_episode_seed
+                else 710000 + training_seed * 1000 + episode_index
+            ),
             "transformer_id": str(transformer_id),
             "charger_id": str(charger_id),
             "user_satisfaction_source": "ev2gym",
@@ -255,6 +272,13 @@ def build_synthetic_task_package(
     wrong_schema=False,
     mismatched_matrix_job_id=False,
     missing_hierarchical_episode=False,
+    duplicate_nested_archive_member=False,
+    missing_transformer_id=False,
+    out_of_range_transformer_id=False,
+    missing_charger_id=False,
+    out_of_range_charger_id=False,
+    orphan_transformer_episode=False,
+    orphan_charger_episode=False,
 ):
     members = []
     transformer_count, charger_count = TOPOLOGY[scale]
@@ -295,10 +319,34 @@ def build_synthetic_task_package(
                 transformer_id,
                 diagnostic_schema_version=schema_version,
                 matrix_job_id=matrix_job_id,
+                mismatched_episode_seed=missing_hierarchical_episode
+                and algorithm == "hierarchical"
+                and training_seed == 0
+                and episode_index == 0,
             )
             for episode_index in range(episodes_per_seed)
             for transformer_id in range(transformer_count)
         ]
+        if training_seed == 0 and (
+            missing_transformer_id or out_of_range_transformer_id
+        ):
+            transformer_rows = [
+                row for row in transformer_rows if row["transformer_id"] != "0"
+            ]
+            transformer_rows.append(
+                synthetic_transformer_row(
+                    scale,
+                    algorithm,
+                    training_seed,
+                    0,
+                    transformer_count,
+                    diagnostic_schema_version=schema_version,
+                    matrix_job_id=matrix_job_id,
+                )
+            )
+        if training_seed == 0 and orphan_transformer_episode:
+            transformer_rows[0]["episode_index"] = str(episodes_per_seed + 10)
+            transformer_rows[0]["episode_seed"] = str(999999)
         charger_rows = [
             synthetic_charger_row(
                 scale,
@@ -309,10 +357,31 @@ def build_synthetic_task_package(
                 charger_id % transformer_count,
                 diagnostic_schema_version=schema_version,
                 matrix_job_id=matrix_job_id,
+                mismatched_episode_seed=missing_hierarchical_episode
+                and algorithm == "hierarchical"
+                and training_seed == 0
+                and episode_index == 0,
             )
             for episode_index in range(episodes_per_seed)
             for charger_id in range(charger_count)
         ]
+        if training_seed == 0 and (missing_charger_id or out_of_range_charger_id):
+            charger_rows = [row for row in charger_rows if row["charger_id"] != "0"]
+            charger_rows.append(
+                synthetic_charger_row(
+                    scale,
+                    algorithm,
+                    training_seed,
+                    0,
+                    charger_count,
+                    0,
+                    diagnostic_schema_version=schema_version,
+                    matrix_job_id=matrix_job_id,
+                )
+            )
+        if training_seed == 0 and orphan_charger_episode:
+            charger_rows[0]["episode_index"] = str(episodes_per_seed + 10)
+            charger_rows[0]["episode_seed"] = str(999999)
         episode_fieldnames = list(EPISODE_DIAGNOSTIC_COLUMNS)
         if missing_episode_column and training_seed == 0:
             episode_fieldnames.remove("tracking_error")
@@ -360,6 +429,8 @@ def build_synthetic_task_package(
         corrupt_name=manifest_members[0][0] if corrupt_nested_checksum else None,
     )
     members.append(("checksums/package_file_checksums.sha256", manifest))
+    if duplicate_nested_archive_member:
+        members.append((manifest_members[0][0], manifest_members[0][1]))
     return tar_gz_bytes(members)
 
 
@@ -377,12 +448,20 @@ def build_synthetic_complete_bundle(
     add_uncovered_nested_file=False,
     wrong_workflow_identity=False,
     add_outer_symlink=False,
+    duplicate_outer_archive_member=False,
+    duplicate_nested_archive_member=False,
     duplicate_episode_key=False,
     missing_episode_column=False,
     non_finite_metric=False,
     wrong_schema=False,
     mismatched_matrix_job_id=False,
     missing_hierarchical_episode=False,
+    missing_transformer_id=False,
+    out_of_range_transformer_id=False,
+    missing_charger_id=False,
+    out_of_range_charger_id=False,
+    orphan_transformer_episode=False,
+    orphan_charger_episode=False,
 ):
     task_packages = []
     inventory_rows = []
@@ -406,6 +485,17 @@ def build_synthetic_complete_bundle(
                 missing_hierarchical_episode=(
                     missing_hierarchical_episode and algorithm == "hierarchical"
                 ),
+                duplicate_nested_archive_member=(
+                    duplicate_nested_archive_member and task_id == 0
+                ),
+                missing_transformer_id=missing_transformer_id and task_id == 0,
+                out_of_range_transformer_id=(
+                    out_of_range_transformer_id and task_id == 0
+                ),
+                missing_charger_id=missing_charger_id and task_id == 0,
+                out_of_range_charger_id=out_of_range_charger_id and task_id == 0,
+                orphan_transformer_episode=orphan_transformer_episode and task_id == 0,
+                orphan_charger_episode=orphan_charger_episode and task_id == 0,
             )
             package_sha256 = sha256_bytes(package_bytes)
             if corrupt_task_package_sha and task_id == 0:
@@ -495,6 +585,8 @@ def build_synthetic_complete_bundle(
     with tarfile.open(fileobj=archive_buffer, mode="w:gz", format=tarfile.PAX_FORMAT) as archive:
         for member_name, content in members:
             add_bytes_to_tar(archive, member_name, content)
+        if duplicate_outer_archive_member:
+            add_bytes_to_tar(archive, "summaries/task_inventory.csv", inventory)
         if add_outer_symlink:
             tar_info = tarfile.TarInfo("unsafe_link")
             tar_info.type = tarfile.SYMTYPE
@@ -557,6 +649,34 @@ def test_registry_rejects_unknown_metric_and_tier():
         metric_module.metric_names_for_tier("economic")
 
 
+def test_metric_registry_validation_rejects_duplicate_names():
+    duplicate_definitions = (
+        metric_module.MetricDefinition(
+            "episode_reward",
+            "episode",
+            "episode_reward",
+            None,
+            "primary",
+            "higher",
+            "mean 30 episodes",
+            "first",
+        ),
+        metric_module.MetricDefinition(
+            "episode_reward",
+            "episode",
+            "episode_reward",
+            None,
+            "primary",
+            "higher",
+            "mean 30 episodes",
+            "duplicate",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="duplicate metric definition name"):
+        metric_module.validate_metric_definitions(duplicate_definitions)
+
+
 def test_complete_bundle_rejects_unsafe_member(tmp_path):
     bundle = build_synthetic_complete_bundle(
         tmp_path, extra_outer_member=("../escape.txt", b"unsafe")
@@ -608,6 +728,24 @@ def test_complete_bundle_rejects_uncovered_regular_file(tmp_path):
 def test_complete_bundle_rejects_symlink(tmp_path):
     bundle = build_synthetic_complete_bundle(tmp_path, add_outer_symlink=True)
     with pytest.raises(RuntimeError, match="unsafe archive member"):
+        extraction_module().read_complete_bundle(bundle)
+
+
+def test_complete_bundle_rejects_duplicate_outer_archive_member(tmp_path):
+    bundle = build_synthetic_complete_bundle(
+        tmp_path,
+        duplicate_outer_archive_member=True,
+    )
+    with pytest.raises(RuntimeError, match="duplicate archive member name"):
+        extraction_module().read_complete_bundle(bundle)
+
+
+def test_complete_bundle_rejects_duplicate_nested_archive_member(tmp_path):
+    bundle = build_synthetic_complete_bundle(
+        tmp_path,
+        duplicate_nested_archive_member=True,
+    )
+    with pytest.raises(RuntimeError, match="duplicate archive member name"):
         extraction_module().read_complete_bundle(bundle)
 
 
@@ -668,7 +806,7 @@ def test_extraction_publishes_semantic_outputs(tmp_path):
     bundle = build_synthetic_complete_bundle(tmp_path)
     output_dir = tmp_path / "ev_charging_infrastructure_control_analysis"
 
-    extraction_module().extract_diagnostic_datasets(
+    extraction_module()._extract_diagnostic_datasets_for_test(
         bundle, output_dir, expected_episodes_per_seed=1
     )
 
@@ -699,7 +837,7 @@ def test_extraction_publishes_semantic_outputs(tmp_path):
 def test_extraction_rejects_duplicate_episode_key(tmp_path):
     bundle = build_synthetic_complete_bundle(tmp_path, duplicate_episode_key=True)
     with pytest.raises(RuntimeError, match="duplicate episode key"):
-        extraction_module().extract_diagnostic_datasets(
+        extraction_module()._extract_diagnostic_datasets_for_test(
             bundle, tmp_path / "analysis-output", expected_episodes_per_seed=1
         )
 
@@ -707,7 +845,7 @@ def test_extraction_rejects_duplicate_episode_key(tmp_path):
 def test_extraction_rejects_missing_required_episode_column(tmp_path):
     bundle = build_synthetic_complete_bundle(tmp_path, missing_episode_column=True)
     with pytest.raises(RuntimeError, match="missing required column"):
-        extraction_module().extract_diagnostic_datasets(
+        extraction_module()._extract_diagnostic_datasets_for_test(
             bundle, tmp_path / "analysis-output", expected_episodes_per_seed=1
         )
 
@@ -715,7 +853,7 @@ def test_extraction_rejects_missing_required_episode_column(tmp_path):
 def test_extraction_rejects_non_finite_approved_metric(tmp_path):
     bundle = build_synthetic_complete_bundle(tmp_path, non_finite_metric=True)
     with pytest.raises(RuntimeError, match="non-finite approved metric"):
-        extraction_module().extract_diagnostic_datasets(
+        extraction_module()._extract_diagnostic_datasets_for_test(
             bundle, tmp_path / "analysis-output", expected_episodes_per_seed=1
         )
 
@@ -723,7 +861,7 @@ def test_extraction_rejects_non_finite_approved_metric(tmp_path):
 def test_extraction_rejects_wrong_schema(tmp_path):
     bundle = build_synthetic_complete_bundle(tmp_path, wrong_schema=True)
     with pytest.raises(RuntimeError, match="diagnostic schema version"):
-        extraction_module().extract_diagnostic_datasets(
+        extraction_module()._extract_diagnostic_datasets_for_test(
             bundle, tmp_path / "analysis-output", expected_episodes_per_seed=1
         )
 
@@ -731,7 +869,7 @@ def test_extraction_rejects_wrong_schema(tmp_path):
 def test_extraction_rejects_mismatched_matrix_job_id(tmp_path):
     bundle = build_synthetic_complete_bundle(tmp_path, mismatched_matrix_job_id=True)
     with pytest.raises(RuntimeError, match="matrix_job_id"):
-        extraction_module().extract_diagnostic_datasets(
+        extraction_module()._extract_diagnostic_datasets_for_test(
             bundle, tmp_path / "analysis-output", expected_episodes_per_seed=1
         )
 
@@ -739,7 +877,7 @@ def test_extraction_rejects_mismatched_matrix_job_id(tmp_path):
 def test_extraction_rejects_mismatched_algorithm_episode_seed_sets(tmp_path):
     bundle = build_synthetic_complete_bundle(tmp_path, missing_hierarchical_episode=True)
     with pytest.raises(RuntimeError, match="episode seed sets"):
-        extraction_module().extract_diagnostic_datasets(
+        extraction_module()._extract_diagnostic_datasets_for_test(
             bundle, tmp_path / "analysis-output", expected_episodes_per_seed=1
         )
 
@@ -749,8 +887,56 @@ def test_extraction_rejects_existing_output_directory(tmp_path):
     output_dir = tmp_path / "analysis-output"
     output_dir.mkdir()
     with pytest.raises(RuntimeError, match="output directory already exists"):
-        extraction_module().extract_diagnostic_datasets(
+        extraction_module()._extract_diagnostic_datasets_for_test(
             bundle, output_dir, expected_episodes_per_seed=1
+        )
+
+
+def test_extraction_rejects_missing_transformer_id_with_compensating_extra(tmp_path):
+    bundle = build_synthetic_complete_bundle(tmp_path, missing_transformer_id=True)
+    with pytest.raises(RuntimeError, match="transformer IDs"):
+        extraction_module()._extract_diagnostic_datasets_for_test(
+            bundle, tmp_path / "analysis-output", expected_episodes_per_seed=1
+        )
+
+
+def test_extraction_rejects_out_of_range_transformer_id(tmp_path):
+    bundle = build_synthetic_complete_bundle(tmp_path, out_of_range_transformer_id=True)
+    with pytest.raises(RuntimeError, match="transformer IDs"):
+        extraction_module()._extract_diagnostic_datasets_for_test(
+            bundle, tmp_path / "analysis-output", expected_episodes_per_seed=1
+        )
+
+
+def test_extraction_rejects_missing_charger_id_with_compensating_extra(tmp_path):
+    bundle = build_synthetic_complete_bundle(tmp_path, missing_charger_id=True)
+    with pytest.raises(RuntimeError, match="charger IDs"):
+        extraction_module()._extract_diagnostic_datasets_for_test(
+            bundle, tmp_path / "analysis-output", expected_episodes_per_seed=1
+        )
+
+
+def test_extraction_rejects_out_of_range_charger_id(tmp_path):
+    bundle = build_synthetic_complete_bundle(tmp_path, out_of_range_charger_id=True)
+    with pytest.raises(RuntimeError, match="charger IDs"):
+        extraction_module()._extract_diagnostic_datasets_for_test(
+            bundle, tmp_path / "analysis-output", expected_episodes_per_seed=1
+        )
+
+
+def test_extraction_rejects_transformer_row_without_episode(tmp_path):
+    bundle = build_synthetic_complete_bundle(tmp_path, orphan_transformer_episode=True)
+    with pytest.raises(RuntimeError, match="existing episode key"):
+        extraction_module()._extract_diagnostic_datasets_for_test(
+            bundle, tmp_path / "analysis-output", expected_episodes_per_seed=1
+        )
+
+
+def test_extraction_rejects_charger_row_without_episode(tmp_path):
+    bundle = build_synthetic_complete_bundle(tmp_path, orphan_charger_episode=True)
+    with pytest.raises(RuntimeError, match="existing episode key"):
+        extraction_module()._extract_diagnostic_datasets_for_test(
+            bundle, tmp_path / "analysis-output", expected_episodes_per_seed=1
         )
 
 
@@ -970,11 +1156,11 @@ def test_wilcoxon_handles_tied_ranks_exactly():
 def test_comparison_publishes_semantic_results(tmp_path):
     bundle = build_synthetic_complete_bundle(tmp_path)
     analysis_dir = tmp_path / "ev_charging_infrastructure_control_analysis"
-    extraction_module().extract_diagnostic_datasets(
+    extraction_module()._extract_diagnostic_datasets_for_test(
         bundle, analysis_dir, expected_episodes_per_seed=1
     )
 
-    row_counts = comparison_module().compare_control_architectures(
+    row_counts = comparison_module()._compare_control_architectures_for_test(
         analysis_dir, expected_episodes_per_seed=1
     )
 
@@ -1012,19 +1198,106 @@ def test_comparison_publishes_semantic_results(tmp_path):
 def test_comparison_requires_validated_charger_dataset(tmp_path):
     bundle = build_synthetic_complete_bundle(tmp_path)
     analysis_dir = tmp_path / "ev_charging_infrastructure_control_analysis"
-    extraction_module().extract_diagnostic_datasets(
+    extraction_module()._extract_diagnostic_datasets_for_test(
         bundle, analysis_dir, expected_episodes_per_seed=1
     )
     (analysis_dir / "datasets" / "charger_metrics.csv").unlink()
 
     with pytest.raises(RuntimeError, match="charger_metrics.csv"):
-        comparison_module().compare_control_architectures(
+        comparison_module()._compare_control_architectures_for_test(
             analysis_dir,
             expected_episodes_per_seed=1,
         )
 
 
-def test_extraction_and_comparison_clis_emit_markers_and_semantic_outputs(tmp_path):
+def test_comparison_public_entry_rejects_one_episode_per_seed_dataset(tmp_path):
+    bundle = build_synthetic_complete_bundle(tmp_path)
+    analysis_dir = tmp_path / "ev_charging_infrastructure_control_analysis"
+    extraction_module()._extract_diagnostic_datasets_for_test(
+        bundle, analysis_dir, expected_episodes_per_seed=1
+    )
+
+    with pytest.raises(RuntimeError, match="episode_count"):
+        comparison_module().compare_control_architectures(analysis_dir)
+
+
+def test_comparison_rejects_actual_csv_row_count_mismatch_with_provenance(tmp_path):
+    bundle = build_synthetic_complete_bundle(tmp_path)
+    analysis_dir = tmp_path / "ev_charging_infrastructure_control_analysis"
+    extraction_module()._extract_diagnostic_datasets_for_test(
+        bundle, analysis_dir, expected_episodes_per_seed=1
+    )
+    episode_path = analysis_dir / "datasets" / "episode_metrics.csv"
+    rows = read_csv_file(episode_path)
+    write_csv_rows(episode_path, rows[0].keys(), rows[:-1])
+
+    with pytest.raises(RuntimeError, match="episode_metrics row count"):
+        comparison_module()._compare_control_architectures_for_test(
+            analysis_dir, expected_episodes_per_seed=1
+        )
+
+
+def test_comparison_rejects_duplicate_episode_key(tmp_path):
+    bundle = build_synthetic_complete_bundle(tmp_path)
+    analysis_dir = tmp_path / "ev_charging_infrastructure_control_analysis"
+    extraction_module()._extract_diagnostic_datasets_for_test(
+        bundle, analysis_dir, expected_episodes_per_seed=1
+    )
+    episode_path = analysis_dir / "datasets" / "episode_metrics.csv"
+    rows = read_csv_file(episode_path)
+    rows[1].update(
+        {
+            "scale": rows[0]["scale"],
+            "algorithm": rows[0]["algorithm"],
+            "training_seed": rows[0]["training_seed"],
+            "episode_index": rows[0]["episode_index"],
+            "episode_seed": rows[0]["episode_seed"],
+        }
+    )
+    write_csv_rows(episode_path, rows[0].keys(), rows)
+
+    with pytest.raises(RuntimeError, match="duplicate episode key"):
+        comparison_module()._compare_control_architectures_for_test(
+            analysis_dir, expected_episodes_per_seed=1
+        )
+
+
+def test_comparison_rejects_missing_or_extra_episode_indices(tmp_path):
+    bundle = build_synthetic_complete_bundle(tmp_path)
+    analysis_dir = tmp_path / "ev_charging_infrastructure_control_analysis"
+    extraction_module()._extract_diagnostic_datasets_for_test(
+        bundle, analysis_dir, expected_episodes_per_seed=1
+    )
+    episode_path = analysis_dir / "datasets" / "episode_metrics.csv"
+    rows = read_csv_file(episode_path)
+    rows[0]["episode_index"] = "7"
+    write_csv_rows(episode_path, rows[0].keys(), rows)
+
+    with pytest.raises(RuntimeError, match="episode indices"):
+        comparison_module()._compare_control_architectures_for_test(
+            analysis_dir, expected_episodes_per_seed=1
+        )
+
+
+def test_comparison_rejects_mismatched_algorithm_episode_seed_sets(tmp_path):
+    bundle = build_synthetic_complete_bundle(tmp_path)
+    analysis_dir = tmp_path / "ev_charging_infrastructure_control_analysis"
+    extraction_module()._extract_diagnostic_datasets_for_test(
+        bundle, analysis_dir, expected_episodes_per_seed=1
+    )
+    episode_path = analysis_dir / "datasets" / "episode_metrics.csv"
+    rows = read_csv_file(episode_path)
+    hierarchical_row = next(row for row in rows if row["algorithm"] == "hierarchical")
+    hierarchical_row["episode_seed"] = "999999"
+    write_csv_rows(episode_path, rows[0].keys(), rows)
+
+    with pytest.raises(RuntimeError, match="episode seed sets"):
+        comparison_module()._compare_control_architectures_for_test(
+            analysis_dir, expected_episodes_per_seed=1
+        )
+
+
+def test_extraction_and_comparison_clis_reject_episode_override(tmp_path):
     bundle = build_synthetic_complete_bundle(tmp_path)
     analysis_dir = tmp_path / "ev_charging_infrastructure_control_analysis"
     extract_script = (
@@ -1057,15 +1330,13 @@ def test_extraction_and_comparison_clis_emit_markers_and_semantic_outputs(tmp_pa
         stderr=subprocess.PIPE,
         check=False,
     )
-    assert extract_result.returncode == 0, extract_result.stderr
-    assert "EV_CHARGING_INFRASTRUCTURE_DATASET_EXTRACTION_START" in (
-        extract_result.stdout
+    assert extract_result.returncode != 0
+    assert "unrecognized arguments: --expected-episodes-per-seed" in (
+        extract_result.stderr
     )
-    assert "BUNDLE_VALIDATION=PASS" in extract_result.stdout
-    assert "EPISODE_METRICS_ROWS=40" in extract_result.stdout
-    assert "OUTPUT_PUBLICATION=PASS" in extract_result.stdout
-    assert "EV_CHARGING_INFRASTRUCTURE_DATASET_EXTRACTION_COMPLETED" in (
-        extract_result.stdout
+
+    extraction_module()._extract_diagnostic_datasets_for_test(
+        bundle, analysis_dir, expected_episodes_per_seed=1
     )
 
     compare_result = subprocess.run(
@@ -1083,25 +1354,7 @@ def test_extraction_and_comparison_clis_emit_markers_and_semantic_outputs(tmp_pa
         stderr=subprocess.PIPE,
         check=False,
     )
-    assert compare_result.returncode == 0, compare_result.stderr
-    assert "EV_CHARGING_INFRASTRUCTURE_CONTROL_COMPARISON_START" in (
-        compare_result.stdout
+    assert compare_result.returncode != 0
+    assert "unrecognized arguments: --expected-episodes-per-seed" in (
+        compare_result.stderr
     )
-    assert "PAIRING_VALIDATION=PASS" in compare_result.stdout
-    assert "PAIRED_COMPARISON_ROWS=88" in compare_result.stdout
-    assert "RESULT_PUBLICATION=PASS" in compare_result.stdout
-    assert "EV_CHARGING_INFRASTRUCTURE_CONTROL_COMPARISON_COMPLETED" in (
-        compare_result.stdout
-    )
-
-    assert generated_relative_paths(analysis_dir) == [
-        "datasets/charger_metrics.csv",
-        "datasets/episode_metrics.csv",
-        "datasets/seed_metrics.csv",
-        "datasets/transformer_metrics.csv",
-        "provenance.json",
-        "results/metric_interpretation.md",
-        "results/paired_control_comparisons.csv",
-        "results/scale_level_summary.csv",
-    ]
-    assert_generated_names_are_semantic(analysis_dir)
