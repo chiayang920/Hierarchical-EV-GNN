@@ -3,6 +3,8 @@ import hashlib
 import io
 import importlib
 import json
+import re
+import subprocess
 import sys
 import tarfile
 from pathlib import Path
@@ -652,6 +654,16 @@ def generated_relative_paths(root_path):
     )
 
 
+def assert_generated_names_are_semantic(root_path):
+    disallowed = re.compile(
+        r"(stage_d|r5l|job\d+|[0-9a-f]{40}|[0-9a-f]{64})",
+        re.IGNORECASE,
+    )
+    for path in root_path.rglob("*"):
+        if path.is_file():
+            assert disallowed.search(path.name) is None, path
+
+
 def test_extraction_publishes_semantic_outputs(tmp_path):
     bundle = build_synthetic_complete_bundle(tmp_path)
     output_dir = tmp_path / "ev_charging_infrastructure_control_analysis"
@@ -927,6 +939,23 @@ def test_paired_statistics_zero_denominator_and_zero_variance_statuses():
     )
 
 
+def test_comparison_row_uses_status_instead_of_infinity_for_zero_variance():
+    statistics = comparison_module().paired_statistics(
+        actiongnn_values=[2, 2, 2, 2, 2],
+        hierarchical_values=[3, 3, 3, 3, 3],
+    )
+
+    row = comparison_module().comparison_row(
+        "25cp",
+        metric_module.metric_definition("episode_reward"),
+        statistics,
+    )
+
+    assert row["paired_t_statistic"] == ""
+    assert row["effect_size_status"] == "undefined_zero_variance_nonzero_mean"
+    assert all(value.lower() not in {"inf", "-inf", "nan"} for value in row.values())
+
+
 def test_wilcoxon_handles_tied_ranks_exactly():
     statistic, p_value, method, nonzero_count = (
         comparison_module().wilcoxon_signed_rank([1, -1, 2, -2, 2])
@@ -978,3 +1007,101 @@ def test_comparison_publishes_semantic_results(tmp_path):
     } == {True}
     assert all(row["n_paired_seeds"] == "5" for row in comparisons)
     assert (analysis_dir / "results" / "metric_interpretation.md").is_file()
+
+
+def test_comparison_requires_validated_charger_dataset(tmp_path):
+    bundle = build_synthetic_complete_bundle(tmp_path)
+    analysis_dir = tmp_path / "ev_charging_infrastructure_control_analysis"
+    extraction_module().extract_diagnostic_datasets(
+        bundle, analysis_dir, expected_episodes_per_seed=1
+    )
+    (analysis_dir / "datasets" / "charger_metrics.csv").unlink()
+
+    with pytest.raises(RuntimeError, match="charger_metrics.csv"):
+        comparison_module().compare_control_architectures(
+            analysis_dir,
+            expected_episodes_per_seed=1,
+        )
+
+
+def test_extraction_and_comparison_clis_emit_markers_and_semantic_outputs(tmp_path):
+    bundle = build_synthetic_complete_bundle(tmp_path)
+    analysis_dir = tmp_path / "ev_charging_infrastructure_control_analysis"
+    extract_script = (
+        PROJECT_ROOT
+        / "analysis"
+        / "ev_charging_infrastructure_control"
+        / "extract_diagnostic_datasets.py"
+    )
+    compare_script = (
+        PROJECT_ROOT
+        / "analysis"
+        / "ev_charging_infrastructure_control"
+        / "compare_control_architectures.py"
+    )
+
+    extract_result = subprocess.run(
+        [
+            sys.executable,
+            str(extract_script),
+            "--bundle",
+            str(bundle),
+            "--output-dir",
+            str(analysis_dir),
+            "--expected-episodes-per-seed",
+            "1",
+        ],
+        cwd=PROJECT_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert extract_result.returncode == 0, extract_result.stderr
+    assert "EV_CHARGING_INFRASTRUCTURE_DATASET_EXTRACTION_START" in (
+        extract_result.stdout
+    )
+    assert "BUNDLE_VALIDATION=PASS" in extract_result.stdout
+    assert "EPISODE_METRICS_ROWS=40" in extract_result.stdout
+    assert "OUTPUT_PUBLICATION=PASS" in extract_result.stdout
+    assert "EV_CHARGING_INFRASTRUCTURE_DATASET_EXTRACTION_COMPLETED" in (
+        extract_result.stdout
+    )
+
+    compare_result = subprocess.run(
+        [
+            sys.executable,
+            str(compare_script),
+            "--analysis-dir",
+            str(analysis_dir),
+            "--expected-episodes-per-seed",
+            "1",
+        ],
+        cwd=PROJECT_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert compare_result.returncode == 0, compare_result.stderr
+    assert "EV_CHARGING_INFRASTRUCTURE_CONTROL_COMPARISON_START" in (
+        compare_result.stdout
+    )
+    assert "PAIRING_VALIDATION=PASS" in compare_result.stdout
+    assert "PAIRED_COMPARISON_ROWS=88" in compare_result.stdout
+    assert "RESULT_PUBLICATION=PASS" in compare_result.stdout
+    assert "EV_CHARGING_INFRASTRUCTURE_CONTROL_COMPARISON_COMPLETED" in (
+        compare_result.stdout
+    )
+
+    assert generated_relative_paths(analysis_dir) == [
+        "datasets/charger_metrics.csv",
+        "datasets/episode_metrics.csv",
+        "datasets/seed_metrics.csv",
+        "datasets/transformer_metrics.csv",
+        "provenance.json",
+        "results/metric_interpretation.md",
+        "results/paired_control_comparisons.csv",
+        "results/scale_level_summary.csv",
+    ]
+    assert_generated_names_are_semantic(analysis_dir)

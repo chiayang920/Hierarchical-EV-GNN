@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import csv
 import hashlib
 import io
@@ -10,9 +11,16 @@ import math
 import os
 import re
 import shutil
+import sys
 import tarfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+
+REPO_ROOT_FOR_IMPORTS = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
+if REPO_ROOT_FOR_IMPORTS not in sys.path:
+    sys.path.insert(0, REPO_ROOT_FOR_IMPORTS)
 
 from analysis.ev_charging_infrastructure_control.metric_definitions import (
     METRIC_DEFINITIONS,
@@ -811,3 +819,45 @@ def extract_diagnostic_datasets(
         expected_episodes_per_seed,
     )
     return {dataset_name: len(rows) for dataset_name, rows in rows_by_dataset.items()}
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Extract EV infrastructure diagnostic analysis datasets.",
+    )
+    parser.add_argument("--bundle", required=True, type=Path)
+    parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--expected-episodes-per-seed", type=int, default=30)
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    print("EV_CHARGING_INFRASTRUCTURE_DATASET_EXTRACTION_START")
+    evidence = read_complete_bundle(args.bundle)
+    print("BUNDLE_VALIDATION=PASS")
+    print(f"TASK_PACKAGE_COUNT={len(evidence.task_packages)}")
+    rows_by_dataset = collect_validated_dataset_rows(
+        evidence,
+        args.expected_episodes_per_seed,
+    )
+    publish_dataset_outputs(
+        Path(args.output_dir).expanduser().resolve(),
+        evidence,
+        rows_by_dataset,
+        args.expected_episodes_per_seed,
+    )
+    dataset_counts = {
+        dataset_name: len(rows) for dataset_name, rows in rows_by_dataset.items()
+    }
+    print(f"EPISODE_METRICS_ROWS={dataset_counts['episode_metrics']}")
+    print(f"SEED_METRICS_ROWS={dataset_counts['seed_metrics']}")
+    print(f"TRANSFORMER_METRICS_ROWS={dataset_counts['transformer_metrics']}")
+    print(f"CHARGER_METRICS_ROWS={dataset_counts['charger_metrics']}")
+    print("OUTPUT_PUBLICATION=PASS")
+    print("EV_CHARGING_INFRASTRUCTURE_DATASET_EXTRACTION_COMPLETED")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

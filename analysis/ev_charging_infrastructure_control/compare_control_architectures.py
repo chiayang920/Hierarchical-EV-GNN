@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
-import math
+import argparse
 import csv
 import json
+import math
 import os
 import shutil
+import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
+
+REPO_ROOT_FOR_IMPORTS = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
+if REPO_ROOT_FOR_IMPORTS not in sys.path:
+    sys.path.insert(0, REPO_ROOT_FOR_IMPORTS)
 
 from analysis.ev_charging_infrastructure_control.metric_definitions import (
     METRIC_DEFINITIONS,
@@ -544,6 +552,8 @@ def paired_statistics(
 
 
 def read_csv_rows(path: Path) -> list[dict[str, str]]:
+    if not path.is_file():
+        fail(f"missing dataset CSV: {path.name}")
     with path.open(newline="", encoding="utf-8") as handle:
         return list(csv.DictReader(handle))
 
@@ -552,7 +562,7 @@ def format_optional_float(value: float | None) -> str:
     if value is None:
         return ""
     if math.isinf(value):
-        return "inf" if value > 0 else "-inf"
+        return ""
     return format(value, ".17g")
 
 
@@ -833,6 +843,7 @@ def compare_control_architectures(
     episode_rows = read_csv_rows(dataset_dir / "episode_metrics.csv")
     seed_rows = read_csv_rows(dataset_dir / "seed_metrics.csv")
     transformer_rows = read_csv_rows(dataset_dir / "transformer_metrics.csv")
+    read_csv_rows(dataset_dir / "charger_metrics.csv")
     observations = build_seed_level_metrics(episode_rows, transformer_rows, seed_rows)
     comparison_rows = build_comparison_rows(observations)
     summary_rows = build_scale_summary_rows(comparison_rows)
@@ -845,3 +856,33 @@ def compare_control_architectures(
         "paired_control_comparisons": len(comparison_rows),
         "scale_level_summary": len(summary_rows),
     }
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Compare EV infrastructure control architectures.",
+    )
+    parser.add_argument("--analysis-dir", required=True, type=Path)
+    parser.add_argument("--expected-episodes-per-seed", type=int, default=30)
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    print("EV_CHARGING_INFRASTRUCTURE_CONTROL_COMPARISON_START")
+    row_counts = compare_control_architectures(
+        args.analysis_dir,
+        expected_episodes_per_seed=args.expected_episodes_per_seed,
+    )
+    print("PROVENANCE_VALIDATION=PASS")
+    print("SEED_LEVEL_AGGREGATION=PASS")
+    print("PAIRING_VALIDATION=PASS")
+    print(f"PAIRED_COMPARISON_ROWS={row_counts['paired_control_comparisons']}")
+    print(f"SCALE_SUMMARY_ROWS={row_counts['scale_level_summary']}")
+    print("RESULT_PUBLICATION=PASS")
+    print("EV_CHARGING_INFRASTRUCTURE_CONTROL_COMPARISON_COMPLETED")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
