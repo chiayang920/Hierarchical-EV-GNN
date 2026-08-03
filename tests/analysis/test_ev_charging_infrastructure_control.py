@@ -54,6 +54,12 @@ EXPECTED_METRICS = {
 SCALES = ("25cp", "100cp", "500cp", "1000cp")
 ALGORITHMS = ("actiongnn", "hierarchical")
 TRAINING_SEEDS = tuple(range(5))
+TOPOLOGY = {
+    "25cp": (3, 25),
+    "100cp": (7, 100),
+    "500cp": (35, 500),
+    "1000cp": (70, 1000),
+}
 SYNTHETIC_DIAGNOSTIC_ARRAY_JOB_ID = "58745233"
 SYNTHETIC_REDUCER_JOB_ID = "58745234"
 SYNTHETIC_FORMAL_JOB_ID = "58513929"
@@ -68,7 +74,7 @@ def extraction_module():
 
 def csv_bytes(fieldnames, rows):
     text_buffer = io.StringIO()
-    writer = csv.DictWriter(text_buffer, fieldnames=fieldnames)
+    writer = csv.DictWriter(text_buffer, fieldnames=fieldnames, extrasaction="ignore")
     writer.writeheader()
     writer.writerows(rows)
     return text_buffer.getvalue().encode("utf-8")
@@ -106,16 +112,30 @@ def checksum_manifest_bytes(member_pairs, duplicate_name=None, corrupt_name=None
     return "".join(lines).encode("utf-8")
 
 
-def synthetic_episode_row(scale, algorithm, training_seed, episode_index):
+def synthetic_episode_row(
+    scale,
+    algorithm,
+    training_seed,
+    episode_index,
+    *,
+    diagnostic_schema_version="3",
+    matrix_job_id=SYNTHETIC_DIAGNOSTIC_ARRAY_JOB_ID,
+    non_finite_metric=False,
+    mismatched_episode_seed=False,
+):
     row = {column: "1" for column in EPISODE_DIAGNOSTIC_COLUMNS}
     row.update(
         {
-            "matrix_job_id": SYNTHETIC_DIAGNOSTIC_ARRAY_JOB_ID,
+            "matrix_job_id": matrix_job_id,
             "scale": scale,
             "algorithm": algorithm,
             "training_seed": str(training_seed),
             "episode_index": str(episode_index),
-            "episode_seed": str(710000 + training_seed * 1000 + episode_index),
+            "episode_seed": str(
+                999999
+                if mismatched_episode_seed
+                else 710000 + training_seed * 1000 + episode_index
+            ),
             "config": "config_files/PublicPST_25cp.yaml",
             "checkpoint_prefix": "checkpoint/model.best",
             "run_name": "synthetic",
@@ -123,17 +143,27 @@ def synthetic_episode_row(scale, algorithm, training_seed, episode_index):
             "environment_action_domain_support": "continuous",
             "v2g_enabled": "False",
             "v2g_enabled_source": "config",
-            "diagnostic_schema_version": "3",
+            "diagnostic_schema_version": diagnostic_schema_version,
         }
     )
+    if non_finite_metric:
+        row["tracking_error"] = "nan"
     return row
 
 
-def synthetic_seed_row(scale, algorithm, training_seed, n_eval_episodes):
+def synthetic_seed_row(
+    scale,
+    algorithm,
+    training_seed,
+    n_eval_episodes,
+    *,
+    diagnostic_schema_version="3",
+    matrix_job_id=SYNTHETIC_DIAGNOSTIC_ARRAY_JOB_ID,
+):
     row = {column: "1" for column in SEED_SUMMARY_DIAGNOSTIC_COLUMNS}
     row.update(
         {
-            "matrix_job_id": SYNTHETIC_DIAGNOSTIC_ARRAY_JOB_ID,
+            "matrix_job_id": matrix_job_id,
             "scale": scale,
             "algorithm": algorithm,
             "training_seed": str(training_seed),
@@ -141,44 +171,63 @@ def synthetic_seed_row(scale, algorithm, training_seed, n_eval_episodes):
             "environment_action_domain_support": "continuous",
             "v2g_enabled": "False",
             "v2g_enabled_source": "config",
-            "diagnostic_schema_version": "3",
+            "diagnostic_schema_version": diagnostic_schema_version,
         }
     )
     return row
 
 
-def synthetic_transformer_row(scale, algorithm, training_seed, episode_index):
+def synthetic_transformer_row(
+    scale,
+    algorithm,
+    training_seed,
+    episode_index,
+    transformer_id,
+    *,
+    diagnostic_schema_version="3",
+    matrix_job_id=SYNTHETIC_DIAGNOSTIC_ARRAY_JOB_ID,
+):
     row = {column: "1" for column in TRANSFORMER_DIAGNOSTIC_COLUMNS}
     row.update(
         {
-            "matrix_job_id": SYNTHETIC_DIAGNOSTIC_ARRAY_JOB_ID,
+            "matrix_job_id": matrix_job_id,
             "scale": scale,
             "algorithm": algorithm,
             "training_seed": str(training_seed),
             "episode_index": str(episode_index),
             "episode_seed": str(710000 + training_seed * 1000 + episode_index),
-            "transformer_id": "0",
+            "transformer_id": str(transformer_id),
             "user_satisfaction_source": "ev2gym",
-            "diagnostic_schema_version": "3",
+            "diagnostic_schema_version": diagnostic_schema_version,
         }
     )
     return row
 
 
-def synthetic_charger_row(scale, algorithm, training_seed, episode_index):
+def synthetic_charger_row(
+    scale,
+    algorithm,
+    training_seed,
+    episode_index,
+    charger_id,
+    transformer_id,
+    *,
+    diagnostic_schema_version="3",
+    matrix_job_id=SYNTHETIC_DIAGNOSTIC_ARRAY_JOB_ID,
+):
     row = {column: "1" for column in CHARGER_DIAGNOSTIC_COLUMNS}
     row.update(
         {
-            "matrix_job_id": SYNTHETIC_DIAGNOSTIC_ARRAY_JOB_ID,
+            "matrix_job_id": matrix_job_id,
             "scale": scale,
             "algorithm": algorithm,
             "training_seed": str(training_seed),
             "episode_index": str(episode_index),
             "episode_seed": str(710000 + training_seed * 1000 + episode_index),
-            "transformer_id": "0",
-            "charger_id": "0",
+            "transformer_id": str(transformer_id),
+            "charger_id": str(charger_id),
             "user_satisfaction_source": "ev2gym",
-            "diagnostic_schema_version": "3",
+            "diagnostic_schema_version": diagnostic_schema_version,
         }
     )
     return row
@@ -192,33 +241,93 @@ def build_synthetic_task_package(
     corrupt_nested_checksum=False,
     duplicate_nested_manifest_entry=False,
     add_uncovered_nested_file=False,
+    duplicate_episode_key=False,
+    missing_episode_column=False,
+    non_finite_metric=False,
+    wrong_schema=False,
+    mismatched_matrix_job_id=False,
+    missing_hierarchical_episode=False,
 ):
     members = []
+    transformer_count, charger_count = TOPOLOGY[scale]
     for training_seed in TRAINING_SEEDS:
+        schema_version = "2" if wrong_schema and training_seed == 0 else "3"
+        matrix_job_id = (
+            "wrong"
+            if mismatched_matrix_job_id and training_seed == 0
+            else SYNTHETIC_DIAGNOSTIC_ARRAY_JOB_ID
+        )
         seed_prefix = f"seed{training_seed}/diagnostics"
         episode_rows = [
-            synthetic_episode_row(scale, algorithm, training_seed, episode_index)
+            synthetic_episode_row(
+                scale,
+                algorithm,
+                training_seed,
+                episode_index,
+                diagnostic_schema_version=schema_version,
+                matrix_job_id=matrix_job_id,
+                non_finite_metric=non_finite_metric
+                and training_seed == 0
+                and episode_index == 0,
+                mismatched_episode_seed=missing_hierarchical_episode
+                and algorithm == "hierarchical"
+                and training_seed == 0
+                and episode_index == 0,
+            )
             for episode_index in range(episodes_per_seed)
         ]
+        if duplicate_episode_key and training_seed == 0:
+            episode_rows.append(dict(episode_rows[0]))
         transformer_rows = [
-            synthetic_transformer_row(scale, algorithm, training_seed, episode_index)
+            synthetic_transformer_row(
+                scale,
+                algorithm,
+                training_seed,
+                episode_index,
+                transformer_id,
+                diagnostic_schema_version=schema_version,
+                matrix_job_id=matrix_job_id,
+            )
             for episode_index in range(episodes_per_seed)
+            for transformer_id in range(transformer_count)
         ]
         charger_rows = [
-            synthetic_charger_row(scale, algorithm, training_seed, episode_index)
+            synthetic_charger_row(
+                scale,
+                algorithm,
+                training_seed,
+                episode_index,
+                charger_id,
+                charger_id % transformer_count,
+                diagnostic_schema_version=schema_version,
+                matrix_job_id=matrix_job_id,
+            )
             for episode_index in range(episodes_per_seed)
+            for charger_id in range(charger_count)
         ]
+        episode_fieldnames = list(EPISODE_DIAGNOSTIC_COLUMNS)
+        if missing_episode_column and training_seed == 0:
+            episode_fieldnames.remove("tracking_error")
         members.extend(
             [
                 (
                     f"{seed_prefix}/episode_diagnostics.csv",
-                    csv_bytes(EPISODE_DIAGNOSTIC_COLUMNS, episode_rows),
+                    csv_bytes(episode_fieldnames, episode_rows),
                 ),
                 (
                     f"{seed_prefix}/seed_summary_diagnostics.csv",
                     csv_bytes(
                         SEED_SUMMARY_DIAGNOSTIC_COLUMNS,
-                        [synthetic_seed_row(scale, algorithm, training_seed, episodes_per_seed)],
+                        [
+                            synthetic_seed_row(
+                                scale,
+                                algorithm,
+                                training_seed,
+                                episodes_per_seed,
+                                diagnostic_schema_version=schema_version,
+                                matrix_job_id=matrix_job_id,
+                            )
+                        ],
                     ),
                 ),
                 (
@@ -260,6 +369,12 @@ def build_synthetic_complete_bundle(
     add_uncovered_nested_file=False,
     wrong_workflow_identity=False,
     add_outer_symlink=False,
+    duplicate_episode_key=False,
+    missing_episode_column=False,
+    non_finite_metric=False,
+    wrong_schema=False,
+    mismatched_matrix_job_id=False,
+    missing_hierarchical_episode=False,
 ):
     task_packages = []
     inventory_rows = []
@@ -275,6 +390,14 @@ def build_synthetic_complete_bundle(
                     duplicate_nested_manifest_entry and task_id == 0
                 ),
                 add_uncovered_nested_file=add_uncovered_nested_file and task_id == 0,
+                duplicate_episode_key=duplicate_episode_key and task_id == 0,
+                missing_episode_column=missing_episode_column and task_id == 0,
+                non_finite_metric=non_finite_metric and task_id == 0,
+                wrong_schema=wrong_schema and task_id == 0,
+                mismatched_matrix_job_id=mismatched_matrix_job_id and task_id == 0,
+                missing_hierarchical_episode=(
+                    missing_hierarchical_episode and algorithm == "hierarchical"
+                ),
             )
             package_sha256 = sha256_bytes(package_bytes)
             if corrupt_task_package_sha and task_id == 0:
@@ -508,3 +631,106 @@ def test_complete_bundle_reads_provenance_and_task_packages(tmp_path):
         for scale in SCALES
         for algorithm in ALGORITHMS
     }
+
+
+def read_csv_file(path):
+    with path.open(newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+def generated_relative_paths(root_path):
+    return sorted(
+        path.relative_to(root_path).as_posix()
+        for path in root_path.rglob("*")
+        if path.is_file()
+    )
+
+
+def test_extraction_publishes_semantic_outputs(tmp_path):
+    bundle = build_synthetic_complete_bundle(tmp_path)
+    output_dir = tmp_path / "ev_charging_infrastructure_control_analysis"
+
+    extraction_module().extract_diagnostic_datasets(
+        bundle, output_dir, expected_episodes_per_seed=1
+    )
+
+    assert sorted(path.name for path in (output_dir / "datasets").iterdir()) == [
+        "charger_metrics.csv",
+        "episode_metrics.csv",
+        "seed_metrics.csv",
+        "transformer_metrics.csv",
+    ]
+    assert (output_dir / "provenance.json").is_file()
+    assert len(read_csv_file(output_dir / "datasets" / "episode_metrics.csv")) == 40
+    assert len(read_csv_file(output_dir / "datasets" / "seed_metrics.csv")) == 40
+    assert len(read_csv_file(output_dir / "datasets" / "transformer_metrics.csv")) == (
+        2 * len(TRAINING_SEEDS) * sum(counts[0] for counts in TOPOLOGY.values())
+    )
+    assert len(read_csv_file(output_dir / "datasets" / "charger_metrics.csv")) == (
+        2 * len(TRAINING_SEEDS) * sum(counts[1] for counts in TOPOLOGY.values())
+    )
+    assert generated_relative_paths(output_dir) == [
+        "datasets/charger_metrics.csv",
+        "datasets/episode_metrics.csv",
+        "datasets/seed_metrics.csv",
+        "datasets/transformer_metrics.csv",
+        "provenance.json",
+    ]
+
+
+def test_extraction_rejects_duplicate_episode_key(tmp_path):
+    bundle = build_synthetic_complete_bundle(tmp_path, duplicate_episode_key=True)
+    with pytest.raises(RuntimeError, match="duplicate episode key"):
+        extraction_module().extract_diagnostic_datasets(
+            bundle, tmp_path / "analysis-output", expected_episodes_per_seed=1
+        )
+
+
+def test_extraction_rejects_missing_required_episode_column(tmp_path):
+    bundle = build_synthetic_complete_bundle(tmp_path, missing_episode_column=True)
+    with pytest.raises(RuntimeError, match="missing required column"):
+        extraction_module().extract_diagnostic_datasets(
+            bundle, tmp_path / "analysis-output", expected_episodes_per_seed=1
+        )
+
+
+def test_extraction_rejects_non_finite_approved_metric(tmp_path):
+    bundle = build_synthetic_complete_bundle(tmp_path, non_finite_metric=True)
+    with pytest.raises(RuntimeError, match="non-finite approved metric"):
+        extraction_module().extract_diagnostic_datasets(
+            bundle, tmp_path / "analysis-output", expected_episodes_per_seed=1
+        )
+
+
+def test_extraction_rejects_wrong_schema(tmp_path):
+    bundle = build_synthetic_complete_bundle(tmp_path, wrong_schema=True)
+    with pytest.raises(RuntimeError, match="diagnostic schema version"):
+        extraction_module().extract_diagnostic_datasets(
+            bundle, tmp_path / "analysis-output", expected_episodes_per_seed=1
+        )
+
+
+def test_extraction_rejects_mismatched_matrix_job_id(tmp_path):
+    bundle = build_synthetic_complete_bundle(tmp_path, mismatched_matrix_job_id=True)
+    with pytest.raises(RuntimeError, match="matrix_job_id"):
+        extraction_module().extract_diagnostic_datasets(
+            bundle, tmp_path / "analysis-output", expected_episodes_per_seed=1
+        )
+
+
+def test_extraction_rejects_mismatched_algorithm_episode_seed_sets(tmp_path):
+    bundle = build_synthetic_complete_bundle(tmp_path, missing_hierarchical_episode=True)
+    with pytest.raises(RuntimeError, match="episode seed sets"):
+        extraction_module().extract_diagnostic_datasets(
+            bundle, tmp_path / "analysis-output", expected_episodes_per_seed=1
+        )
+
+
+def test_extraction_rejects_existing_output_directory(tmp_path):
+    bundle = build_synthetic_complete_bundle(tmp_path)
+    output_dir = tmp_path / "analysis-output"
+    output_dir.mkdir()
+    with pytest.raises(RuntimeError, match="output directory already exists"):
+        extraction_module().extract_diagnostic_datasets(
+            bundle, output_dir, expected_episodes_per_seed=1
+        )

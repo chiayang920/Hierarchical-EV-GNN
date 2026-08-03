@@ -6,10 +6,23 @@ import csv
 import hashlib
 import io
 import json
+import math
+import os
 import re
+import shutil
 import tarfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+
+from analysis.ev_charging_infrastructure_control.metric_definitions import (
+    METRIC_DEFINITIONS,
+)
+from utils.infrastructure_diagnostics import (
+    CHARGER_DIAGNOSTIC_COLUMNS,
+    EPISODE_DIAGNOSTIC_COLUMNS,
+    SEED_SUMMARY_DIAGNOSTIC_COLUMNS,
+    TRANSFORMER_DIAGNOSTIC_COLUMNS,
+)
 
 
 SCALES = ("25cp", "100cp", "500cp", "1000cp")
@@ -22,6 +35,32 @@ EXPECTED_CHECKPOINT_GROUP_COUNT = 40
 EXPECTED_TOTAL_EPISODE_COUNT = 1200
 EXPECTED_PACKAGE_EPISODE_COUNT = 150
 CHECKSUM_LINE_RE = re.compile(r"^([0-9a-f]{64})  ([^\n\r]+)$")
+TOPOLOGY = {
+    "25cp": (3, 25),
+    "100cp": (7, 100),
+    "500cp": (35, 500),
+    "1000cp": (70, 1000),
+}
+EPISODE_OUTPUT_COLUMNS = tuple(
+    column
+    for column in EPISODE_DIAGNOSTIC_COLUMNS
+    if column not in {"config", "checkpoint_prefix", "run_name"}
+)
+APPROVED_EPISODE_METRIC_COLUMNS = tuple(
+    definition.source_column
+    for definition in METRIC_DEFINITIONS
+    if definition.source_level == "episode"
+)
+APPROVED_TRANSFORMER_METRIC_COLUMNS = tuple(
+    definition.source_column
+    for definition in METRIC_DEFINITIONS
+    if definition.source_level == "transformer"
+)
+APPROVED_SEED_SUMMARY_COLUMNS = tuple(
+    definition.seed_summary_column
+    for definition in METRIC_DEFINITIONS
+    if definition.seed_summary_column is not None
+)
 
 
 @dataclass(frozen=True)
@@ -193,6 +232,19 @@ def parse_int(text: str, context: str) -> int:
         raise RuntimeError(f"{context}: expected integer, found {text!r}") from exc
 
 
+def parse_finite_float(text: object, context: str) -> float:
+    raw_text = "" if text is None else str(text).strip()
+    if raw_text == "":
+        fail(f"{context}: missing numeric value")
+    try:
+        value = float(raw_text)
+    except ValueError as exc:
+        raise RuntimeError(f"{context}: invalid numeric value {raw_text!r}") from exc
+    if not math.isfinite(value):
+        fail(f"{context}: non-finite approved metric")
+    return value
+
+
 def validate_workflow_identity(
     workflow: dict[str, object],
     *,
@@ -347,3 +399,415 @@ def read_complete_bundle(bundle_path: str | Path) -> CompleteBundleEvidence:
         provenance=provenance,
         task_packages=tuple(sorted(task_packages, key=lambda task: task.task_id)),
     )
+
+
+def csv_rows_from_member(
+    regular_files: dict[str, bytes],
+    member_name: str,
+    required_columns: tuple[str, ...] | list[str],
+) -> list[dict[str, str]]:
+    require(member_name in regular_files, f"missing required member: {member_name}")
+    text_stream = io.StringIO(regular_files[member_name].decode("utf-8"))
+    reader = csv.DictReader(text_stream)
+    fieldnames = tuple(reader.fieldnames or ())
+    missing_columns = [column for column in required_columns if column not in fieldnames]
+    if missing_columns:
+        fail(
+            f"{member_name}: missing required column(s): "
+            + ", ".join(missing_columns)
+        )
+    return list(reader)
+
+
+def validate_row_identity(
+    row: dict[str, str],
+    *,
+    task_package: TaskPackage,
+    provenance: Provenance,
+    training_seed: int,
+    member_name: str,
+) -> None:
+    if row.get("scale") != task_package.scale:
+        fail(f"{member_name}: scale mismatch")
+    if row.get("algorithm") != task_package.algorithm:
+        fail(f"{member_name}: algorithm mismatch")
+    if parse_int(row.get("training_seed", ""), f"{member_name}: training_seed") != training_seed:
+        fail(f"{member_name}: training_seed mismatch")
+    if row.get("matrix_job_id") != provenance.diagnostic_array_job_id:
+        fail(f"{member_name}: matrix_job_id mismatch")
+    if str(row.get("diagnostic_schema_version", "")) != DIAGNOSTIC_SCHEMA_VERSION:
+        fail(f"{member_name}: diagnostic schema version mismatch")
+
+
+def validate_finite_columns(
+    row: dict[str, str],
+    columns: tuple[str, ...],
+    member_name: str,
+) -> None:
+    for column in columns:
+        parse_finite_float(row.get(column), f"{member_name}: {column}")
+
+
+def output_row(row: dict[str, str], fieldnames: tuple[str, ...]) -> dict[str, str]:
+    return {fieldname: row.get(fieldname, "") for fieldname in fieldnames}
+
+
+def expected_dataset_counts(expected_episodes_per_seed: int) -> dict[str, int]:
+    scale_count = len(SCALES)
+    algorithm_count = len(ALGORITHMS)
+    seed_count = len(TRAINING_SEEDS)
+    transformer_count = sum(counts[0] for counts in TOPOLOGY.values())
+    charger_count = sum(counts[1] for counts in TOPOLOGY.values())
+    return {
+        "episode_metrics": scale_count
+        * algorithm_count
+        * seed_count
+        * expected_episodes_per_seed,
+        "seed_metrics": scale_count * algorithm_count * seed_count,
+        "transformer_metrics": algorithm_count
+        * seed_count
+        * expected_episodes_per_seed
+        * transformer_count,
+        "charger_metrics": algorithm_count
+        * seed_count
+        * expected_episodes_per_seed
+        * charger_count,
+    }
+
+
+def validate_complete_matrix(
+    episode_keys: set[tuple[str, str, int, int, int]],
+    expected_episodes_per_seed: int,
+) -> None:
+    for scale in SCALES:
+        for algorithm in ALGORITHMS:
+            for training_seed in TRAINING_SEEDS:
+                observed_episode_indices = {
+                    episode_index
+                    for (
+                        observed_scale,
+                        observed_algorithm,
+                        observed_training_seed,
+                        episode_index,
+                        _episode_seed,
+                    ) in episode_keys
+                    if (
+                        observed_scale,
+                        observed_algorithm,
+                        observed_training_seed,
+                    )
+                    == (scale, algorithm, training_seed)
+                }
+                expected_episode_indices = set(range(expected_episodes_per_seed))
+                if observed_episode_indices != expected_episode_indices:
+                    fail(
+                        "episode indices mismatch for "
+                        f"{scale}/{algorithm}/seed{training_seed}"
+                    )
+
+    for scale in SCALES:
+        actiongnn_pairs = {
+            (training_seed, episode_index, episode_seed)
+            for (
+                observed_scale,
+                observed_algorithm,
+                training_seed,
+                episode_index,
+                episode_seed,
+            ) in episode_keys
+            if observed_scale == scale and observed_algorithm == "actiongnn"
+        }
+        hierarchical_pairs = {
+            (training_seed, episode_index, episode_seed)
+            for (
+                observed_scale,
+                observed_algorithm,
+                training_seed,
+                episode_index,
+                episode_seed,
+            ) in episode_keys
+            if observed_scale == scale and observed_algorithm == "hierarchical"
+        }
+        if actiongnn_pairs != hierarchical_pairs:
+            fail(f"episode seed sets mismatch for scale {scale}")
+
+
+def collect_validated_dataset_rows(
+    evidence: CompleteBundleEvidence,
+    expected_episodes_per_seed: int,
+) -> dict[str, list[dict[str, str]]]:
+    episode_rows_out: list[dict[str, str]] = []
+    seed_rows_out: list[dict[str, str]] = []
+    transformer_rows_out: list[dict[str, str]] = []
+    charger_rows_out: list[dict[str, str]] = []
+
+    episode_keys: set[tuple[str, str, int, int, int]] = set()
+    seed_keys: set[tuple[str, str, int]] = set()
+    transformer_keys: set[tuple[str, str, int, int, int, int]] = set()
+    charger_keys: set[tuple[str, str, int, int, int, int, int]] = set()
+
+    for task_package in evidence.task_packages:
+        nested_files = read_tar_regular_files(
+            task_package.archive_bytes, task_package.package_name
+        )
+        validate_manifest_coverage(
+            nested_files,
+            "checksums/package_file_checksums.sha256",
+            "nested",
+        )
+        for training_seed in TRAINING_SEEDS:
+            seed_prefix = f"seed{training_seed}/diagnostics"
+            episode_member = f"{seed_prefix}/episode_diagnostics.csv"
+            seed_member = f"{seed_prefix}/seed_summary_diagnostics.csv"
+            transformer_member = f"{seed_prefix}/transformer_diagnostics.csv"
+            charger_member = f"{seed_prefix}/charger_diagnostics.csv"
+
+            episode_rows = csv_rows_from_member(
+                nested_files, episode_member, EPISODE_DIAGNOSTIC_COLUMNS
+            )
+            for row in episode_rows:
+                validate_row_identity(
+                    row,
+                    task_package=task_package,
+                    provenance=evidence.provenance,
+                    training_seed=training_seed,
+                    member_name=episode_member,
+                )
+                validate_finite_columns(row, APPROVED_EPISODE_METRIC_COLUMNS, episode_member)
+                episode_index = parse_int(row["episode_index"], f"{episode_member}: episode_index")
+                episode_seed = parse_int(row["episode_seed"], f"{episode_member}: episode_seed")
+                key = (
+                    task_package.scale,
+                    task_package.algorithm,
+                    training_seed,
+                    episode_index,
+                    episode_seed,
+                )
+                if key in episode_keys:
+                    fail(f"duplicate episode key: {key}")
+                episode_keys.add(key)
+                episode_rows_out.append(output_row(row, EPISODE_OUTPUT_COLUMNS))
+            if len(episode_rows) != expected_episodes_per_seed:
+                fail(
+                    f"{episode_member}: expected {expected_episodes_per_seed} episodes, "
+                    f"found {len(episode_rows)}"
+                )
+
+            seed_rows = csv_rows_from_member(
+                nested_files, seed_member, SEED_SUMMARY_DIAGNOSTIC_COLUMNS
+            )
+            if len(seed_rows) != 1:
+                fail(f"{seed_member}: expected exactly one seed summary row")
+            seed_row = seed_rows[0]
+            validate_row_identity(
+                seed_row,
+                task_package=task_package,
+                provenance=evidence.provenance,
+                training_seed=training_seed,
+                member_name=seed_member,
+            )
+            if parse_int(seed_row["n_eval_episodes"], f"{seed_member}: n_eval_episodes") != expected_episodes_per_seed:
+                fail(f"{seed_member}: n_eval_episodes mismatch")
+            validate_finite_columns(seed_row, APPROVED_SEED_SUMMARY_COLUMNS, seed_member)
+            seed_key = (task_package.scale, task_package.algorithm, training_seed)
+            if seed_key in seed_keys:
+                fail(f"duplicate seed key: {seed_key}")
+            seed_keys.add(seed_key)
+            seed_rows_out.append(output_row(seed_row, tuple(SEED_SUMMARY_DIAGNOSTIC_COLUMNS)))
+
+            transformer_rows = csv_rows_from_member(
+                nested_files, transformer_member, TRANSFORMER_DIAGNOSTIC_COLUMNS
+            )
+            for row in transformer_rows:
+                validate_row_identity(
+                    row,
+                    task_package=task_package,
+                    provenance=evidence.provenance,
+                    training_seed=training_seed,
+                    member_name=transformer_member,
+                )
+                validate_finite_columns(
+                    row, APPROVED_TRANSFORMER_METRIC_COLUMNS, transformer_member
+                )
+                episode_index = parse_int(
+                    row["episode_index"], f"{transformer_member}: episode_index"
+                )
+                episode_seed = parse_int(
+                    row["episode_seed"], f"{transformer_member}: episode_seed"
+                )
+                transformer_id = parse_int(
+                    row["transformer_id"], f"{transformer_member}: transformer_id"
+                )
+                key = (
+                    task_package.scale,
+                    task_package.algorithm,
+                    training_seed,
+                    episode_index,
+                    episode_seed,
+                    transformer_id,
+                )
+                if key in transformer_keys:
+                    fail(f"duplicate transformer key: {key}")
+                transformer_keys.add(key)
+                transformer_rows_out.append(
+                    output_row(row, tuple(TRANSFORMER_DIAGNOSTIC_COLUMNS))
+                )
+
+            charger_rows = csv_rows_from_member(
+                nested_files, charger_member, CHARGER_DIAGNOSTIC_COLUMNS
+            )
+            for row in charger_rows:
+                validate_row_identity(
+                    row,
+                    task_package=task_package,
+                    provenance=evidence.provenance,
+                    training_seed=training_seed,
+                    member_name=charger_member,
+                )
+                episode_index = parse_int(
+                    row["episode_index"], f"{charger_member}: episode_index"
+                )
+                episode_seed = parse_int(
+                    row["episode_seed"], f"{charger_member}: episode_seed"
+                )
+                transformer_id = parse_int(
+                    row["transformer_id"], f"{charger_member}: transformer_id"
+                )
+                charger_id = parse_int(row["charger_id"], f"{charger_member}: charger_id")
+                key = (
+                    task_package.scale,
+                    task_package.algorithm,
+                    training_seed,
+                    episode_index,
+                    episode_seed,
+                    transformer_id,
+                    charger_id,
+                )
+                if key in charger_keys:
+                    fail(f"duplicate charger key: {key}")
+                charger_keys.add(key)
+                charger_rows_out.append(output_row(row, tuple(CHARGER_DIAGNOSTIC_COLUMNS)))
+
+    validate_complete_matrix(episode_keys, expected_episodes_per_seed)
+    rows_by_dataset = {
+        "episode_metrics": episode_rows_out,
+        "seed_metrics": seed_rows_out,
+        "transformer_metrics": transformer_rows_out,
+        "charger_metrics": charger_rows_out,
+    }
+    expected_counts = expected_dataset_counts(expected_episodes_per_seed)
+    for dataset_name, rows in rows_by_dataset.items():
+        if len(rows) != expected_counts[dataset_name]:
+            fail(
+                f"{dataset_name}: expected {expected_counts[dataset_name]} rows, "
+                f"found {len(rows)}"
+            )
+    return rows_by_dataset
+
+
+def write_csv_file(path: Path, fieldnames: tuple[str, ...], rows: list[dict[str, str]]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def write_provenance_file(
+    path: Path,
+    provenance: Provenance,
+    dataset_rows: dict[str, int],
+    expected_episodes_per_seed: int,
+) -> None:
+    payload = {
+        "diagnostic_array_job_id": provenance.diagnostic_array_job_id,
+        "reducer_job_id": provenance.reducer_job_id,
+        "formal_training_job_id": provenance.formal_training_job_id,
+        "source_commit_sha": provenance.source_commit_sha,
+        "evidence_bundle_sha256": provenance.evidence_bundle_sha256,
+        "diagnostic_schema_version": provenance.diagnostic_schema_version,
+        "reconciliation_contract_version": provenance.reconciliation_contract_version,
+        "task_package_count": EXPECTED_TASK_PACKAGE_COUNT,
+        "checkpoint_group_count": EXPECTED_CHECKPOINT_GROUP_COUNT,
+        "episode_count": len(SCALES)
+        * len(ALGORITHMS)
+        * len(TRAINING_SEEDS)
+        * expected_episodes_per_seed,
+        "dataset_rows": dataset_rows,
+    }
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def publish_dataset_outputs(
+    output_dir: Path,
+    evidence: CompleteBundleEvidence,
+    rows_by_dataset: dict[str, list[dict[str, str]]],
+    expected_episodes_per_seed: int,
+) -> None:
+    if output_dir.exists():
+        fail(f"output directory already exists: {output_dir}")
+    output_parent = output_dir.parent
+    output_parent.mkdir(parents=True, exist_ok=True)
+    temporary_dir = output_parent / f".ev_charging_infrastructure_control_analysis.tmp.{os.getpid()}"
+    if temporary_dir.exists():
+        fail(f"temporary output directory already exists: {temporary_dir}")
+    dataset_dir = temporary_dir / "datasets"
+    try:
+        dataset_dir.mkdir(parents=True)
+        write_csv_file(
+            dataset_dir / "episode_metrics.csv",
+            EPISODE_OUTPUT_COLUMNS,
+            rows_by_dataset["episode_metrics"],
+        )
+        write_csv_file(
+            dataset_dir / "seed_metrics.csv",
+            tuple(SEED_SUMMARY_DIAGNOSTIC_COLUMNS),
+            rows_by_dataset["seed_metrics"],
+        )
+        write_csv_file(
+            dataset_dir / "transformer_metrics.csv",
+            tuple(TRANSFORMER_DIAGNOSTIC_COLUMNS),
+            rows_by_dataset["transformer_metrics"],
+        )
+        write_csv_file(
+            dataset_dir / "charger_metrics.csv",
+            tuple(CHARGER_DIAGNOSTIC_COLUMNS),
+            rows_by_dataset["charger_metrics"],
+        )
+        dataset_counts = {
+            dataset_name: len(rows) for dataset_name, rows in rows_by_dataset.items()
+        }
+        write_provenance_file(
+            temporary_dir / "provenance.json",
+            evidence.provenance,
+            dataset_counts,
+            expected_episodes_per_seed,
+        )
+        os.replace(temporary_dir, output_dir)
+    except Exception:
+        shutil.rmtree(temporary_dir, ignore_errors=True)
+        raise
+
+
+def extract_diagnostic_datasets(
+    bundle_path: str | Path,
+    output_dir: str | Path,
+    *,
+    expected_episodes_per_seed: int = 30,
+) -> dict[str, int]:
+    resolved_output_dir = Path(output_dir).expanduser().resolve()
+    if resolved_output_dir.exists():
+        fail(f"output directory already exists: {resolved_output_dir}")
+    evidence = read_complete_bundle(bundle_path)
+    rows_by_dataset = collect_validated_dataset_rows(
+        evidence, expected_episodes_per_seed
+    )
+    publish_dataset_outputs(
+        resolved_output_dir,
+        evidence,
+        rows_by_dataset,
+        expected_episodes_per_seed,
+    )
+    return {dataset_name: len(rows) for dataset_name, rows in rows_by_dataset.items()}
