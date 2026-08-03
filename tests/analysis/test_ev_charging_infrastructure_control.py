@@ -874,3 +874,107 @@ def test_pairing_rejects_more_or_fewer_than_five_seeds():
         comparison_module().validate_exact_algorithm_pairs(
             observations, "25cp", "episode_reward"
         )
+
+
+def test_paired_statistics_fixed_oracle():
+    result = comparison_module().paired_statistics(
+        actiongnn_values=[0, 0, 0, 0, 0],
+        hierarchical_values=[1, 2, 3, 4, 5],
+    )
+
+    assert result.mean_difference == pytest.approx(3.0)
+    assert result.sample_standard_deviation == pytest.approx(1.5811388300841898)
+    assert result.t_statistic == pytest.approx(4.242640687119285)
+    assert result.paired_t_p_value == pytest.approx(0.0132355995636827)
+    assert result.confidence_interval_95_low == pytest.approx(1.036756838522439)
+    assert result.confidence_interval_95_high == pytest.approx(4.963243161477561)
+    assert result.cohens_dz == pytest.approx(1.8973665961010275)
+    assert result.relative_difference_status == "undefined_zero_actiongnn_mean"
+
+
+def test_wilcoxon_and_holm_fixed_oracles():
+    statistic, p_value, method, nonzero_count = (
+        comparison_module().wilcoxon_signed_rank([1, 2, 3, 4, 5])
+    )
+
+    assert statistic == pytest.approx(0.0)
+    assert p_value == pytest.approx(0.0625)
+    assert method == "exact"
+    assert nonzero_count == 5
+    assert comparison_module().holm_adjust([0.01, 0.04, 0.03, 0.20]) == pytest.approx(
+        [0.04, 0.09, 0.09, 0.20]
+    )
+
+
+def test_paired_statistics_zero_denominator_and_zero_variance_statuses():
+    zero_difference = comparison_module().paired_statistics(
+        actiongnn_values=[1, 1, 1, 1, 1],
+        hierarchical_values=[1, 1, 1, 1, 1],
+    )
+    nonzero_constant_difference = comparison_module().paired_statistics(
+        actiongnn_values=[2, 2, 2, 2, 2],
+        hierarchical_values=[3, 3, 3, 3, 3],
+    )
+
+    assert zero_difference.cohens_dz == pytest.approx(0.0)
+    assert zero_difference.effect_size_status == "all_differences_zero"
+    assert nonzero_constant_difference.cohens_dz is None
+    assert nonzero_constant_difference.effect_size_status == (
+        "undefined_zero_variance_nonzero_mean"
+    )
+    assert nonzero_constant_difference.relative_difference_percent_of_actiongnn_mean == (
+        pytest.approx(50.0)
+    )
+
+
+def test_wilcoxon_handles_tied_ranks_exactly():
+    statistic, p_value, method, nonzero_count = (
+        comparison_module().wilcoxon_signed_rank([1, -1, 2, -2, 2])
+    )
+
+    assert statistic == pytest.approx(5.5)
+    assert p_value == pytest.approx(0.8125)
+    assert method == "exact"
+    assert nonzero_count == 5
+
+
+def test_comparison_publishes_semantic_results(tmp_path):
+    bundle = build_synthetic_complete_bundle(tmp_path)
+    analysis_dir = tmp_path / "ev_charging_infrastructure_control_analysis"
+    extraction_module().extract_diagnostic_datasets(
+        bundle, analysis_dir, expected_episodes_per_seed=1
+    )
+
+    row_counts = comparison_module().compare_control_architectures(
+        analysis_dir, expected_episodes_per_seed=1
+    )
+
+    comparisons = read_csv_file(
+        analysis_dir / "results" / "paired_control_comparisons.csv"
+    )
+    summary = read_csv_file(analysis_dir / "results" / "scale_level_summary.csv")
+    assert row_counts == {
+        "paired_control_comparisons": 88,
+        "scale_level_summary": 4,
+    }
+    assert len(comparisons) == 88
+    assert len(summary) == 4
+    assert {
+        (row["scale"], row["metric_name"]) for row in comparisons
+    } == {
+        (scale, metric_name)
+        for scale in SCALES
+        for metric_name in EXPECTED_METRICS
+    }
+    assert {
+        row["holm_adjusted_p_value"] != ""
+        for row in comparisons
+        if row["tier"] == "primary"
+    } == {True}
+    assert {
+        row["holm_adjusted_p_value"] == ""
+        for row in comparisons
+        if row["tier"] != "primary"
+    } == {True}
+    assert all(row["n_paired_seeds"] == "5" for row in comparisons)
+    assert (analysis_dir / "results" / "metric_interpretation.md").is_file()
