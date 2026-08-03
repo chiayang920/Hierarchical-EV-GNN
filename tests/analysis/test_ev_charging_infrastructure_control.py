@@ -72,6 +72,12 @@ def extraction_module():
     )
 
 
+def comparison_module():
+    return importlib.import_module(
+        "analysis.ev_charging_infrastructure_control.compare_control_architectures"
+    )
+
+
 def csv_bytes(fieldnames, rows):
     text_buffer = io.StringIO()
     writer = csv.DictWriter(text_buffer, fieldnames=fieldnames, extrasaction="ignore")
@@ -733,4 +739,138 @@ def test_extraction_rejects_existing_output_directory(tmp_path):
     with pytest.raises(RuntimeError, match="output directory already exists"):
         extraction_module().extract_diagnostic_datasets(
             bundle, output_dir, expected_episodes_per_seed=1
+        )
+
+
+def episode_row(scale, algorithm, training_seed, episode_index, **metrics):
+    row = {
+        "scale": scale,
+        "algorithm": algorithm,
+        "training_seed": str(training_seed),
+        "episode_index": str(episode_index),
+        "episode_seed": str(710000 + training_seed * 1000 + episode_index),
+    }
+    row.update({name: str(value) for name, value in metrics.items()})
+    return row
+
+
+def transformer_row(
+    scale,
+    algorithm,
+    training_seed,
+    episode_index,
+    transformer_id,
+    overload_frequency_fraction,
+    overload_magnitude_sum,
+    overload_magnitude_max,
+):
+    return {
+        "scale": scale,
+        "algorithm": algorithm,
+        "training_seed": str(training_seed),
+        "episode_index": str(episode_index),
+        "episode_seed": str(710000 + training_seed * 1000 + episode_index),
+        "transformer_id": str(transformer_id),
+        "overload_frequency_fraction": str(overload_frequency_fraction),
+        "overload_magnitude_sum": str(overload_magnitude_sum),
+        "overload_magnitude_max": str(overload_magnitude_max),
+    }
+
+
+def seed_observation(scale, algorithm, training_seed, metric_name, value):
+    return comparison_module().SeedMetricObservation(
+        scale=scale,
+        algorithm=algorithm,
+        training_seed=training_seed,
+        metric_name=metric_name,
+        value=value,
+    )
+
+
+def test_aggregate_episode_metric_is_averaged_within_seed():
+    rows = [
+        episode_row("25cp", "actiongnn", 0, 0, episode_reward=2.0),
+        episode_row("25cp", "actiongnn", 0, 1, episode_reward=4.0),
+    ]
+
+    values = comparison_module().aggregate_episode_metric(rows, "episode_reward")
+
+    assert values[("25cp", "actiongnn", 0)] == pytest.approx(3.0)
+
+
+def test_aggregate_transformer_overload_rules_are_fixed():
+    rows = [
+        transformer_row("25cp", "actiongnn", 0, 0, 0, 0.1, 2.0, 3.0),
+        transformer_row("25cp", "actiongnn", 0, 0, 1, 0.3, 5.0, 7.0),
+        transformer_row("25cp", "actiongnn", 0, 1, 0, 0.2, 11.0, 13.0),
+        transformer_row("25cp", "actiongnn", 0, 1, 1, 0.4, 17.0, 19.0),
+    ]
+
+    result = comparison_module().aggregate_transformer_overload_metrics(rows)
+
+    key = ("25cp", "actiongnn", 0)
+    assert result[key]["mean_transformer_overload_frequency_fraction"] == pytest.approx(
+        0.25
+    )
+    assert result[key]["mean_total_transformer_overload_magnitude"] == pytest.approx(
+        17.5
+    )
+    assert result[key]["maximum_transformer_overload_magnitude"] == pytest.approx(19.0)
+
+
+def test_pairing_enforces_exact_five_seed_pairs():
+    observations = [
+        seed_observation("25cp", algorithm, seed, "episode_reward", 10.0 + seed)
+        for algorithm in ALGORITHMS
+        for seed in TRAINING_SEEDS
+    ]
+
+    pairs = comparison_module().validate_exact_algorithm_pairs(
+        observations, "25cp", "episode_reward"
+    )
+
+    assert [pair.training_seed for pair in pairs] == [0, 1, 2, 3, 4]
+    assert pairs[0].actiongnn_value == pytest.approx(10.0)
+    assert pairs[0].hierarchical_value == pytest.approx(10.0)
+
+
+def test_pairing_rejects_unequal_seed_sets():
+    observations = [
+        seed_observation("25cp", "actiongnn", seed, "episode_reward", 1.0)
+        for seed in TRAINING_SEEDS
+    ] + [
+        seed_observation("25cp", "hierarchical", seed, "episode_reward", 2.0)
+        for seed in (0, 1, 2, 3)
+    ]
+
+    with pytest.raises(RuntimeError, match="unequal seed sets"):
+        comparison_module().validate_exact_algorithm_pairs(
+            observations, "25cp", "episode_reward"
+        )
+
+
+def test_pairing_rejects_duplicate_seed_observation():
+    observations = [
+        seed_observation("25cp", algorithm, seed, "episode_reward", 1.0)
+        for algorithm in ALGORITHMS
+        for seed in TRAINING_SEEDS
+    ]
+    observations.append(seed_observation("25cp", "actiongnn", 0, "episode_reward", 3.0))
+
+    with pytest.raises(RuntimeError, match="duplicate seed observation"):
+        comparison_module().validate_exact_algorithm_pairs(
+            observations, "25cp", "episode_reward"
+        )
+
+
+def test_pairing_rejects_more_or_fewer_than_five_seeds():
+    observations = [
+        seed_observation("25cp", algorithm, seed, "episode_reward", 1.0)
+        for algorithm in ALGORITHMS
+        for seed in (0, 1, 2)
+    ]
+
+    with pytest.raises(RuntimeError, match="exactly five paired seeds"):
+        comparison_module().validate_exact_algorithm_pairs(
+            observations, "25cp", "episode_reward"
         )
