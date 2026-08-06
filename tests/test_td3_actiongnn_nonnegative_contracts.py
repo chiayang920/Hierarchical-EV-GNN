@@ -1,5 +1,6 @@
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -561,3 +562,67 @@ def test_legacy_signed_actiongnn_exploration_remains_signed(monkeypatch):
     active_ev_node_indexes = torch.as_tensor(state.ev_indexes, dtype=torch.long)
     assert np.any(mapped_action < 0.0)
     assert torch.any(full_node_action[active_ev_node_indexes] < 0.0)
+
+
+def corrected_protocol_args(**overrides):
+    args = SimpleNamespace(
+        algorithm="actiongnn_nonnegative",
+        max_timesteps=50000,
+        eval_freq=5000,
+        eval_episodes=5,
+        start_timesteps=1000,
+        discrete_actions=1,
+    )
+    for field_name, field_value in overrides.items():
+        setattr(args, field_name, field_value)
+    return args
+
+
+def test_training_policy_factory_supports_actiongnn_nonnegative():
+    import train_td3_gnn
+
+    policy_class = train_td3_gnn.get_policy_class("actiongnn_nonnegative")
+
+    assert policy_class.__name__ == "TD3_ActionGNN_NonNegative"
+
+
+def test_corrected_training_protocol_accepts_frozen_contract():
+    import train_td3_gnn
+
+    train_td3_gnn.validate_corrected_training_protocol(corrected_protocol_args())
+
+
+def test_corrected_training_protocol_rejects_mismatch_before_environment_creation(monkeypatch):
+    import train_td3_gnn
+
+    args = corrected_protocol_args(max_timesteps=49999)
+    args.device = "cpu"
+
+    def forbidden_runtime_side_effect(*args, **kwargs):
+        raise AssertionError("runtime side effect should not happen before protocol validation")
+
+    monkeypatch.setattr(train_td3_gnn, "parse_args", lambda: args)
+    monkeypatch.setattr(train_td3_gnn, "resolve_device", forbidden_runtime_side_effect)
+    monkeypatch.setattr(train_td3_gnn, "make_env", forbidden_runtime_side_effect)
+
+    with pytest.raises(ValueError, match="max_timesteps=50000"):
+        train_td3_gnn.main()
+
+
+def test_checkpoint_metadata_uses_shifted_tanh_v1():
+    module = nonnegative_module()
+    metadata = module.build_checkpoint_metadata(
+        corrected_protocol_args(),
+        checkpoint_role="best",
+    )
+
+    assert metadata["metadata_schema"] == "actiongnn_nonnegative_checkpoint_v1"
+    assert metadata["algorithm"] == "actiongnn_nonnegative"
+    assert metadata["actor_output_transform"] == "shifted_tanh_v1"
+    assert metadata["actor_output_transform_formula"] == "0.5 * max_action * (tanh(z) + 1.0)"
+    assert metadata["discrete_actions"] == 1
+    assert metadata["training_budget"] == 50000
+    assert metadata["start_timesteps"] == 1000
+    assert metadata["eval_frequency"] == 5000
+    assert metadata["internal_eval_episodes"] == 5
+    assert metadata["checkpoint_role"] == "best"
