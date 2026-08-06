@@ -111,7 +111,7 @@ def non_ev_mask_for(state):
 
 def test_shifted_tanh_known_logits_fixed_oracle():
     module = nonnegative_module()
-    raw_logits = torch.tensor([[-2.0], [0.0], [2.0]], dtype=torch.float32)
+    raw_logits = torch.tensor([[-1.0], [0.0], [1.0]], dtype=torch.float32)
 
     max_one_action = module.shifted_tanh_nonnegative(raw_logits, max_action=1.0)
     assert torch.allclose(
