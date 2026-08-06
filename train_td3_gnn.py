@@ -239,7 +239,11 @@ def main():
     for t in range(args.max_timesteps):
         episode_timesteps += 1
 
-        mapped_action, node_action = policy.select_action(state, expl_noise=args.expl_noise)
+        mapped_action, node_action = policy.select_action(
+            state,
+            expl_noise=args.expl_noise,
+            return_mapped_action=True,
+        )
         next_state, reward, done, stats = normalise_step_result(env.step(mapped_action))
 
         replay_buffer.add(state, node_action, next_state, reward, done)
