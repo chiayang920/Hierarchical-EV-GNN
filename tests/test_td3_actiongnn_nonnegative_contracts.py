@@ -6,6 +6,10 @@ import pytest
 import torch
 from torch_geometric.data import Data
 
+from TD3.TD3_ActionGNN_Controlled import Actor as SignedActionGNNActor
+from TD3.TD3_ActionGNN_Controlled import TD3_ActionGNN
+from utils.replay_buffer_actiongnn import ActionGNN_ReplayBuffer
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 if str(PROJECT_ROOT) not in sys.path:
@@ -55,6 +59,19 @@ def build_active_ev_state():
     )
 
 
+def build_second_active_ev_state():
+    state = build_active_ev_state()
+    state.action_mapper = [0, 2]
+    state.ev_features = np.array(
+        [
+            [0.75, 3.0, 1.0, 0.0, 0.0, 0.0],
+            [0.10, 8.0, 2.0, 1.0, 1.0, 0.0],
+        ],
+        dtype=float,
+    )
+    return state
+
+
 def build_no_active_ev_state():
     return Data(
         ev_features=np.empty((0, 6), dtype=float),
@@ -102,11 +119,60 @@ def make_policy(max_action=1.0, discrete_actions=1):
     )
 
 
+def make_signed_actor(max_action=1.0):
+    return SignedActionGNNActor(
+        max_action=max_action,
+        fx_node_sizes=FX_NODE_SIZES,
+        feature_dim=8,
+        GNN_hidden_dim=16,
+        num_gcn_layers=3,
+        discrete_actions=1,
+        device=torch.device("cpu"),
+    )
+
+
+def make_signed_policy(max_action=1.0):
+    return TD3_ActionGNN(
+        action_dim=4,
+        max_action=max_action,
+        fx_node_sizes=FX_NODE_SIZES,
+        fx_dim=8,
+        fx_GNN_hidden_dim=16,
+        mlp_hidden_dim=32,
+        actor_num_gcn_layers=3,
+        critic_num_gcn_layers=3,
+        discrete_actions=1,
+        device="cpu",
+    )
+
+
 def non_ev_mask_for(state):
     total_nodes = int(sum(state.sample_node_length))
     mask = torch.ones(total_nodes, dtype=torch.bool)
     mask[torch.as_tensor(state.ev_indexes, dtype=torch.long)] = False
     return mask
+
+
+def full_node_action_for(state, ev_action_values):
+    total_nodes = int(sum(state.sample_node_length))
+    full_node_action = torch.zeros((total_nodes, 1), dtype=torch.float32)
+    active_ev_node_indexes = torch.as_tensor(state.ev_indexes, dtype=torch.long)
+    full_node_action[active_ev_node_indexes, 0] = torch.as_tensor(
+        ev_action_values,
+        dtype=torch.float32,
+    )
+    return full_node_action
+
+
+def patch_ev_noise(monkeypatch, module, noise_values):
+    noise_tensor = torch.as_tensor(noise_values, dtype=torch.float32).reshape(-1, 1)
+
+    def fixed_randn(*shape, dtype=None, device=None, **kwargs):
+        requested_shape = shape[0] if len(shape) == 1 and isinstance(shape[0], tuple) else shape
+        assert tuple(requested_shape) == tuple(noise_tensor.shape)
+        return noise_tensor.to(dtype=dtype or torch.float32, device=device)
+
+    monkeypatch.setattr(module.torch, "randn", fixed_randn)
 
 
 def test_shifted_tanh_known_logits_fixed_oracle():
@@ -257,3 +323,235 @@ def test_discrete_actions_two_fails_before_actor_or_critic_construction(monkeypa
 def test_discrete_actions_one_constructs_normally():
     make_actor(discrete_actions=1)
     make_policy(discrete_actions=1)
+
+
+def test_exploration_noise_is_added_only_to_ev_rows(monkeypatch):
+    module = nonnegative_module()
+    state = build_active_ev_state()
+    policy = make_policy(max_action=1.0)
+    base_action = full_node_action_for(state, [0.2, 0.4])
+    patch_ev_noise(monkeypatch, module, [0.5, -0.5])
+
+    noisy_action = policy._add_ev_noise(state, base_action, noise_scale=0.2)
+
+    assert torch.allclose(noisy_action[torch.as_tensor(state.ev_indexes), 0], torch.tensor([0.3, 0.3]))
+    assert torch.equal(
+        noisy_action[non_ev_mask_for(state)],
+        torch.zeros((3, 1), dtype=torch.float32),
+    )
+
+
+def test_exploration_noise_post_clamp_bounds_and_non_ev_zero(monkeypatch):
+    module = nonnegative_module()
+    state = build_active_ev_state()
+    policy = make_policy(max_action=1.0)
+    base_action = full_node_action_for(state, [0.9, 0.1])
+    patch_ev_noise(monkeypatch, module, [10.0, -10.0])
+
+    noisy_action = policy._add_ev_noise(state, base_action, noise_scale=1.0)
+
+    assert torch.allclose(noisy_action[torch.as_tensor(state.ev_indexes), 0], torch.tensor([1.0, 0.0]))
+    assert torch.all(noisy_action >= 0.0)
+    assert torch.all(noisy_action <= 1.0)
+    assert torch.equal(
+        noisy_action[non_ev_mask_for(state)],
+        torch.zeros((3, 1), dtype=torch.float32),
+    )
+
+
+def test_mapped_action_dtype_shape_bounds_and_action_mapper_values():
+    state = build_active_ev_state()
+    policy = make_policy(max_action=1.0)
+    full_node_action = full_node_action_for(state, [0.25, 0.75])
+
+    mapped_action = policy._map_to_ev2gym_action(state, full_node_action)
+
+    assert mapped_action.shape == (4,)
+    assert mapped_action.dtype == np.float32
+    assert np.array_equal(mapped_action, np.array([0.0, 0.25, 0.0, 0.75], dtype=np.float32))
+    assert np.all(mapped_action >= 0.0)
+    assert np.all(mapped_action <= 1.0)
+
+
+def test_replay_receives_same_corrected_full_node_action_used_for_mapping():
+    torch.manual_seed(21)
+    state = build_active_ev_state()
+    policy = make_policy(max_action=1.0)
+    mapped_action, full_node_action = policy.select_action(
+        state,
+        expl_noise=0,
+        return_mapped_action=True,
+    )
+
+    assert np.isclose(mapped_action[1], full_node_action[3, 0].item(), atol=1e-6)
+    assert np.isclose(mapped_action[3], full_node_action[4, 0].item(), atol=1e-6)
+
+    replay_buffer = ActionGNN_ReplayBuffer(action_dim=4, max_size=2, device="cpu")
+    replay_buffer.add(state, full_node_action, state, reward=0.0, done=False)
+    sampled_state, sampled_action, next_state, reward, not_done = replay_buffer.sample(1)
+
+    assert sampled_action.shape == (int(sum(sampled_state.sample_node_length)), 1)
+    assert torch.allclose(sampled_action.cpu(), full_node_action)
+    assert next_state.sample_node_length == sampled_state.sample_node_length
+    assert torch.isfinite(reward).all()
+    assert torch.isfinite(not_done).all()
+
+
+def test_current_critic_accepts_corrected_replay_domain_action():
+    state = build_active_ev_state()
+    policy = make_policy(max_action=1.0)
+    replay_buffer = ActionGNN_ReplayBuffer(action_dim=4, max_size=2, device="cpu")
+    replay_buffer.add(state, full_node_action_for(state, [0.2, 0.8]), state, reward=1.0, done=False)
+
+    sampled_state, sampled_action, next_state, reward, not_done = replay_buffer.sample(1)
+    critic_q1, critic_q2 = policy.critic(sampled_state, sampled_action)
+
+    assert critic_q1.shape == (1, 1)
+    assert critic_q2.shape == (1, 1)
+    assert torch.isfinite(critic_q1).all()
+    assert torch.isfinite(critic_q2).all()
+    assert next_state.sample_node_length == sampled_state.sample_node_length
+    assert torch.isfinite(reward).all()
+    assert torch.isfinite(not_done).all()
+
+
+def test_target_policy_noise_is_added_only_to_ev_rows(monkeypatch):
+    module = nonnegative_module()
+    state = build_active_ev_state()
+    policy = make_policy(max_action=1.0)
+    base_action = full_node_action_for(state, [0.5, 0.5])
+    patch_ev_noise(monkeypatch, module, [1.0, -1.0])
+
+    target_action = policy._add_ev_noise(
+        state,
+        base_action,
+        noise_scale=0.1,
+        noise_clip=0.5,
+    )
+
+    assert torch.allclose(target_action[torch.as_tensor(state.ev_indexes), 0], torch.tensor([0.6, 0.4]))
+    assert torch.equal(
+        target_action[non_ev_mask_for(state)],
+        torch.zeros((3, 1), dtype=torch.float32),
+    )
+
+
+def test_target_policy_noise_is_clipped_before_action_clamp(monkeypatch):
+    module = nonnegative_module()
+    state = build_active_ev_state()
+    policy = make_policy(max_action=1.0)
+    base_action = full_node_action_for(state, [0.5, 0.5])
+    patch_ev_noise(monkeypatch, module, [1.0, -1.0])
+
+    target_action = policy._add_ev_noise(
+        state,
+        base_action,
+        noise_scale=1.0,
+        noise_clip=0.1,
+    )
+
+    assert torch.allclose(target_action[torch.as_tensor(state.ev_indexes), 0], torch.tensor([0.6, 0.4]))
+    assert torch.all(target_action >= 0.0)
+    assert torch.all(target_action <= 1.0)
+
+
+def test_target_critic_receives_corrected_target_domain_action(monkeypatch):
+    module = nonnegative_module()
+    state = build_active_ev_state()
+    policy = make_policy(max_action=1.0)
+    patch_ev_noise(monkeypatch, module, [0.25, -0.25])
+
+    with torch.no_grad():
+        target_action = policy.actor_target(state)
+        target_action = policy._add_ev_noise(
+            state,
+            target_action,
+            policy.policy_noise,
+            policy.noise_clip,
+        )
+        target_q1, target_q2 = policy.critic_target(state, target_action)
+
+    assert target_action.shape == (5, 1)
+    assert torch.equal(
+        target_action[non_ev_mask_for(state)].cpu(),
+        torch.zeros((3, 1), dtype=torch.float32),
+    )
+    assert target_q1.shape == (1, 1)
+    assert target_q2.shape == (1, 1)
+    assert torch.isfinite(target_q1).all()
+    assert torch.isfinite(target_q2).all()
+
+
+def test_batched_replay_keeps_full_node_shape_without_action_mapper():
+    first_state = build_active_ev_state()
+    second_state = build_second_active_ev_state()
+    replay_buffer = ActionGNN_ReplayBuffer(action_dim=4, max_size=4, device="cpu")
+    replay_buffer.add(first_state, full_node_action_for(first_state, [0.2, 0.8]), first_state, reward=1.0, done=False)
+    replay_buffer.add(second_state, full_node_action_for(second_state, [0.1, 0.7]), second_state, reward=2.0, done=True)
+
+    sampled_state, sampled_action, next_state, reward, not_done = replay_buffer.sample(2)
+    policy = make_policy(max_action=1.0)
+    critic_q1, critic_q2 = policy.critic(sampled_state, sampled_action)
+
+    assert sampled_action.shape == (int(sum(sampled_state.sample_node_length)), 1)
+    assert not hasattr(sampled_state, "action_mapper")
+    assert not hasattr(next_state, "action_mapper")
+    assert torch.equal(
+        sampled_action[non_ev_mask_for(sampled_state)].cpu(),
+        torch.zeros((6, 1), dtype=torch.float32),
+    )
+    assert critic_q1.shape == (2, 1)
+    assert critic_q2.shape == (2, 1)
+    assert torch.isfinite(reward).all()
+    assert torch.isfinite(not_done).all()
+
+
+def test_corrected_policy_checkpoint_roundtrip(tmp_path):
+    torch.manual_seed(31)
+    state = build_active_ev_state()
+    policy = make_policy(max_action=1.0)
+    before_save_action = policy.actor(state).detach().cpu()
+    checkpoint_prefix = tmp_path / "model.best"
+
+    policy.save(str(checkpoint_prefix))
+
+    loaded_policy = make_policy(max_action=1.0)
+    loaded_policy.load(str(checkpoint_prefix))
+    after_load_action = loaded_policy.actor(state).detach().cpu()
+
+    assert torch.allclose(after_load_action, before_save_action)
+
+
+def test_legacy_signed_actiongnn_still_emits_signed_values():
+    torch.manual_seed(41)
+    state = build_active_ev_state()
+    signed_actor = make_signed_actor(max_action=1.0)
+    with torch.no_grad():
+        for signed_parameter in signed_actor.parameters():
+            signed_parameter.zero_()
+        signed_actor.gcn_last.bias.fill_(-10.0)
+
+    signed_action = signed_actor(state).detach().cpu()
+
+    assert signed_action.shape == (5,)
+    assert torch.any(signed_action[torch.as_tensor(state.ev_indexes)] < 0.0)
+
+
+def test_legacy_signed_actiongnn_exploration_remains_signed(monkeypatch):
+    torch.manual_seed(42)
+    state = build_active_ev_state()
+    signed_policy = make_signed_policy(max_action=1.0)
+
+    def negative_noise_like(action):
+        return torch.full_like(action, -10.0)
+
+    monkeypatch.setattr(torch, "randn_like", negative_noise_like)
+    mapped_action, full_node_action = signed_policy.select_action(
+        state,
+        expl_noise=0.2,
+        return_mapped_action=True,
+    )
+
+    active_ev_node_indexes = torch.as_tensor(state.ev_indexes, dtype=torch.long)
+    assert np.any(mapped_action < 0.0)
+    assert torch.any(full_node_action[active_ev_node_indexes] < 0.0)
