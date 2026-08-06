@@ -110,9 +110,10 @@ def _expected_corrected_metadata(checkpoint_role):
         CHECKPOINT_METADATA_SCHEMA,
         CHECKPOINT_SELECTION_RULE,
         NON_EV_ACTION,
+        SUPPORTED_TRAINING_PROTOCOLS,
     )
 
-    return {
+    expected = {
         "metadata_schema": CHECKPOINT_METADATA_SCHEMA,
         "algorithm": CANONICAL_ALGORITHM_LABEL,
         "action_domain_contract": ACTION_DOMAIN_CONTRACT,
@@ -120,13 +121,11 @@ def _expected_corrected_metadata(checkpoint_role):
         "actor_output_transform_formula": ACTOR_OUTPUT_TRANSFORM_FORMULA,
         "non_ev_action": NON_EV_ACTION,
         "discrete_actions": 1,
-        "training_budget": 50000,
-        "start_timesteps": 1000,
-        "eval_frequency": 5000,
-        "internal_eval_episodes": 5,
         "checkpoint_selection_rule": CHECKPOINT_SELECTION_RULE,
         "checkpoint_role": checkpoint_role,
     }
+    expected["supported_training_protocols"] = SUPPORTED_TRAINING_PROTOCOLS
+    return expected
 
 
 def _checkpoint_role_from_prefix(checkpoint_prefix):
@@ -143,7 +142,21 @@ def _checkpoint_role_from_prefix(checkpoint_prefix):
 def _validate_corrected_metadata(checkpoint_prefix, metadata):
     expected_checkpoint_role = _checkpoint_role_from_prefix(checkpoint_prefix)
     expected_metadata = _expected_corrected_metadata(expected_checkpoint_role)
+    supported_training_protocols = expected_metadata.pop("supported_training_protocols")
     for metadata_key, expected_value in expected_metadata.items():
+        actual_value = metadata.get(metadata_key)
+        if actual_value != expected_value:
+            raise ValueError(
+                f"corrected checkpoint metadata {metadata_key} mismatch: "
+                f"expected {expected_value!r}; got {actual_value!r}"
+            )
+    training_budget = metadata.get("training_budget")
+    if training_budget not in supported_training_protocols:
+        raise ValueError(
+            "corrected checkpoint metadata training_budget mismatch: "
+            f"expected one of {tuple(supported_training_protocols)!r}; got {training_budget!r}"
+        )
+    for metadata_key, expected_value in supported_training_protocols[training_budget].items():
         actual_value = metadata.get(metadata_key)
         if actual_value != expected_value:
             raise ValueError(

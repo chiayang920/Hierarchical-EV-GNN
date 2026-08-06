@@ -107,8 +107,8 @@ def corrected_metadata(checkpoint_role="best", algorithm="actiongnn_nonnegative"
         "internal_eval_episodes": 5,
         "checkpoint_selection_rule": (
             "model.best selected by strict improvement of scheduled internal eval mean reward "
-            "at 5k-step intervals within the 50k training budget; model.last is saved at "
-            "50k but is not used for canonical eval30 or diagnostics."
+            "at 5k-step intervals within the configured training budget; model.last is saved "
+            "at the configured final step but is not used for canonical eval30 or diagnostics."
         ),
         "checkpoint_role": checkpoint_role,
     }
@@ -151,6 +151,37 @@ def test_corrected_checkpoint_metadata_mismatch_is_rejected_before_state_dict_lo
         module.load_policy_checkpoint(policy, checkpoint_prefix, "actiongnn_nonnegative")
 
     assert policy.loaded_prefixes == []
+
+
+def test_corrected_checkpoint_metadata_accepts_formal_75k_budget(tmp_path):
+    module = importlib.import_module("evaluate_td3_gnn")
+    checkpoint_prefix = tmp_path / "model.best"
+    metadata = corrected_metadata()
+    metadata["training_budget"] = 75000
+    write_yaml(tmp_path / "run_args.yaml", {"algorithm": "actiongnn_nonnegative"})
+    write_yaml(tmp_path / "model.best.metadata.yaml", metadata)
+    policy = RecordingLoadPolicy()
+
+    module.load_policy_checkpoint(policy, checkpoint_prefix, "actiongnn_nonnegative")
+
+    assert policy.loaded_prefixes == [str(checkpoint_prefix)]
+
+
+def test_corrected_checkpoint_metadata_accepts_short_smoke_budget(tmp_path):
+    module = importlib.import_module("evaluate_td3_gnn")
+    checkpoint_prefix = tmp_path / "model.best"
+    metadata = corrected_metadata()
+    metadata["training_budget"] = 512
+    metadata["start_timesteps"] = 64
+    metadata["eval_frequency"] = 256
+    metadata["internal_eval_episodes"] = 1
+    write_yaml(tmp_path / "run_args.yaml", {"algorithm": "actiongnn_nonnegative"})
+    write_yaml(tmp_path / "model.best.metadata.yaml", metadata)
+    policy = RecordingLoadPolicy()
+
+    module.load_policy_checkpoint(policy, checkpoint_prefix, "actiongnn_nonnegative")
+
+    assert policy.loaded_prefixes == [str(checkpoint_prefix)]
 
 
 def test_legacy_run_args_algorithm_mismatch_is_rejected_before_state_dict_load(tmp_path):

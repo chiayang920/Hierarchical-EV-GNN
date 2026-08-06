@@ -18,6 +18,23 @@ from utils.ev2gym_training_utils import (
 
 
 ALGORITHM_CHOICES = ("actiongnn", "actiongnn_nonnegative", "hierarchical")
+CORRECTED_NONNEGATIVE_PROTOCOLS = {
+    512: {
+        "eval_freq": 256,
+        "eval_episodes": 1,
+        "start_timesteps": 64,
+    },
+    50000: {
+        "eval_freq": 5000,
+        "eval_episodes": 5,
+        "start_timesteps": 1000,
+    },
+    75000: {
+        "eval_freq": 5000,
+        "eval_episodes": 5,
+        "start_timesteps": 1000,
+    },
+}
 
 
 def get_policy_class(algorithm):
@@ -40,12 +57,15 @@ def validate_corrected_training_protocol(args):
     if args.algorithm != "actiongnn_nonnegative":
         return
 
+    if args.max_timesteps not in CORRECTED_NONNEGATIVE_PROTOCOLS:
+        raise ValueError(
+            "actiongnn_nonnegative requires max_timesteps in "
+            f"{tuple(CORRECTED_NONNEGATIVE_PROTOCOLS)}; got {args.max_timesteps!r}"
+        )
+
     required_values = {
         "algorithm": "actiongnn_nonnegative",
-        "max_timesteps": 50000,
-        "eval_freq": 5000,
-        "eval_episodes": 5,
-        "start_timesteps": 1000,
+        **CORRECTED_NONNEGATIVE_PROTOCOLS[args.max_timesteps],
         "discrete_actions": 1,
     }
     for field_name, expected_value in required_values.items():

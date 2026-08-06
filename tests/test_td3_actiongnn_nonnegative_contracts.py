@@ -676,6 +676,27 @@ def test_corrected_training_protocol_accepts_frozen_contract(tmp_path, monkeypat
     assert captured["replay_actions"][0].shape == (1, 1)
 
 
+def test_corrected_training_protocol_accepts_formal_75k_budget():
+    import train_td3_gnn
+
+    args = corrected_protocol_args(max_timesteps=75000)
+
+    train_td3_gnn.validate_corrected_training_protocol(args)
+
+
+def test_corrected_training_protocol_accepts_short_smoke_contract():
+    import train_td3_gnn
+
+    args = corrected_protocol_args(
+        max_timesteps=512,
+        eval_freq=256,
+        eval_episodes=1,
+        start_timesteps=64,
+    )
+
+    train_td3_gnn.validate_corrected_training_protocol(args)
+
+
 def test_corrected_training_protocol_rejects_mismatch_before_environment_creation(monkeypatch):
     import train_td3_gnn
 
@@ -689,7 +710,7 @@ def test_corrected_training_protocol_rejects_mismatch_before_environment_creatio
     monkeypatch.setattr(train_td3_gnn, "resolve_device", forbidden_runtime_side_effect)
     monkeypatch.setattr(train_td3_gnn, "make_env", forbidden_runtime_side_effect)
 
-    with pytest.raises(ValueError, match="max_timesteps=50000"):
+    with pytest.raises(ValueError, match="max_timesteps"):
         train_td3_gnn.main()
 
 

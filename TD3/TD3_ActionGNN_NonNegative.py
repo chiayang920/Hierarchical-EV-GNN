@@ -17,10 +17,27 @@ ACTOR_OUTPUT_TRANSFORM = "shifted_tanh_v1"
 ACTOR_OUTPUT_TRANSFORM_FORMULA = "0.5 * max_action * (tanh(z) + 1.0)"
 NON_EV_ACTION = 0.0
 CHECKPOINT_METADATA_SCHEMA = "actiongnn_nonnegative_checkpoint_v1"
+SUPPORTED_TRAINING_PROTOCOLS = {
+    512: {
+        "start_timesteps": 64,
+        "eval_frequency": 256,
+        "internal_eval_episodes": 1,
+    },
+    50000: {
+        "start_timesteps": 1000,
+        "eval_frequency": 5000,
+        "internal_eval_episodes": 5,
+    },
+    75000: {
+        "start_timesteps": 1000,
+        "eval_frequency": 5000,
+        "internal_eval_episodes": 5,
+    },
+}
 CHECKPOINT_SELECTION_RULE = (
     "model.best selected by strict improvement of scheduled internal eval mean reward "
-    "at 5k-step intervals within the 50k training budget; model.last is saved at "
-    "50k but is not used for canonical eval30 or diagnostics."
+    "at 5k-step intervals within the configured training budget; model.last is saved "
+    "at the configured final step but is not used for canonical eval30 or diagnostics."
 )
 
 
