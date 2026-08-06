@@ -383,7 +383,7 @@ def main(argv=None):
         device=device,
         checkpoint_kwargs=checkpoint_kwargs,
     )
-    load_policy_checkpoint(policy, checkpoint_prefix)
+    load_policy_checkpoint(policy, checkpoint_prefix, canonical_algorithm)
 
     metadata = {
         "matrix_job_id": args.matrix_job_id,

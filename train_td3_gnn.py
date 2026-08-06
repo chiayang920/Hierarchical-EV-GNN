@@ -17,7 +17,7 @@ from utils.ev2gym_training_utils import (
 )
 
 
-ALGORITHM_CHOICES = ("actiongnn", "hierarchical")
+ALGORITHM_CHOICES = ("actiongnn", "actiongnn_nonnegative", "hierarchical")
 
 
 def get_policy_class(algorithm):
@@ -25,11 +25,36 @@ def get_policy_class(algorithm):
         from TD3.TD3_ActionGNN_Controlled import TD3_ActionGNN
 
         return TD3_ActionGNN
+    if algorithm == "actiongnn_nonnegative":
+        from TD3.TD3_ActionGNN_NonNegative import TD3_ActionGNN_NonNegative
+
+        return TD3_ActionGNN_NonNegative
     if algorithm == "hierarchical":
         from TD3.TD3_HierarchicalActionGNN import TD3_HierarchicalActionGNN
 
         return TD3_HierarchicalActionGNN
     raise ValueError(f"Unsupported algorithm: {algorithm}")
+
+
+def validate_corrected_training_protocol(args):
+    if args.algorithm != "actiongnn_nonnegative":
+        return
+
+    required_values = {
+        "algorithm": "actiongnn_nonnegative",
+        "max_timesteps": 50000,
+        "eval_freq": 5000,
+        "eval_episodes": 5,
+        "start_timesteps": 1000,
+        "discrete_actions": 1,
+    }
+    for field_name, expected_value in required_values.items():
+        actual_value = getattr(args, field_name)
+        if actual_value != expected_value:
+            raise ValueError(
+                f"actiongnn_nonnegative requires {field_name}={expected_value!r}; "
+                f"got {actual_value!r}"
+            )
 
 
 def evaluate_policy(policy, args, config_file, eval_episodes):
@@ -127,6 +152,7 @@ def parse_args():
 
 def main():
     args = parse_args()
+    validate_corrected_training_protocol(args)
     args.device = resolve_device(args.device)
     set_global_seed(args.seed)
 
@@ -255,7 +281,12 @@ def main():
 
             if mean_reward > best_reward:
                 best_reward = mean_reward
-                policy.save(str(save_path / "model.best"))
+                best_checkpoint_prefix = save_path / "model.best"
+                policy.save(str(best_checkpoint_prefix))
+                if args.algorithm == "actiongnn_nonnegative":
+                    from TD3.TD3_ActionGNN_NonNegative import write_checkpoint_metadata
+
+                    write_checkpoint_metadata(best_checkpoint_prefix, args, "best")
                 print(f"Saved new best model: {best_reward:.3f}")
 
             row = {
@@ -277,7 +308,12 @@ def main():
             eta_hours = remaining_steps / max(steps_per_second, 1e-9) / 3600
             print(f"Approx. training throughput: {steps_per_second:.2f} steps/s | ETA: {eta_hours:.2f} h")
 
-    policy.save(str(save_path / "model.last"))
+    last_checkpoint_prefix = save_path / "model.last"
+    policy.save(str(last_checkpoint_prefix))
+    if args.algorithm == "actiongnn_nonnegative":
+        from TD3.TD3_ActionGNN_NonNegative import write_checkpoint_metadata
+
+        write_checkpoint_metadata(last_checkpoint_prefix, args, "last")
     final_stats = evaluate_policy(policy, args, config_file, args.eval_episodes)
     final_row = {
         "type": "final_evaluation",

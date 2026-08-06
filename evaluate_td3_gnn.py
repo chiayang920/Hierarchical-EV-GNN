@@ -9,7 +9,7 @@ import yaml
 from utils.ev2gym_training_utils import make_env, normalise_step_result, reset_env, resolve_device, str2bool
 
 
-ALGORITHM_CHOICES = ("actiongnn", "hierarchical")
+ALGORITHM_CHOICES = ("actiongnn", "actiongnn_nonnegative", "hierarchical")
 
 LEGACY_ALGORITHM_ALIASES = {
     "baseline_25cp": "actiongnn",
@@ -60,6 +60,10 @@ def get_policy_class(algorithm):
         from TD3.TD3_ActionGNN_Controlled import TD3_ActionGNN
 
         return TD3_ActionGNN
+    if algorithm == "actiongnn_nonnegative":
+        from TD3.TD3_ActionGNN_NonNegative import TD3_ActionGNN_NonNegative
+
+        return TD3_ActionGNN_NonNegative
     if algorithm == "hierarchical":
         from TD3.TD3_HierarchicalActionGNN import TD3_HierarchicalActionGNN
 
@@ -83,6 +87,102 @@ def load_checkpoint_kwargs(checkpoint_prefix):
     with kwargs_path.open("r") as kwargs_file:
         checkpoint_kwargs = yaml.load(kwargs_file, Loader=yaml.FullLoader)
     return checkpoint_kwargs or {}
+
+
+def _load_yaml_mapping(yaml_path):
+    if not yaml_path.exists():
+        return None
+    with yaml_path.open("r") as yaml_file:
+        yaml_payload = yaml.load(yaml_file, Loader=yaml.FullLoader)
+    if yaml_payload is None:
+        return {}
+    if not isinstance(yaml_payload, dict):
+        raise ValueError(f"Expected YAML mapping at {yaml_path}; got {type(yaml_payload).__name__}.")
+    return yaml_payload
+
+
+def _expected_corrected_metadata(checkpoint_role):
+    from TD3.TD3_ActionGNN_NonNegative import (
+        ACTION_DOMAIN_CONTRACT,
+        ACTOR_OUTPUT_TRANSFORM,
+        ACTOR_OUTPUT_TRANSFORM_FORMULA,
+        CANONICAL_ALGORITHM_LABEL,
+        CHECKPOINT_METADATA_SCHEMA,
+        CHECKPOINT_SELECTION_RULE,
+        NON_EV_ACTION,
+    )
+
+    return {
+        "metadata_schema": CHECKPOINT_METADATA_SCHEMA,
+        "algorithm": CANONICAL_ALGORITHM_LABEL,
+        "action_domain_contract": ACTION_DOMAIN_CONTRACT,
+        "actor_output_transform": ACTOR_OUTPUT_TRANSFORM,
+        "actor_output_transform_formula": ACTOR_OUTPUT_TRANSFORM_FORMULA,
+        "non_ev_action": NON_EV_ACTION,
+        "discrete_actions": 1,
+        "training_budget": 50000,
+        "start_timesteps": 1000,
+        "eval_frequency": 5000,
+        "internal_eval_episodes": 5,
+        "checkpoint_selection_rule": CHECKPOINT_SELECTION_RULE,
+        "checkpoint_role": checkpoint_role,
+    }
+
+
+def _checkpoint_role_from_prefix(checkpoint_prefix):
+    checkpoint_name = Path(checkpoint_prefix).name
+    if checkpoint_name == "model.best":
+        return "best"
+    if checkpoint_name == "model.last":
+        return "last"
+    raise ValueError(
+        "corrected checkpoint metadata requires checkpoint prefix named model.best or model.last"
+    )
+
+
+def _validate_corrected_metadata(checkpoint_prefix, metadata):
+    expected_checkpoint_role = _checkpoint_role_from_prefix(checkpoint_prefix)
+    expected_metadata = _expected_corrected_metadata(expected_checkpoint_role)
+    for metadata_key, expected_value in expected_metadata.items():
+        actual_value = metadata.get(metadata_key)
+        if actual_value != expected_value:
+            raise ValueError(
+                f"corrected checkpoint metadata {metadata_key} mismatch: "
+                f"expected {expected_value!r}; got {actual_value!r}"
+            )
+
+
+def validate_checkpoint_identity(checkpoint_prefix, canonical_algorithm):
+    from TD3.TD3_ActionGNN_NonNegative import checkpoint_metadata_path
+
+    canonical_algorithm = normalise_algorithm_label(canonical_algorithm)
+    checkpoint_prefix = Path(checkpoint_prefix)
+    metadata_path = checkpoint_metadata_path(checkpoint_prefix)
+    corrected_metadata = _load_yaml_mapping(metadata_path)
+    run_args = _load_yaml_mapping(checkpoint_prefix.parent / "run_args.yaml")
+
+    if run_args is not None and "algorithm" in run_args:
+        run_args_algorithm = normalise_algorithm_label(run_args["algorithm"])
+        if run_args_algorithm != canonical_algorithm:
+            raise ValueError(
+                f"run_args.yaml algorithm {run_args_algorithm!r} does not match "
+                f"requested canonical algorithm {canonical_algorithm!r}"
+            )
+
+    if corrected_metadata is not None:
+        metadata_algorithm = corrected_metadata.get("algorithm")
+        if metadata_algorithm != canonical_algorithm:
+            raise ValueError(
+                f"corrected checkpoint metadata algorithm {metadata_algorithm!r} does not match "
+                f"requested canonical algorithm {canonical_algorithm!r}"
+            )
+
+    if canonical_algorithm == "actiongnn_nonnegative":
+        if corrected_metadata is None:
+            raise ValueError(
+                f"actiongnn_nonnegative checkpoint metadata is required at {metadata_path}"
+            )
+        _validate_corrected_metadata(checkpoint_prefix, corrected_metadata)
 
 
 def create_policy(
@@ -109,7 +209,8 @@ def create_policy(
     return get_policy_class(algorithm)(**policy_kwargs)
 
 
-def load_policy_checkpoint(policy, checkpoint_prefix):
+def load_policy_checkpoint(policy, checkpoint_prefix, canonical_algorithm):
+    validate_checkpoint_identity(checkpoint_prefix, canonical_algorithm)
     try:
         policy.load(str(checkpoint_prefix))
     except Exception as checkpoint_error:
@@ -311,6 +412,7 @@ def main():
     device = resolve_device(args.device)
     checkpoint_prefix = normalise_checkpoint_prefix(args.checkpoint)
     checkpoint_kwargs = load_checkpoint_kwargs(checkpoint_prefix)
+    validate_checkpoint_identity(checkpoint_prefix, canonical_algorithm)
 
     probe_env = make_env(args.config, seed=args.seed)
     action_dim = probe_env.action_space.shape[0]
@@ -323,7 +425,7 @@ def main():
         device=device,
         checkpoint_kwargs=checkpoint_kwargs,
     )
-    load_policy_checkpoint(policy, checkpoint_prefix)
+    load_policy_checkpoint(policy, checkpoint_prefix, canonical_algorithm)
 
     episode_records = []
     for episode_index in range(args.eval_episodes):

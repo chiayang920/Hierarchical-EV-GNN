@@ -1,8 +1,10 @@
 import copy
+from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+import yaml
 
 from TD3.TD3_ActionGNN_Controlled import Actor as ControlledActionGNNActor
 from TD3.TD3_ActionGNN_Controlled import Critic, resolve_device
@@ -24,6 +26,40 @@ CHECKPOINT_SELECTION_RULE = (
 
 def shifted_tanh_nonnegative(raw_logits, max_action):
     return 0.5 * float(max_action) * (torch.tanh(raw_logits) + 1.0)
+
+
+def checkpoint_metadata_path(checkpoint_prefix):
+    return Path(str(checkpoint_prefix) + ".metadata.yaml")
+
+
+def build_checkpoint_metadata(args, checkpoint_role):
+    metadata = {
+        "metadata_schema": CHECKPOINT_METADATA_SCHEMA,
+        "algorithm": CANONICAL_ALGORITHM_LABEL,
+        "action_domain_contract": ACTION_DOMAIN_CONTRACT,
+        "actor_output_transform": ACTOR_OUTPUT_TRANSFORM,
+        "actor_output_transform_formula": ACTOR_OUTPUT_TRANSFORM_FORMULA,
+        "non_ev_action": NON_EV_ACTION,
+        "discrete_actions": int(args.discrete_actions),
+        "training_budget": int(args.max_timesteps),
+        "start_timesteps": int(args.start_timesteps),
+        "eval_frequency": int(args.eval_freq),
+        "internal_eval_episodes": int(args.eval_episodes),
+        "checkpoint_selection_rule": CHECKPOINT_SELECTION_RULE,
+        "checkpoint_role": checkpoint_role,
+    }
+    return metadata
+
+
+def write_checkpoint_metadata(checkpoint_prefix, args, checkpoint_role):
+    metadata_path = checkpoint_metadata_path(checkpoint_prefix)
+    with metadata_path.open("w") as metadata_file:
+        yaml.safe_dump(
+            build_checkpoint_metadata(args, checkpoint_role),
+            metadata_file,
+            sort_keys=False,
+        )
+    return metadata_path
 
 
 class Actor(ControlledActionGNNActor):
