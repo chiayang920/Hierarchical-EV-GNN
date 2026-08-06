@@ -459,27 +459,33 @@ def test_target_critic_receives_corrected_target_domain_action(monkeypatch):
     module = nonnegative_module()
     state = build_active_ev_state()
     policy = make_policy(max_action=1.0)
+    replay_buffer = ActionGNN_ReplayBuffer(action_dim=4, max_size=2, device="cpu")
+    replay_buffer.add(state, full_node_action_for(state, [0.3, 0.7]), state, reward=1.0, done=False)
+    sampled_state, sampled_action, next_state, reward, not_done = replay_buffer.sample(1)
     patch_ev_noise(monkeypatch, module, [0.25, -0.25])
 
     with torch.no_grad():
-        target_action = policy.actor_target(state)
+        target_action = policy.actor_target(next_state)
         target_action = policy._add_ev_noise(
-            state,
+            next_state,
             target_action,
             policy.policy_noise,
             policy.noise_clip,
         )
-        target_q1, target_q2 = policy.critic_target(state, target_action)
+        target_q1, target_q2 = policy.critic_target(next_state, target_action)
 
-    assert target_action.shape == (5, 1)
+    assert sampled_action.shape == (int(sum(sampled_state.sample_node_length)), 1)
+    assert target_action.shape == (int(sum(next_state.sample_node_length)), 1)
     assert torch.equal(
-        target_action[non_ev_mask_for(state)].cpu(),
+        target_action[non_ev_mask_for(next_state)].cpu(),
         torch.zeros((3, 1), dtype=torch.float32),
     )
     assert target_q1.shape == (1, 1)
     assert target_q2.shape == (1, 1)
     assert torch.isfinite(target_q1).all()
     assert torch.isfinite(target_q2).all()
+    assert torch.isfinite(reward).all()
+    assert torch.isfinite(not_done).all()
 
 
 def test_batched_replay_keeps_full_node_shape_without_action_mapper():
