@@ -2540,7 +2540,7 @@ def test_diagnostic_evaluator_rejects_corrected_checkpoint_without_metadata_befo
             "v2g_enabled_source": "env.v2g_enabled",
         },
     )
-    monkeypatch.setattr(evaluator, "create_policy", lambda **_kwargs: object())
+    monkeypatch.setattr(evaluator, "create_policy", forbidden_episode_execution)
     monkeypatch.setattr(evaluator, "evaluate_diagnostic_episode", forbidden_episode_execution)
 
     with pytest.raises(ValueError, match="metadata"):
@@ -2599,6 +2599,15 @@ def test_diagnostic_evaluator_passes_canonical_algorithm_to_checkpoint_guard(
         },
     )
     monkeypatch.setattr(evaluator, "create_policy", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        evaluator,
+        "validate_checkpoint_identity",
+        lambda checkpoint_prefix, canonical_algorithm: captured.setdefault(
+            "identity_guard",
+            (checkpoint_prefix, canonical_algorithm),
+        ),
+        raising=False,
+    )
 
     def capture_checkpoint_load(*load_args):
         captured["load_args"] = load_args
@@ -2639,6 +2648,7 @@ def test_diagnostic_evaluator_passes_canonical_algorithm_to_checkpoint_guard(
 
     assert len(captured["load_args"]) == 3
     assert captured["load_args"][2] == "actiongnn_nonnegative"
+    assert captured["identity_guard"][1] == "actiongnn_nonnegative"
 
 
 def test_filename_inference_is_not_an_evaluator_identity_source():

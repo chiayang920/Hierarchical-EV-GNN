@@ -1,3 +1,4 @@
+import builtins
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -567,11 +568,31 @@ def test_legacy_signed_actiongnn_exploration_remains_signed(monkeypatch):
 def corrected_protocol_args(**overrides):
     args = SimpleNamespace(
         algorithm="actiongnn_nonnegative",
+        config="./config_files/PublicPST_25cp.yaml",
+        seed=0,
+        device="cpu",
+        run_name="corrected_protocol_contract",
         max_timesteps=50000,
         eval_freq=5000,
         eval_episodes=5,
         start_timesteps=1000,
+        batch_size=1,
+        replay_buffer_size=4,
+        discount=0.99,
+        tau=0.005,
+        expl_noise=0.0,
+        policy_noise=0.2,
+        noise_clip=0.5,
+        policy_freq=2,
+        lr=3e-4,
+        fx_dim=8,
+        fx_GNN_hidden_dim=16,
+        mlp_hidden_dim=32,
+        actor_num_gcn_layers=3,
+        critic_num_gcn_layers=3,
         discrete_actions=1,
+        save_dir="./artifacts/experiments",
+        log_to_wandb=False,
     )
     for field_name, field_value in overrides.items():
         setattr(args, field_name, field_value)
@@ -586,10 +607,73 @@ def test_training_policy_factory_supports_actiongnn_nonnegative():
     assert policy_class.__name__ == "TD3_ActionGNN_NonNegative"
 
 
-def test_corrected_training_protocol_accepts_frozen_contract():
+def test_corrected_training_protocol_accepts_frozen_contract(tmp_path, monkeypatch):
     import train_td3_gnn
+    import utils.replay_buffer_actiongnn as replay_module
 
-    train_td3_gnn.validate_corrected_training_protocol(corrected_protocol_args())
+    config_path = tmp_path / "formal_config.yaml"
+    config_path.write_text("simulation_length: 1\n", encoding="utf-8")
+    args = corrected_protocol_args(
+        config=str(config_path),
+        save_dir=str(tmp_path),
+    )
+    train_td3_gnn.validate_corrected_training_protocol(args)
+
+    captured = {"return_mapped_action_values": [], "replay_actions": []}
+    state = build_no_active_ev_state()
+
+    class OneStepEnv:
+        action_space = SimpleNamespace(
+            shape=(4,),
+            high=np.ones(4, dtype=np.float32),
+        )
+
+        def reset(self, seed=None):
+            return state, {}
+
+        def step(self, mapped_action):
+            return state, 0.0, True, {}
+
+    class RecordingPolicy:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def select_action(self, state, expl_noise=0, return_mapped_action=False, **kwargs):
+            captured["return_mapped_action_values"].append(return_mapped_action)
+            if return_mapped_action:
+                return (
+                    np.zeros(4, dtype=np.float32),
+                    torch.zeros((1, 1), dtype=torch.float32),
+                )
+            return np.zeros(4, dtype=np.float32)
+
+        def save(self, checkpoint_prefix):
+            captured["saved_checkpoint_prefix"] = checkpoint_prefix
+
+    class RecordingReplayBuffer:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def add(self, state, action, next_state, reward, done):
+            captured["replay_actions"].append(action)
+
+    monkeypatch.setattr(train_td3_gnn, "parse_args", lambda: args)
+    monkeypatch.setattr(train_td3_gnn, "resolve_device", lambda _value: "cpu")
+    monkeypatch.setattr(train_td3_gnn, "set_global_seed", lambda _seed: None)
+    monkeypatch.setattr(train_td3_gnn, "make_env", lambda *_args, **_kwargs: OneStepEnv())
+    monkeypatch.setattr(train_td3_gnn, "get_policy_class", lambda _algorithm: RecordingPolicy)
+    monkeypatch.setattr(replay_module, "ActionGNN_ReplayBuffer", RecordingReplayBuffer)
+    monkeypatch.setattr(train_td3_gnn, "evaluate_policy", lambda *_args, **_kwargs: {
+        "eval/mean_reward": 0.0,
+        "eval/std_reward": 0.0,
+    })
+    monkeypatch.setattr(train_td3_gnn, "range", lambda _stop: builtins.range(1), raising=False)
+
+    train_td3_gnn.main()
+
+    assert captured["return_mapped_action_values"] == [True]
+    assert len(captured["replay_actions"]) == 1
+    assert captured["replay_actions"][0].shape == (1, 1)
 
 
 def test_corrected_training_protocol_rejects_mismatch_before_environment_creation(monkeypatch):
