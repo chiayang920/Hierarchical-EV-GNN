@@ -131,3 +131,43 @@ def test_stage_launchers_record_complete_protocol_and_training_package_provenanc
 def test_smoke_package_creation_disables_macos_appledouble_metadata():
     smoke = SCRIPTS[0].read_text()
     assert 'COPYFILE_DISABLE=1 tar -czf "${PACKAGE_PATH}"' in smoke
+
+def test_smoke_launcher_survives_slurm_spool_relocation(tmp_path):
+    fake = tmp_path / "python311"
+    _fake_python(fake, "3.11.15", forward=True)
+    profile = tmp_path / "profile.env"
+    _profile(profile)
+
+    spool_dir = tmp_path / "var" / "spool" / "slurmd" / "job123"
+    spool_dir.mkdir(parents=True)
+    relocated = spool_dir / "slurm_script"
+    relocated.write_text(SCRIPTS[0].read_text())
+
+    env = os.environ.copy()
+    env.update({
+        "EV_GNN_FORMAL_75K_PYTHON": str(fake),
+        "EV_GNN_FORMAL_75K_REPO_ROOT": str(PROJECT_ROOT),
+        "EV_GNN_FORMAL_75K_RESOURCE_PROFILE": str(profile),
+        "EV_GNN_FORMAL_75K_SOURCE_IDENTITY": "source-test",
+        "EV_GNN_FORMAL_75K_SOURCE_BUNDLE_IDENTITY": "bundle-test",
+        "EV_GNN_FORMAL_75K_SMOKE_DRY_RUN": "1",
+        "SLURM_ARRAY_TASK_ID": "0",
+        "SLURM_ARRAY_JOB_ID": "123",
+    })
+
+    result = subprocess.run(
+        ["bash", str(relocated)],
+        cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "DRY_RUN_NO_TRAINING_EVALUATION_OR_PACKAGING" in result.stdout
+
+
+def test_all_slurm_launchers_bootstrap_runtime_from_exported_repo_root():
+    for launcher in SCRIPTS[:4]:
+        text = launcher.read_text()
+        assert 'EV_GNN_FORMAL_75K_REPO_ROOT' in text
+        assert 'source "${REPO_ROOT}/m3_jobs/lib_formal_75k_runtime.sh"' in text
+    submit = SUBMIT.read_text()
+    assert submit.count('EV_GNN_FORMAL_75K_REPO_ROOT=${REPO_ROOT}') == 4

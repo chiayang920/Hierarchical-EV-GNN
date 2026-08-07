@@ -6,8 +6,14 @@
 #SBATCH --output=/projects/fr57/cche0357/EV-GNN_outputs/%x_%A_%a.out
 #SBATCH --error=/projects/fr57/cche0357/EV-GNN_outputs/%x_%A_%a.err
 set -euo pipefail
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"; source "${SCRIPT_DIR}/lib_formal_75k_runtime.sh"; formal75k_require_python311
-REPO_ROOT="${EV_GNN_FORMAL_75K_REPO_ROOT:-/projects/fr57/cche0357/EV-GNN}"; OUTPUT_ROOT="${EV_GNN_FORMAL_75K_OUTPUT_ROOT:-/projects/fr57/cche0357/EV-GNN_outputs}"; RUN_ROOT="${EV_GNN_FORMAL_75K_EVAL_RUN_ROOT:-/scratch2/fr57/cche0357/EV-GNN_runs/formal_75k_80cell_eval30}"; STAGE_ROOT="${EV_GNN_FORMAL_75K_STAGE_ROOT:-/scratch2/fr57/cche0357/EV-GNN_runs/formal_75k_80cell_stage}"; WORKFLOW_SCRIPT="${REPO_ROOT}/scripts/formal_75k_80cell_workflow.py"
+REPO_ROOT="${EV_GNN_FORMAL_75K_REPO_ROOT:-}"
+[[ -n "${REPO_ROOT}" ]] || { echo "ERROR: EV_GNN_FORMAL_75K_REPO_ROOT is required" >&2; exit 2; }
+RUNTIME_LIB="${REPO_ROOT}/m3_jobs/lib_formal_75k_runtime.sh"
+[[ -s "${RUNTIME_LIB}" ]] || { echo "ERROR: formal 75k runtime library is missing: ${RUNTIME_LIB}" >&2; exit 2; }
+# shellcheck source=lib_formal_75k_runtime.sh
+source "${REPO_ROOT}/m3_jobs/lib_formal_75k_runtime.sh"
+formal75k_require_python311
+OUTPUT_ROOT="${EV_GNN_FORMAL_75K_OUTPUT_ROOT:-/projects/fr57/cche0357/EV-GNN_outputs}"; RUN_ROOT="${EV_GNN_FORMAL_75K_EVAL_RUN_ROOT:-/scratch2/fr57/cche0357/EV-GNN_runs/formal_75k_80cell_eval30}"; STAGE_ROOT="${EV_GNN_FORMAL_75K_STAGE_ROOT:-/scratch2/fr57/cche0357/EV-GNN_runs/formal_75k_80cell_stage}"; WORKFLOW_SCRIPT="${REPO_ROOT}/scripts/formal_75k_80cell_workflow.py"
 formal75k_validate_resource_profile "${WORKFLOW_SCRIPT}" "${EV_GNN_FORMAL_75K_RESOURCE_PROFILE:-}" formal
 TRAIN_JOB_ID="${EV_GNN_FORMAL_75K_ARRAY_JOB_ID:-}"; formal75k_require_numeric_id "training array job ID" "${TRAIN_JOB_ID}"
 TASK_ID="${SLURM_ARRAY_TASK_ID:-}"; [[ "${TASK_ID}" =~ ^[0-9]+$ ]] && ((TASK_ID<=79)) || formal75k_die "task ID must be 0-79"
