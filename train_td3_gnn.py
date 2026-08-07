@@ -1,5 +1,7 @@
 import argparse
 import csv
+import os
+import tempfile
 import time
 from pathlib import Path
 
@@ -120,14 +122,90 @@ def evaluate_policy(policy, args, config_file, eval_episodes):
     return eval_stats
 
 
+def _read_existing_log_rows(log_path):
+    with log_path.open("r", newline="", encoding="utf-8") as file:
+        reader = csv.DictReader(file)
+        fieldnames = list(reader.fieldnames or [])
+        if not fieldnames:
+            raise ValueError(f"training log has no CSV header: {log_path}")
+
+        rows = []
+        for line_number, existing_row in enumerate(reader, start=2):
+            unnamed_values = existing_row.pop(None, None)
+            if unnamed_values:
+                raise ValueError(
+                    "training log contains unnamed extra columns at "
+                    f"line {line_number}: {log_path}"
+                )
+            rows.append(existing_row)
+    return fieldnames, rows
+
+
+def _rewrite_log_with_expanded_schema(log_path, fieldnames, existing_rows, row):
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            newline="",
+            encoding="utf-8",
+            dir=log_path.parent,
+            prefix=f".{log_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            writer = csv.DictWriter(
+                temporary_file,
+                fieldnames=fieldnames,
+                extrasaction="raise",
+            )
+            writer.writeheader()
+            writer.writerows(existing_rows)
+            writer.writerow(row)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.replace(temporary_path, log_path)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
+
+
 def write_log_row(log_path, row):
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    file_exists = log_path.exists()
-    with log_path.open("a", newline="") as file:
-        writer = csv.DictWriter(file, fieldnames=list(row.keys()))
-        if not file_exists:
+    row = dict(row)
+    if not row:
+        raise ValueError("training log row must contain at least one field")
+
+    if not log_path.exists() or log_path.stat().st_size == 0:
+        with log_path.open("w", newline="", encoding="utf-8") as file:
+            writer = csv.DictWriter(
+                file,
+                fieldnames=list(row.keys()),
+                extrasaction="raise",
+            )
             writer.writeheader()
+            writer.writerow(row)
+        return
+
+    fieldnames, existing_rows = _read_existing_log_rows(log_path)
+    new_fieldnames = [field_name for field_name in row if field_name not in fieldnames]
+    if new_fieldnames:
+        expanded_fieldnames = [*fieldnames, *new_fieldnames]
+        _rewrite_log_with_expanded_schema(
+            log_path,
+            expanded_fieldnames,
+            existing_rows,
+            row,
+        )
+        return
+
+    with log_path.open("a", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=fieldnames,
+            extrasaction="raise",
+        )
         writer.writerow(row)
 
 

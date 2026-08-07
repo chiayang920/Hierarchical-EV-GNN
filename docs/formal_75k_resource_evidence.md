@@ -1,46 +1,52 @@
 # Formal 75k Resource Evidence
 
-This file records local evidence available before the corrected non-negative
-75k formal workflow is submitted. It does not approve a formal resource
-profile.
+## Status
 
-## Evidence Found
+```text
+RESOURCE_DEFAULTS_GUESSED=NO
+RESOURCE_PROFILE_STATUS=UNAPPROVED_TEMPLATE_ONLY
+TRAINING_MAXRSS_EVIDENCE=INSUFFICIENT_FOR_NEW_75K_MATRIX
+M3_SMOKE_READY=NO
+```
 
-| Source | Scope | Evidence | Use for 75k workflow |
-| --- | --- | --- | --- |
-| `README.md` | historical 100CP 50k signed ActionGNN vs hierarchical | signed ActionGNN runtime `02:13:09`, CPU efficiency `93.3%`, peak memory `2.8GB / 32GB`; hierarchical runtime `11:08:52`, CPU efficiency `39.1%`, peak memory `1.7GB / 32GB` | Historical context only. The baseline was signed, not corrected non-negative, and the horizon was 50k. |
-| `docs/100cp_post_optimisation_runtime_pilot.md` | 100CP hierarchical post-optimisation | CPU `4`; 10k MaxRSS `1.38G`, wall-time `2113s`; 50k MaxRSS `2.42G`, training wall-time `7083s`, Slurm elapsed `7106s` | Hierarchical 100CP runtime feasibility only. Single-seed and not corrected-baseline evidence. |
-| `docs/500cp_formal_training_protocol.md` | 500CP 10k runtime pilot | CPU `4`; actiongnn 10k wall-time `4380s`, Slurm elapsed `4398s`, MaxRSS `8.66G`, CPU efficiency about `93.1%`; hierarchical 10k wall-time `5811s`, Slurm elapsed `5829s`, MaxRSS `6.24G`, CPU efficiency about `92.4%` | 500CP 50k planning context only. It does not prove 75k corrected non-negative resource demand. |
-| `docs/full_per_infrastructure_diagnostics_eval30_design.md` | diagnostic eval30 design | smoke used less than `1GB` peak task memory and about `29-39s` for one checkpoint and one episode; design request was CPU `4`, memory `32GB`, wall-time `6h` | Diagnostic-stage context only. It is not training memory evidence. |
-| `m3_jobs/17_controlled_multiscale_formal_train_eval.slurm` | historical controlled multiscale 50k array | requested CPU `4`, memory `96G`, wall-time `48:00:00` | Existing successful envelope, not a measured requirement and not a 75k corrected-baseline default. |
+No corrected non-negative 75k training run exists. Historical resource evidence informs planning but does not approve a new request.
 
-## Threading Evidence
+## Historical formal evidence available
 
-Local code inspection found no `DataLoader` workers, multiprocessing pool, or
-multi-environment process use in the current `train_td3_gnn.py` path. The
-ActionGNN replay buffer batches graphs manually in `utils/replay_buffer_actiongnn.py`.
-Historical M3 scripts set `OMP_NUM_THREADS` and `MKL_NUM_THREADS` from
-`SLURM_CPUS_PER_TASK`, so PyTorch/BLAS thread use may matter, but the smallest
-evidence-supported CPU request must be reviewed after the two-cell smoke.
+The supplied historical formal evidence for job `58513929` contains 40 canonical `model.best` eval30 files, 1,200 episode rows, task runtime metadata and source manifests. It covers the historical signed ActionGNN versus hierarchical comparison at 50,000 steps and five seeds. Its runtime envelope is not a measured requirement for the corrected non-negative 75k matrix.
 
-## Missing Evidence
+Historical planning records include 100CP and 500CP pilot/runtime evidence and prior successful Slurm requests. These records may support a labelled scheduler-planning range, but they do not establish the corrected baseline's 75k `MaxRSS`, CPU utilisation or exact wall time.
 
-`TRAINING_MAXRSS_EVIDENCE=INSUFFICIENT`
+## Historical diagnostic evidence available
 
-No completed corrected non-negative 75k training run was found. No completed
-1000CP 75k training accounting was found. Historical eval or diagnostic memory
-must not be used as proof of training memory demand.
+The supplied completed Stage D bundle records:
 
-## Planning Rule
+```text
+Array job=58745233
+Reducer job=58746039
+Task packages=8
+Checkpoints=40
+Episodes=1200
+Diagnostic schema=3
+Reconciliation contract=2
+Source commit=cbf4b5fe6eb0ede4298140b4717944efbfd0b3ad
+```
 
-Historical 50k runtime may be scaled by `1.5` only as a linear
-scheduler-planning extrapolation, not a guaranteed runtime. This report does
-not produce a single exact runtime request.
+Its runtime summary reports four allocated CPUs per historical diagnostic task and approximately 1.0–1.2 GiB `MaxRSS`. This is diagnostic evidence only; it is not training memory evidence and does not prove that the new Formal-75k diagnostic request must use four CPUs.
 
-## Resource Profile Status
+## Threading assessment
 
-`RESOURCE_PROFILE_STATUS=UNAPPROVED_TEMPLATE_ONLY`
+The training path does not use multiple environment processes or `DataLoader` workers. Historical jobs controlled PyTorch/BLAS threading through Slurm-related environment variables. The smallest defensible CPU request must therefore be selected after the local functional smoke and, where required, a narrowly scoped M3 smoke accounting review.
 
-The formal submission helper requires an explicit reviewed profile with
-`RESOURCE_PROFILE_APPROVED=YES`. Until smoke accounting is reviewed, the formal
-training, eval30, and diagnostic resource fields remain unset.
+## Runtime planning rule
+
+A historical 50k elapsed time may be multiplied by `1.5` only as a linear scheduler-planning extrapolation for a 75k horizon. It is not a guaranteed runtime and must be reported as a range by scale and algorithm when enough evidence exists.
+
+## Approval sequence
+
+1. User runs `run_local_formal75k_repair_verification.sh`.
+2. User runs `run_local_formal75k_functional_smoke.sh`.
+3. Returned logs and evidence are independently reviewed.
+4. A separate smoke resource profile is approved for M3.
+5. Only the two-cell M3 smoke may then be considered.
+6. Formal Stage A resources are approved only after smoke accounting is reviewed.

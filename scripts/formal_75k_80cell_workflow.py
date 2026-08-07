@@ -7,9 +7,16 @@ import argparse
 import csv
 import math
 import statistics
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
+
+# Support direct execution by absolute path from any working directory.
+if __package__ in {None, ""}:
+    _PROJECT_ROOT = Path(__file__).resolve().parents[1]
+    if str(_PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(_PROJECT_ROOT))
 
 from scripts.aggregate_controlled_multiscale_eval30 import (
     paired_t_test,
@@ -258,6 +265,8 @@ def diagnostic_command(
         "evaluate_td3_gnn_infrastructure_diagnostics.py",
         "--algorithm",
         cell.algorithm,
+        "--scale",
+        cell.scale,
         "--config",
         cell.config_path,
         "--seed",
@@ -471,11 +480,18 @@ def secondary_metrics() -> tuple[str, ...]:
 
 
 def holm_adjust(pvalues: Sequence[float]) -> list[float]:
+    """Return Holm step-down adjusted p-values in the original order."""
     count = len(pvalues)
-    indexed = sorted((index, float(value)) for index, value in enumerate(pvalues))
+    indexed: list[tuple[float, int]] = []
+    for original_index, value in enumerate(pvalues):
+        pvalue = float(value)
+        if not math.isfinite(pvalue) or not 0.0 <= pvalue <= 1.0:
+            raise ValueError(f"p-value must be finite and within [0,1]; got {value!r}")
+        indexed.append((pvalue, original_index))
+    indexed.sort(key=lambda item: (item[0], item[1]))
     adjusted = [0.0] * count
     running_max = 0.0
-    for rank, (original_index, pvalue) in enumerate(indexed):
+    for rank, (pvalue, original_index) in enumerate(indexed):
         candidate = min(1.0, (count - rank) * pvalue)
         running_max = max(running_max, candidate)
         adjusted[original_index] = running_max
@@ -510,15 +526,29 @@ def _format_float(value: object) -> str:
     return str(value)
 
 
+def exact_sign_flip_pvalue(diff_values: Sequence[float]) -> float:
+    """Exact two-sided paired sign-flip randomisation p-value using |mean|."""
+    values = [float(value) for value in diff_values]
+    if not values:
+        raise ValueError("exact sign-flip test requires at least one paired difference")
+    if any(not math.isfinite(value) for value in values):
+        raise ValueError("exact sign-flip differences must be finite")
+    observed = abs(_mean(values))
+    total = 1 << len(values)
+    extreme = 0
+    tolerance = 1e-15
+    for mask in range(total):
+        signed_sum = 0.0
+        for index, value in enumerate(values):
+            signed_sum += value if (mask >> index) & 1 else -value
+        statistic = abs(signed_sum / len(values))
+        if statistic + tolerance >= observed:
+            extreme += 1
+    return extreme / total
+
+
 def _sign_flip_pvalue(diff_values: Sequence[float]) -> float:
-    positive = sum(1 for value in diff_values if value > 0.0)
-    negative = sum(1 for value in diff_values if value < 0.0)
-    nonzero = positive + negative
-    if nonzero == 0:
-        return 1.0
-    tail = min(positive, negative)
-    probability = sum(math.comb(nonzero, k) for k in range(tail + 1)) / (2 ** nonzero)
-    return min(1.0, 2.0 * probability)
+    return exact_sign_flip_pvalue(diff_values)
 
 
 def _episode_metric_means(rows: Sequence[dict[str, object]], metric: str) -> dict[tuple[str, str, int], float]:
@@ -640,7 +670,10 @@ def assess_claims(
         for row in boundary_effects
         if float(row["mean_benefit"]) > 0.0 and float(row["holm_adjusted_pvalue"]) < 0.05
     )
-    service_collapse = bool(service_guardrails.get("clear_material_collapse", False))
+    service_status = str(service_guardrails.get("status", "UNKNOWN")).strip().upper()
+    if service_status not in {"PASS", "FAIL", "UNKNOWN"}:
+        raise ValueError(f"unsupported service guardrail status: {service_status!r}")
+    claims["SERVICE_GUARDRAIL_STATUS"] = service_status
 
     claims["CROSS_SCALE_REWARD_DIRECTION_CONSISTENT"] = "YES" if all_reward_directions else "NO"
     claims["STRONG_CROSS_SCALE_ARCHITECTURE_CLAIM_SUPPORTED"] = (
@@ -649,7 +682,7 @@ def assess_claims(
         and scale_supported_count >= 3
         and not harm_supported
         and all_boundary_directions
-        and not service_collapse
+        and service_status == "PASS"
         else "NO"
     )
     claims["CROSS_SCALE_BOUNDARY_BEHAVIOUR_CLAIM_SUPPORTED"] = (
@@ -703,246 +736,29 @@ def reduce_formal_results(
     eval_rows: Sequence[dict[str, object]],
     diagnostic_rows: Sequence[dict[str, object]],
     out_dir: Path | str,
+    *,
+    training_curve_rows: Sequence[dict[str, object]] | None = None,
+    service_policy: dict[str, float] | None = None,
 ) -> list[Path]:
-    try:
-        validate_training_gate(training_rows)
-        validate_eval30_gate(eval_rows)
-        validate_diagnostic_gate(diagnostic_rows)
-    except ValueError as exc:
-        raise ValueError(f"STATUS=BLOCKED: {exc}") from exc
+    """Delegate scientific reduction to the focused statistics module.
 
-    out_dir = Path(out_dir)
-    output_paths: list[Path] = []
-
-    reward_means = _episode_metric_means(eval_rows, "episode_reward")
-    tracking_means = _episode_metric_means(eval_rows, "tracking_error")
-    boundary_means = _episode_metric_means(diagnostic_rows, KEY_MECHANISM_METRIC)
-
-    reward_effects = _paired_effect_rows(
-        reward_means,
-        "episode_reward",
-        "hierarchy_minus_corrected",
-        "primary_reward_by_scale",
-    )
-    boundary_effects = _paired_effect_rows(
-        boundary_means,
-        KEY_MECHANISM_METRIC,
-        "corrected_minus_hierarchy",
-        "key_mechanism_boundary_by_scale",
-    )
-    tracking_effects = _paired_effect_rows(
-        tracking_means,
-        "tracking_error",
-        "corrected_minus_hierarchy",
-        "secondary_descriptive",
-    )
-
-    claims = assess_claims(
-        _normalise_effects_for_claims(reward_effects),
-        _normalise_effects_for_claims(boundary_effects),
-        {"clear_material_collapse": False},
-    )
-    claims["PRIMARY_INFERENCE_UNIT"] = "paired_training_seed"
-
-    output_paths.append(_write_csv(out_dir / "formal_training_matrix_summary.csv", list(training_rows)))
-    output_paths.append(_write_csv(out_dir / "canonical_eval30_episode_rows.csv", list(eval_rows)))
-    output_paths.append(_write_csv(out_dir / "per_scale_paired_reward_effects.csv", reward_effects))
-    output_paths.append(_write_csv(out_dir / "per_scale_paired_boundary_effects.csv", boundary_effects))
-    output_paths.append(_write_csv(out_dir / "primary_reward_statistical_tests.csv", reward_effects))
-    output_paths.append(_write_csv(out_dir / "key_mechanism_statistical_tests.csv", boundary_effects))
-    output_paths.append(_write_csv(out_dir / "secondary_outcome_statistical_tests.csv", tracking_effects))
-    output_paths.append(_write_csv(out_dir / "per_seed_primary_outcomes.csv", _per_seed_primary_rows(reward_means)))
-    output_paths.append(_write_csv(out_dir / "cross_scale_direction_summary.csv", _cross_scale_rows(reward_effects, boundary_effects)))
-    output_paths.append(_write_csv(out_dir / "service_guardrail_summary.csv", [{"guardrail": "service_preservation", "status": "NO_NON_INFERIORITY_MARGIN_APPROVED"}]))
-    output_paths.append(_write_csv(out_dir / "resource_efficiency_summary.csv", [{"status": "RESOURCE_DEFAULTS_GUESSED_NO", "note": "Formal resource efficiency awaits smoke/formal accounting."}]))
-    output_paths.append(_write_csv(out_dir / "training_curve_long.csv", _training_curve_rows(training_rows)))
-    output_paths.append(_write_csv(out_dir / "per_run_learning_summary.csv", _learning_summary_rows(training_rows)))
-    output_paths.append(_write_csv(out_dir / "per_scale_algorithm_learning_summary.csv", _scale_algorithm_learning_rows(training_rows)))
-    output_paths.append(_write_csv(out_dir / "checkpoint_selection_summary.csv", _checkpoint_rows(training_rows)))
-    output_paths.append(_write_csv(out_dir / "late_training_stability_summary.csv", _late_stability_rows(training_rows)))
-
-    claim_lines = [f"{key}={value}" for key, value in sorted(claims.items())]
-    output_paths.append(_write_text(out_dir / "claim_assessment.env", "\n".join(claim_lines) + "\n"))
-    output_paths.append(_write_text(out_dir / "formal_scientific_results.md", _scientific_markdown(claims)))
-    output_paths.append(_write_text(out_dir / "formal_supervisor_summary.html", _summary_html(claims)))
-    output_paths.append(_write_text(out_dir / "paper_ready_tables.md", _paper_tables_markdown(reward_effects, boundary_effects)))
-    output_paths.append(_write_text(out_dir / "paper_ready_tables.html", _paper_tables_html(reward_effects, boundary_effects)))
-    figures_dir = out_dir / "paper_ready_figures"
-    figures_dir.mkdir(parents=True, exist_ok=True)
-    output_paths.append(_write_text(figures_dir / "README.md", "Figures must use relative or standardised within-scale effects.\n"))
-    return output_paths
-
-
-def _per_seed_primary_rows(reward_means: dict[tuple[str, str, int], float]) -> list[dict[str, object]]:
-    rows = []
-    for scale in SCALES:
-        for seed in SEEDS:
-            corrected = reward_means[(scale, "actiongnn_nonnegative", seed)]
-            hierarchy = reward_means[(scale, "hierarchical", seed)]
-            rows.append(
-                {
-                    "scale": scale,
-                    "seed": seed,
-                    "primary_outcome": "episode_reward",
-                    "corrected_nonnegative_actiongnn_mean": corrected,
-                    "hierarchical_nonnegative_actiongnn_mean": hierarchy,
-                    "hierarchy_benefit": hierarchy - corrected,
-                }
-            )
-    return rows
-
-
-def _cross_scale_rows(
-    reward_effects: Sequence[dict[str, object]],
-    boundary_effects: Sequence[dict[str, object]],
-) -> list[dict[str, object]]:
-    rows = []
-    for reward, boundary in zip(reward_effects, boundary_effects):
-        rows.append(
-            {
-                "scale": reward["scale"],
-                "reward_direction": "hierarchy" if float(reward["paired_mean_difference"]) > 0 else "corrected_or_tie",
-                "boundary_direction": "hierarchy" if float(boundary["paired_mean_difference"]) > 0 else "corrected_or_tie",
-                "raw_reward_axis_note": "Do not compare raw reward magnitudes across CP scales on one unqualified axis.",
-            }
+    Real scheduled-checkpoint evidence is mandatory.  The former synthetic
+    placeholder generation is intentionally rejected.
+    """
+    if training_curve_rows is None:
+        raise ValueError(
+            "STATUS=BLOCKED: real training_curve_rows are required; "
+            "placeholder learning-dynamics outputs are prohibited"
         )
-    return rows
+    from scripts.formal_75k_80cell_statistics import reduce_formal_results as reduce_statistics
 
-
-def _training_curve_rows(training_rows: Sequence[dict[str, object]]) -> list[dict[str, object]]:
-    rows = []
-    for row in training_rows:
-        for step in scheduled_evaluation_steps():
-            rows.append(
-                {
-                    "scale": row["scale"],
-                    "algorithm": row["algorithm"],
-                    "seed": row["seed"],
-                    "timestep": step,
-                    "row_status": "scheduled_checkpoint_required",
-                }
-            )
-    return rows
-
-
-def _learning_summary_rows(training_rows: Sequence[dict[str, object]]) -> list[dict[str, object]]:
-    return [
-        {
-            "scale": row["scale"],
-            "algorithm": row["algorithm"],
-            "seed": row["seed"],
-            "scheduled_checkpoints": FORMAL_SCHEDULED_EVALUATIONS,
-            "model_best_step": row.get("model_best_step", ""),
-            "best_checkpoint_percentage_of_75k": row.get("best_checkpoint_percentage_of_75k", ""),
-        }
-        for row in training_rows
-    ]
-
-
-def _scale_algorithm_learning_rows(training_rows: Sequence[dict[str, object]]) -> list[dict[str, object]]:
-    return [
-        {
-            "scale": scale,
-            "algorithm": algorithm,
-            "n_training_seeds": len(SEEDS),
-            "scheduled_checkpoints_per_run": FORMAL_SCHEDULED_EVALUATIONS,
-        }
-        for scale in SCALES
-        for algorithm in FORMAL_ALGORITHMS
-    ]
-
-
-def _checkpoint_rows(training_rows: Sequence[dict[str, object]]) -> list[dict[str, object]]:
-    return [
-        {
-            "scale": row["scale"],
-            "algorithm": row["algorithm"],
-            "seed": row["seed"],
-            "checkpoint_role": "model.best",
-            "checkpoint_selection_rule": CHECKPOINT_SELECTION_RULE,
-        }
-        for row in training_rows
-    ]
-
-
-def _late_stability_rows(training_rows: Sequence[dict[str, object]]) -> list[dict[str, object]]:
-    return [
-        {
-            "scale": row["scale"],
-            "algorithm": row["algorithm"],
-            "seed": row["seed"],
-            "late_checkpoint_window": "60000;65000;70000;75000",
-            "claim_boundary": "fixed-budget adequacy only; no asymptotic convergence claim",
-        }
-        for row in training_rows
-    ]
-
-
-def _scientific_markdown(claims: dict[str, str]) -> str:
-    return "\n".join(
-        [
-            "# Formal 75k Non-negative Architecture Comparison",
-            "",
-            f"Primary efficacy outcome: `episode_reward`; inference unit: `paired_training_seed` with n=10 per scale.",
-            f"Key mechanism outcome: `{KEY_MECHANISM_PUBLIC_LABEL}`.",
-            "",
-            "Tracking error is reported descriptively and is not an independent primary hypothesis.",
-            "No service non-inferiority claim is made because no margin was approved before the formal run.",
-            "",
-            "## Claim Assessment",
-            *[f"- `{key}={value}`" for key, value in sorted(claims.items())],
-            "",
-        ]
-    )
-
-
-def _summary_html(claims: dict[str, str]) -> str:
-    items = "".join(f"<li><code>{key}={value}</code></li>" for key, value in sorted(claims.items()))
-    return (
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Formal 75k Summary</title></head>"
-        "<body><h1>Formal 75k Non-negative Architecture Comparison</h1>"
-        "<p>Primary inference uses n=10 paired training seeds per scale.</p>"
-        f"<ul>{items}</ul></body></html>\n"
-    )
-
-
-def _paper_tables_markdown(
-    reward_effects: Sequence[dict[str, object]],
-    boundary_effects: Sequence[dict[str, object]],
-) -> str:
-    lines = [
-        "# Paper-ready Tables",
-        "",
-        "Direction: positive reward effect means hierarchy better; positive boundary effect means lower upper-bound active-EV action fraction for hierarchy.",
-        "",
-        "| Scale | Reward Effect | Boundary Effect | n |",
-        "| --- | ---: | ---: | ---: |",
-    ]
-    for reward, boundary in zip(reward_effects, boundary_effects):
-        lines.append(
-            f"| {reward['scale']} | {_format_float(reward['paired_mean_difference'])} | "
-            f"{_format_float(boundary['paired_mean_difference'])} | 10 |"
-        )
-    return "\n".join(lines) + "\n"
-
-
-def _paper_tables_html(
-    reward_effects: Sequence[dict[str, object]],
-    boundary_effects: Sequence[dict[str, object]],
-) -> str:
-    body_rows = "".join(
-        "<tr>"
-        f"<td>{reward['scale']}</td>"
-        f"<td>{_format_float(reward['paired_mean_difference'])}</td>"
-        f"<td>{_format_float(boundary['paired_mean_difference'])}</td>"
-        "<td>10</td>"
-        "</tr>"
-        for reward, boundary in zip(reward_effects, boundary_effects)
-    )
-    return (
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Paper-ready Tables</title></head>"
-        "<body><table><thead><tr><th>Scale</th><th>Reward Effect</th><th>Boundary Effect</th><th>n</th></tr></thead>"
-        f"<tbody>{body_rows}</tbody></table></body></html>\n"
+    return reduce_statistics(
+        training_rows=training_rows,
+        training_curve_rows=training_curve_rows,
+        eval_rows=eval_rows,
+        diagnostic_rows=diagnostic_rows,
+        out_dir=out_dir,
+        service_policy=service_policy,
     )
 
 
@@ -959,25 +775,48 @@ def _read_env(path: Path) -> dict[str, str]:
     return values
 
 
-def load_resource_profile(path: Path | str) -> dict[str, str]:
+def load_resource_profile(path: Path | str, scope: str = "formal") -> dict[str, str]:
     profile_path = Path(path)
     if not profile_path.is_file():
         raise ValueError(f"approved resource profile is required: {profile_path}")
     values = _read_env(profile_path)
     if values.get("RESOURCE_PROFILE_APPROVED") != "YES":
-        raise ValueError("approved resource profile is required before formal submission")
-    required = (
-        "TRAIN_CPUS_PER_TASK",
-        "TRAIN_MEM",
-        "TRAIN_TIME",
-        "EVAL_CPUS_PER_TASK",
-        "EVAL_MEM",
-        "EVAL_TIME",
-        "DIAGNOSTIC_CPUS_PER_TASK",
-        "DIAGNOSTIC_MEM",
-        "DIAGNOSTIC_TIME",
-    )
-    missing = [key for key in required if not values.get(key)]
+        raise ValueError("approved resource profile is required before smoke or formal submission")
+    required_by_scope = {
+        "smoke": (
+            "SMOKE_CPUS_PER_TASK",
+            "SMOKE_MEM",
+            "SMOKE_TIME",
+        ),
+        "formal": (
+            "TRAIN_CPUS_PER_TASK",
+            "TRAIN_MEM",
+            "TRAIN_TIME",
+            "EVAL_CPUS_PER_TASK",
+            "EVAL_MEM",
+            "EVAL_TIME",
+            "DIAGNOSTIC_CPUS_PER_TASK",
+            "DIAGNOSTIC_MEM",
+            "DIAGNOSTIC_TIME",
+        ),
+        "all": (
+            "SMOKE_CPUS_PER_TASK",
+            "SMOKE_MEM",
+            "SMOKE_TIME",
+            "TRAIN_CPUS_PER_TASK",
+            "TRAIN_MEM",
+            "TRAIN_TIME",
+            "EVAL_CPUS_PER_TASK",
+            "EVAL_MEM",
+            "EVAL_TIME",
+            "DIAGNOSTIC_CPUS_PER_TASK",
+            "DIAGNOSTIC_MEM",
+            "DIAGNOSTIC_TIME",
+        ),
+    }
+    if scope not in required_by_scope:
+        raise ValueError(f"unsupported resource profile scope: {scope!r}")
+    missing = [key for key in required_by_scope[scope] if not values.get(key)]
     if missing:
         raise ValueError("approved resource profile is missing: " + ", ".join(missing))
     return values
@@ -986,8 +825,11 @@ def load_resource_profile(path: Path | str) -> dict[str, str]:
 def resource_profile_template() -> str:
     return "\n".join(
         [
-            "# Fill only after reviewed smoke/resource evidence. Do not guess.",
+            "# Fill only after reviewed local smoke/resource evidence. Do not guess.",
             "RESOURCE_PROFILE_APPROVED=NO",
+            "SMOKE_CPUS_PER_TASK=",
+            "SMOKE_MEM=",
+            "SMOKE_TIME=",
             "TRAIN_CPUS_PER_TASK=",
             "TRAIN_MEM=",
             "TRAIN_TIME=",
@@ -1002,27 +844,78 @@ def resource_profile_template() -> str:
     )
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def _load_numeric_policy(path: Path | None) -> dict[str, float] | None:
+    if path is None:
+        return None
+    values = _read_env(path)
+    result: dict[str, float] = {}
+    for key, value in values.items():
+        result[key] = _parse_float(value, key)
+    return result
+
+
+def _main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--print-matrix", action="store_true")
     parser.add_argument("--print-smoke", action="store_true")
     parser.add_argument("--write-resource-template", type=Path)
     parser.add_argument("--validate-resource-profile", type=Path)
+    parser.add_argument(
+        "--resource-profile-scope",
+        choices=("smoke", "formal", "all"),
+        default="formal",
+    )
     subparsers = parser.add_subparsers(dest="command")
+
     formal_task = subparsers.add_parser("formal-task-mapping")
     formal_task.add_argument("--task-id", type=int, required=True)
     smoke_task = subparsers.add_parser("smoke-task-mapping")
     smoke_task.add_argument("--task-id", type=int, required=True)
+
+    smoke_gate = subparsers.add_parser("validate-smoke-packages")
+    smoke_gate.add_argument("--package-root", type=Path, required=True)
+    smoke_gate.add_argument("--job-id", required=True)
+    smoke_gate.add_argument("--stage-root", type=Path, required=True)
+    smoke_gate.add_argument("--source-identity")
+    smoke_gate.add_argument("--source-bundle-identity")
+
+    training_aggregate = subparsers.add_parser("aggregate-training")
+    training_aggregate.add_argument("--package-root", type=Path, required=True)
+    training_aggregate.add_argument("--array-job-id", required=True)
+    training_aggregate.add_argument("--stage-root", type=Path, required=True)
+    training_aggregate.add_argument("--output-dir", type=Path, required=True)
+    training_aggregate.add_argument("--source-identity")
+    training_aggregate.add_argument("--source-bundle-identity")
+
+    eval_aggregate = subparsers.add_parser("aggregate-eval30")
+    eval_aggregate.add_argument("--package-root", type=Path, required=True)
+    eval_aggregate.add_argument("--array-job-id", required=True)
+    eval_aggregate.add_argument("--eval-job-id", required=True)
+    eval_aggregate.add_argument("--output-dir", type=Path, required=True)
+    eval_aggregate.add_argument("--source-identity")
+    eval_aggregate.add_argument("--source-bundle-identity")
+
+    diagnostic_aggregate = subparsers.add_parser("aggregate-diagnostics")
+    diagnostic_aggregate.add_argument("--package-root", type=Path, required=True)
+    diagnostic_aggregate.add_argument("--array-job-id", required=True)
+    diagnostic_aggregate.add_argument("--diagnostic-job-id", required=True)
+    diagnostic_aggregate.add_argument("--output-dir", type=Path, required=True)
+    diagnostic_aggregate.add_argument("--source-identity")
+    diagnostic_aggregate.add_argument("--source-bundle-identity")
+
     training_gate = subparsers.add_parser("validate-training")
     training_gate.add_argument("--csv", type=Path, required=True)
     eval_gate = subparsers.add_parser("validate-eval30")
     eval_gate.add_argument("--csv", type=Path, required=True)
     diagnostic_gate = subparsers.add_parser("validate-diagnostics")
     diagnostic_gate.add_argument("--csv", type=Path, required=True)
+
     reducer = subparsers.add_parser("reduce")
     reducer.add_argument("--training-csv", type=Path, required=True)
+    reducer.add_argument("--training-curve-csv", type=Path, required=True)
     reducer.add_argument("--eval30-csv", type=Path, required=True)
     reducer.add_argument("--diagnostic-csv", type=Path, required=True)
+    reducer.add_argument("--service-policy", type=Path)
     reducer.add_argument("--out-dir", type=Path, required=True)
     args = parser.parse_args(argv)
 
@@ -1035,11 +928,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(format_cell_line(cell))
         return 0
     if args.write_resource_template:
+        args.write_resource_template.parent.mkdir(parents=True, exist_ok=True)
         args.write_resource_template.write_text(resource_profile_template(), encoding="utf-8")
+        print(f"RESOURCE_TEMPLATE={args.write_resource_template}")
         return 0
     if args.validate_resource_profile:
-        load_resource_profile(args.validate_resource_profile)
+        load_resource_profile(args.validate_resource_profile, scope=args.resource_profile_scope)
         print("RESOURCE_PROFILE_VALIDATED")
+        print(f"RESOURCE_PROFILE_SCOPE={args.resource_profile_scope}")
         return 0
     if args.command == "formal-task-mapping":
         print(format_cell_line(resolve_formal_cell(args.task_id)))
@@ -1047,6 +943,78 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "smoke-task-mapping":
         print(format_cell_line(resolve_smoke_cell(args.task_id)))
         return 0
+
+    if args.command in {
+        "validate-smoke-packages",
+        "aggregate-training",
+        "aggregate-eval30",
+        "aggregate-diagnostics",
+    }:
+        from scripts import formal_75k_80cell_artifacts as artifacts
+
+        if args.command == "validate-smoke-packages":
+            result = artifacts.validate_smoke_packages(
+                args.package_root,
+                args.job_id,
+                args.stage_root,
+                expected_source_identity=args.source_identity,
+                expected_source_bundle_identity=args.source_bundle_identity,
+            )
+            print(f"STATUS={result.status}")
+            print(f"SMOKE_CELL_COUNT={result.cell_count}")
+            print("SCIENTIFIC_CLAIM_GENERATED=NO")
+            return 0
+        if args.command == "aggregate-training":
+            result = artifacts.aggregate_training_packages(
+                args.package_root,
+                training_job_id=args.array_job_id,
+                stage_root=args.stage_root,
+                expected_source_identity=args.source_identity,
+                expected_source_bundle_identity=args.source_bundle_identity,
+            )
+            args.output_dir.mkdir(parents=True, exist_ok=True)
+            summary_path = _write_csv(args.output_dir / "formal_training_matrix_summary.csv", result.summary_rows)
+            curve_path = _write_csv(args.output_dir / "training_curve_long.csv", result.training_curve_rows)
+            print("STATUS=PASS")
+            print(f"TRAINING_CELL_COUNT={len(result.summary_rows)}")
+            print(f"TRAINING_CURVE_ROWS={len(result.training_curve_rows)}")
+            print(f"STAGED_CHECKPOINT_COUNT={len(result.staged_tasks)}")
+            print(f"OUTPUT={summary_path}")
+            print(f"OUTPUT={curve_path}")
+            return 0
+        if args.command == "aggregate-eval30":
+            rows = artifacts.aggregate_eval30_packages(
+                args.package_root,
+                training_job_id=args.array_job_id,
+                eval_job_id=args.eval_job_id,
+                expected_source_identity=args.source_identity,
+                expected_source_bundle_identity=args.source_bundle_identity,
+            )
+            args.output_dir.mkdir(parents=True, exist_ok=True)
+            output = _write_csv(args.output_dir / "canonical_eval30_episode_rows.csv", rows)
+            print("STATUS=PASS")
+            print(f"EVAL30_EPISODE_ROWS={len(rows)}")
+            print(f"OUTPUT={output}")
+            return 0
+        result = artifacts.aggregate_diagnostic_packages(
+            args.package_root,
+            training_job_id=args.array_job_id,
+            diagnostic_job_id=args.diagnostic_job_id,
+            expected_source_identity=args.source_identity,
+            expected_source_bundle_identity=args.source_bundle_identity,
+        )
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        diagnostic_path = _write_csv(args.output_dir / "diagnostic_episode_rows.csv", result.diagnostic_rows)
+        same_pass_path = _write_csv(args.output_dir / "diagnostic_same_pass_canonical_eval30_rows.csv", result.same_pass_eval_rows)
+        package_path = _write_csv(args.output_dir / "diagnostic_package_summary.csv", result.package_summaries)
+        print("STATUS=PASS")
+        print(f"DIAGNOSTIC_EPISODE_ROWS={len(result.diagnostic_rows)}")
+        print(f"SAME_PASS_CANONICAL_EPISODE_ROWS={len(result.same_pass_eval_rows)}")
+        print(f"OUTPUT={diagnostic_path}")
+        print(f"OUTPUT={same_pass_path}")
+        print(f"OUTPUT={package_path}")
+        return 0
+
     if args.command == "validate-training":
         result = validate_training_gate(_read_csv(args.csv))
         print(f"STATUS={result.status}")
@@ -1070,6 +1038,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             _read_csv(args.eval30_csv),
             _read_csv(args.diagnostic_csv),
             args.out_dir,
+            training_curve_rows=_read_csv(args.training_curve_csv),
+            service_policy=_load_numeric_policy(args.service_policy),
         )
         print("STATUS=PASS")
         for output_path in outputs:
@@ -1077,6 +1047,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     parser.print_help()
     return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    try:
+        return _main(argv)
+    except ValueError as exc:
+        print(f"STATUS=BLOCKED", file=sys.stderr)
+        print(f"BLOCK_REASON={exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

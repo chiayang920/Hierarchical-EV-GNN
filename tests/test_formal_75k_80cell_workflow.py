@@ -37,10 +37,34 @@ def complete_training_rows():
             "checkpoint_selection_rule": workflow.CHECKPOINT_SELECTION_RULE,
             "fresh_run": "true",
             "required_values_finite": "true",
+            "runtime_elapsed_seconds": str(1000 + cell.task_id),
+            "checkpoint_identity_sha256": f"checkpoint-{cell.task_id}",
+            "config_identity_sha256": f"config-{cell.task_id}",
         }
         for cell in workflow.formal_matrix()
     ]
 
+
+
+def complete_training_curve_rows():
+    rows = []
+    for cell in workflow.formal_matrix():
+        for index, step in enumerate(range(5000, 75001, 5000)):
+            rows.append(
+                {
+                    "task_id": str(cell.task_id),
+                    "scale": cell.scale,
+                    "algorithm": cell.algorithm,
+                    "seed": str(cell.seed),
+                    "source_identity": "source-a",
+                    "training_job_id": "12345",
+                    "timestep": str(step),
+                    "eval_mean_reward": str(-1000 + index + (10 if cell.algorithm == "hierarchical" else 0)),
+                    "eval_std_reward": "5.0",
+                    "elapsed_seconds": str(index + 1),
+                }
+            )
+    return rows
 
 def complete_eval_rows():
     rows = []
@@ -59,6 +83,10 @@ def complete_eval_rows():
                     "tracking_error": str(50 - (5 if cell.algorithm == "hierarchical" else 0)),
                     "energy_tracking_error": "1.0",
                     "power_tracker_violation": "0.0",
+                    "energy_delivered": "100.0",
+                    "evs_served": "50.0",
+                    "average_satisfaction": "0.9",
+                    "transformer_overload": "0.0",
                     "required_values_finite": "true",
                 }
             )
@@ -83,6 +111,13 @@ def complete_diagnostic_rows():
                     "evs_served": "10.0",
                     "average_satisfaction": "0.9",
                     "tail_satisfaction": "0.8",
+                    "charger_upper_bound_action_fraction": (
+                        "0.20" if cell.algorithm == "hierarchical" else "0.70"
+                    ),
+                    "transformer_positive_pressure_hhi": "0.2",
+                    "transformer_positive_pressure_gini": "0.3",
+                    "charger_positive_pressure_hhi": "0.4",
+                    "charger_positive_pressure_gini": "0.5",
                     "mapping_validation": "pass",
                     "canonical_reconciliation": "pass",
                     "service_reconciliation": "pass",
@@ -242,6 +277,12 @@ def test_reducer_uses_paired_seed_inference_and_holm_corrections(tmp_path):
         complete_eval_rows(),
         complete_diagnostic_rows(),
         tmp_path,
+        training_curve_rows=complete_training_curve_rows(),
+        service_policy={
+            "energy_delivered_max_relative_decline": 0.05,
+            "evs_served_max_relative_decline": 0.05,
+            "average_satisfaction_max_relative_decline": 0.05,
+        },
     )
 
     assert (tmp_path / "claim_assessment.env") in output_paths
@@ -307,7 +348,7 @@ def test_claim_boundary_logic_handles_positive_partial_null_and_harmful_cases():
             }
             for scale in workflow.SCALES
         ],
-        service_guardrails={"clear_material_collapse": False},
+        service_guardrails={"status": "PASS"},
     )
     assert positive["STRONG_CROSS_SCALE_ARCHITECTURE_CLAIM_SUPPORTED"] == "YES"
 
@@ -328,7 +369,7 @@ def test_claim_boundary_logic_handles_positive_partial_null_and_harmful_cases():
             {"scale": scale, "mean_benefit": 1.0, "holm_adjusted_pvalue": 0.01}
             for scale in workflow.SCALES
         ],
-        service_guardrails={"clear_material_collapse": False},
+        service_guardrails={"status": "PASS"},
     )
     assert partial["STRONG_CROSS_SCALE_ARCHITECTURE_CLAIM_SUPPORTED"] == "NO"
     assert partial["CROSS_SCALE_REWARD_DIRECTION_CONSISTENT"] == "NO"
@@ -350,7 +391,7 @@ def test_claim_boundary_logic_handles_positive_partial_null_and_harmful_cases():
             {"scale": scale, "mean_benefit": 1.0, "holm_adjusted_pvalue": 0.01}
             for scale in workflow.SCALES
         ],
-        service_guardrails={"clear_material_collapse": False},
+        service_guardrails={"status": "PASS"},
     )
     assert harmful["STRONG_CROSS_SCALE_ARCHITECTURE_CLAIM_SUPPORTED"] == "NO"
 
@@ -386,10 +427,20 @@ def test_cli_print_matrix_outputs_all_80_rows():
     )
 
 
-def test_submit_helper_dry_run_prints_dependency_stages_without_submitting():
+def test_submit_helper_dry_run_prints_dependency_stages_without_submitting(tmp_path):
+    fake_python = tmp_path / "python311"
+    fake_python.write_text(
+        "#!/bin/bash\n"
+        "if [[ \"${1:-}\" == \"-I\" && \"${2:-}\" == \"-c\" ]]; then echo 3.11.15; exit 0; fi\n"
+        f'exec "{sys.executable}" "$@"\n',
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    env = {**__import__("os").environ, "EV_GNN_FORMAL_75K_PYTHON": str(fake_python)}
     result = subprocess.run(
         ["bash", str(SUBMIT_SCRIPT), "--dry-run"],
         cwd=PROJECT_ROOT,
+        env=env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -397,7 +448,9 @@ def test_submit_helper_dry_run_prints_dependency_stages_without_submitting():
     )
 
     assert result.returncode == 0, result.stderr
-    assert "Stage S - two-cell smoke" in result.stdout
-    assert "Stage A - 80-cell formal training array" in result.stdout
-    assert "Stage F - final reducer and scientific analysis" in result.stdout
+    assert "STAGES=S,A,B,C,D,E,F" in result.stdout
+    assert "MANUAL_JOB_ID_GOVERNANCE=REQUIRED" in result.stdout
+    assert "STAGE_B_COMMAND=" in result.stdout
+    assert "STAGE_E_COMMAND=" in result.stdout
+    assert "STAGE_F_COMMAND=" in result.stdout
     assert "DRY_RUN_NO_JOBS_SUBMITTED" in result.stdout

@@ -4,6 +4,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
+source "${SCRIPT_DIR}/lib_formal_75k_runtime.sh"
+formal75k_require_python311
 OUTPUT_ROOT="${EV_GNN_FORMAL_75K_SOURCE_OUTPUT_ROOT:-${HOME}/Downloads/EVGNN_Formal_Evidence}"
 EXPECTED_HEAD_SHA="${EV_GNN_FORMAL_75K_SOURCE_EXPECTED_HEAD_SHA:-}"
 REQUIRED_BRANCH="${EV_GNN_FORMAL_75K_SOURCE_REQUIRED_BRANCH:-exp/formal-75k-nonnegative-comparison-v1}"
@@ -31,6 +33,10 @@ ALLOWLIST=(
   m3_jobs/submit_formal_75k_80cell_workflow.sh
   m3_jobs/create_formal_75k_80cell_source_bundle.sh
   scripts/formal_75k_80cell_workflow.py
+  scripts/formal_75k_80cell_artifacts.py
+  scripts/formal_75k_80cell_statistics.py
+  scripts/formal_75k_80cell_diagnostic_validation.py
+  m3_jobs/lib_formal_75k_runtime.sh
   scripts/aggregate_controlled_multiscale_eval30.py
   utils/ev2gym_training_utils.py
   utils/infrastructure_diagnostics.py
@@ -132,18 +138,6 @@ for path in "${ALLOWLIST[@]}"; do
   cp "${REPO_ROOT}/${path}" "${STAGING_ROOT}/${path}"
 done
 printf "%s\n" "${RECORDED_HEAD_SHA}" > "${STAGING_ROOT}/SOURCE_COMMIT_SHA.txt"
-python - "${STAGING_ROOT}" <<'PY'
-import hashlib
-import sys
-from pathlib import Path
-
-root = Path(sys.argv[1])
-manifest = root / "runtime_metadata/source_file_checksums.sha256"
-paths = sorted(path for path in root.rglob("*") if path.is_file() and path != manifest)
-with manifest.open("w", encoding="utf-8") as handle:
-    for path in paths:
-        handle.write(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(root).as_posix()}\n")
-PY
 tar -cf "${RAW_TAR}" -C "${TMP_DIR}" "${TOP_LEVEL}"
 gzip -n -c "${RAW_TAR}" > "${ARCHIVE_PATH}"
 tar -tzf "${ARCHIVE_PATH}" >/dev/null
