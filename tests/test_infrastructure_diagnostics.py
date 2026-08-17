@@ -13,10 +13,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 
-def diagnostic_cli_args(config_path, output_dir, scale="25cp"):
+def diagnostic_cli_args(config_path, output_dir, scale="25cp", algorithm="actiongnn"):
     return [
         "--algorithm",
-        "actiongnn",
+        algorithm,
         "--scale",
         scale,
         "--config",
@@ -2488,6 +2488,167 @@ def test_explicit_scale_is_the_only_episode_and_summary_metadata_authority(
     evaluator.main(diagnostic_cli_args(config_path, tmp_path / "out", scale="100cp"))
 
     assert captured == {"episode_scale": "100cp", "summary_scale": "100cp"}
+
+
+def test_diagnostic_evaluator_accepts_actiongnn_nonnegative_algorithm_choice(tmp_path):
+    import evaluate_td3_gnn_infrastructure_diagnostics as evaluator
+
+    args = evaluator.parse_args(
+        diagnostic_cli_args(
+            tmp_path / "config.yaml",
+            tmp_path / "out",
+            algorithm="actiongnn_nonnegative",
+        )
+    )
+
+    assert args.algorithm == "actiongnn_nonnegative"
+
+
+def test_diagnostic_evaluator_rejects_corrected_checkpoint_without_metadata_before_episode_execution(
+    tmp_path,
+    monkeypatch,
+):
+    import evaluate_td3_gnn_infrastructure_diagnostics as evaluator
+
+    config_path = tmp_path / "formal_config.yaml"
+    config_path.write_text("number_of_charging_stations: 25\n", encoding="utf-8")
+    probe_env = SimpleNamespace(
+        action_space=SimpleNamespace(
+            shape=(25,),
+            low=np.zeros(25, dtype=float),
+            high=np.ones(25, dtype=float),
+        ),
+        v2g_enabled=False,
+    )
+
+    def forbidden_episode_execution(*args, **kwargs):
+        raise AssertionError("diagnostic episodes should not execute before checkpoint identity validation")
+
+    monkeypatch.setattr(evaluator, "resolve_device", lambda _value: "cpu")
+    monkeypatch.setattr(evaluator, "load_checkpoint_kwargs", lambda _prefix: {})
+    monkeypatch.setattr(evaluator, "make_env", lambda *_args, **_kwargs: probe_env)
+    monkeypatch.setattr(
+        evaluator,
+        "validate_environment_action_bounds",
+        lambda *_args, **_kwargs: {"environment_action_high": 1.0},
+    )
+    monkeypatch.setattr(
+        evaluator,
+        "resolve_v2g_metadata",
+        lambda *_args, **_kwargs: {
+            "v2g_enabled": False,
+            "v2g_enabled_source": "env.v2g_enabled",
+        },
+    )
+    monkeypatch.setattr(evaluator, "create_policy", forbidden_episode_execution)
+    monkeypatch.setattr(evaluator, "evaluate_diagnostic_episode", forbidden_episode_execution)
+
+    with pytest.raises(ValueError, match="metadata"):
+        evaluator.main(
+            diagnostic_cli_args(
+                config_path,
+                tmp_path / "out",
+                algorithm="actiongnn_nonnegative",
+            )
+        )
+
+
+def test_diagnostic_evaluator_passes_canonical_algorithm_to_checkpoint_guard(
+    tmp_path,
+    monkeypatch,
+):
+    import evaluate_td3_gnn_infrastructure_diagnostics as evaluator
+
+    config_path = tmp_path / "formal_config.yaml"
+    config_path.write_text("number_of_charging_stations: 25\n", encoding="utf-8")
+    captured = {}
+    probe_env = SimpleNamespace(
+        action_space=SimpleNamespace(
+            shape=(25,),
+            low=np.zeros(25, dtype=float),
+            high=np.ones(25, dtype=float),
+        ),
+        v2g_enabled=False,
+    )
+
+    monkeypatch.setattr(
+        evaluator,
+        "ALGORITHM_CHOICES",
+        ("actiongnn", "hierarchical", "actiongnn_nonnegative"),
+    )
+    monkeypatch.setattr(evaluator, "normalise_algorithm_label", lambda value: value)
+    monkeypatch.setattr(evaluator, "resolve_device", lambda _value: "cpu")
+    monkeypatch.setattr(
+        evaluator,
+        "normalise_checkpoint_prefix",
+        lambda _value: Path("checkpoint/model.best"),
+    )
+    monkeypatch.setattr(evaluator, "load_checkpoint_kwargs", lambda _prefix: {})
+    monkeypatch.setattr(evaluator, "make_env", lambda *_args, **_kwargs: probe_env)
+    monkeypatch.setattr(
+        evaluator,
+        "validate_environment_action_bounds",
+        lambda *_args, **_kwargs: {"environment_action_high": 1.0},
+    )
+    monkeypatch.setattr(
+        evaluator,
+        "resolve_v2g_metadata",
+        lambda *_args, **_kwargs: {
+            "v2g_enabled": False,
+            "v2g_enabled_source": "env.v2g_enabled",
+        },
+    )
+    monkeypatch.setattr(evaluator, "create_policy", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        evaluator,
+        "validate_checkpoint_identity",
+        lambda checkpoint_prefix, canonical_algorithm: captured.setdefault(
+            "identity_guard",
+            (checkpoint_prefix, canonical_algorithm),
+        ),
+        raising=False,
+    )
+
+    def capture_checkpoint_load(*load_args):
+        captured["load_args"] = load_args
+
+    monkeypatch.setattr(evaluator, "load_policy_checkpoint", capture_checkpoint_load)
+    monkeypatch.setattr(
+        evaluator,
+        "evaluate_diagnostic_episode",
+        lambda **_kwargs: {
+            "episode_reward": 0.0,
+            "episode_steps": 1,
+            "done": True,
+            "stats": {},
+            "reset_info": {},
+            "action_summary": {},
+            "same_pass_canonical_episode_record": {},
+        },
+    )
+    monkeypatch.setattr(evaluator, "build_episode_row", lambda **_kwargs: {})
+    monkeypatch.setattr(evaluator, "build_charger_rows", lambda *_args: [])
+    monkeypatch.setattr(evaluator, "build_transformer_rows", lambda *_args: [])
+    monkeypatch.setattr(evaluator, "validate_diagnostic_reconciliation", lambda **_kwargs: None)
+    monkeypatch.setattr(evaluator, "build_seed_summary_row", lambda *_args: {})
+    monkeypatch.setattr(evaluator, "write_csv", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        evaluator,
+        "write_same_pass_canonical_eval30",
+        lambda *_args, **_kwargs: None,
+    )
+
+    evaluator.main(
+        diagnostic_cli_args(
+            config_path,
+            tmp_path / "out",
+            algorithm="actiongnn_nonnegative",
+        )
+    )
+
+    assert len(captured["load_args"]) == 3
+    assert captured["load_args"][2] == "actiongnn_nonnegative"
+    assert captured["identity_guard"][1] == "actiongnn_nonnegative"
 
 
 def test_filename_inference_is_not_an_evaluator_identity_source():

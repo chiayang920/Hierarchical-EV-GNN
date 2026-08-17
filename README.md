@@ -1,327 +1,336 @@
-# Hierarchical EV-GNN
+# Hierarchical EV-GNN for Large-Scale EV Charging Control
 
-This repository contains a research extension of the EV-GNN baseline for large-scale electric vehicle (EV) charging coordination under EV2Gym PublicPST scenarios.
+A graph reinforcement learning framework for **large-scale electric-vehicle (EV) charging coordination** under EV2Gym Public Power Setpoint Tracking (PublicPST), extending EV-GNN with explicit **CPO–Transformer–Charger–EV hierarchical decision formation**.
 
-The original EV-GNN work introduces a graph-based reinforcement learning formulation for scalable EV charging coordination from a Charging Point Operator (CPO) perspective. This project keeps the simulator, graph-state representation, reward setting, and EV2Gym action interface aligned with the baseline, while replacing the flat EV-level actor with a physically aligned hierarchical actor.
+The project investigates a simple architectural question:
 
-## Research objective
+> If the charging infrastructure is already represented as a graph, can control improve when the actor also follows that physical hierarchy when forming decisions?
 
-The objective is to evaluate whether a physically aligned actor can improve control behaviour and interpretability compared with the original flat TD3 ActionGNN actor.
+Both compared controllers use graph-structured state information and the same TD3 framework. The difference is **where decision structure enters the policy**: the baseline forms EV actions directly, while the proposed model allocates control through transformer and charger layers before producing EV-level actions.
 
-The proposed hierarchy follows the physical decision structure:
+---
 
-```text
-CPO
-→ Transformer
-→ Charger
-→ EV
-```
+## Architecture Overview
 
-The implementation is designed to preserve two contracts:
+### Baseline: direct EV-node action formation
+
+The controlled baseline retains the EV-GNN graph representation and TD3 learning framework, but forms charging actions directly at EV nodes.
 
 ```text
-EV2Gym contract:
-  mapped_action_numpy has shape [action_dim]
-  mapped_action_numpy is passed to env.step(...)
-
-TD3 critic / replay-buffer contract:
-  full_node_action has shape [num_nodes, 1]
-  non-EV node rows remain zero
-  EV rows contain the trainable action values
+PublicPST graph state
+        ↓
+Graph encoder / ActionGNN
+        ↓
+Direct EV-node action formation
+        ↓
+EV charging actions
 ```
 
-## Architecture overview
+For the charging-only PublicPST comparison, the EV action mapping is
+
+```text
+a_i = 0.5 × a_max × (tanh(z_i) + 1)
+```
+
+so EV actions lie in `[0, a_max]`, while non-EV node rows remain zero in the graph-aligned action representation.
+
+### Proposed model: hierarchical decision allocation
+
+The proposed actor uses the same graph-state family but explicitly structures decision formation through the physical charging infrastructure:
+
+```text
+PublicPST graph state
+        ↓
+Graph / CPO-level control scale
+        ↓
+Transformer allocation
+        ↓
+Charger allocation within transformer
+        ↓
+EV-specific gating
+        ↓
+EV charging actions
+```
+
+Conceptually, an EV action is composed from a graph-level control scale, a transformer allocation weight, a charger allocation weight conditioned on its parent transformer, and an EV-specific gate.
+
+### Side-by-side view
 
 ```mermaid
-flowchart TD
-    A[EV2Gym PublicPST environment] --> B[Graph state encoder]
-    B --> C1[Baseline TD3 ActionGNN actor]
-    C1 --> D1[Flat EV-node actions]
+flowchart LR
+    S["EV2Gym PublicPST<br/>Graph State"] --> E["Graph Encoder"]
 
-    B --> C2[Hierarchical TD3-GNN actor]
-    C2 --> D2[CPO-level allocation]
-    D2 --> E2[Transformer-level allocation]
-    E2 --> F2[Charger-level allocation]
-    F2 --> G2[EV-level gates]
+    E --> B["TD3 EV-GNN Baseline"]
+    B --> BA["Direct EV-node<br/>Action Formation"]
 
-    D1 --> H[EV2Gym mapped action vector]
-    G2 --> H
-    H --> I[env.step action]
-    I --> J[Reward, tracking error, overload, satisfaction]
+    E --> H["Hierarchical TD3 EV-GNN"]
+    H --> G["Graph / CPO-level<br/>Control Scale"]
+    G --> T["Transformer<br/>Allocation"]
+    T --> C["Charger Allocation<br/>within Transformer"]
+    C --> V["EV-specific<br/>Gating"]
+
+    BA --> A["EV Charging Actions"]
+    V --> A
+    A --> ENV["EV2Gym Environment"]
 ```
 
-## Repository contents
+The architectural contribution is therefore **not** “GNN versus hierarchy”. Both policies use topology in their state representation. The proposed model additionally uses topology to structure **decision authority and action formation**.
+
+---
+
+## Key Contributions
+
+- **Infrastructure-aligned decision formation**
+  Introduces explicit transformer-, charger-, and EV-level decision stages within a TD3 EV-GNN actor.
+
+- **Controlled baseline comparison**
+  Compares the hierarchy against a charging-only TD3 EV-GNN baseline under the same PublicPST task family, graph state, reward family, and continuous EV action domain.
+
+- **Multi-scale evaluation**
+  Evaluates the two architectures across 25, 100, 500, and 1000 charging-point PublicPST scenarios.
+
+- **Mechanism-level analysis**
+  Examines not only reward, but also action-boundary behaviour, graded interior control, infrastructure loading, and EV-service outcomes.
+
+- **Reproducible experiment tooling**
+  Includes training, deterministic evaluation, infrastructure diagnostics, experiment-matrix utilities, validation scripts, and automated tests.
+
+---
+
+## Experimental Setup
+
+The main study compares the two architectures under a common TD3/PublicPST protocol.
+
+| Setting | Configuration |
+| --- | --- |
+| Environment | EV2Gym PublicPST |
+| RL algorithm | TD3 |
+| Compared policies | TD3 EV-GNN Baseline vs Hierarchical TD3 EV-GNN |
+| Scenarios | 25CP, 100CP, 500CP, 1000CP |
+| Training seeds | 10 paired seeds per architecture and scenario |
+| Training budget | 75,000 environment steps per model |
+| Total trained models | 80 |
+| Selected checkpoint | `model.best` |
+| Final evaluation | 30 deterministic episodes per trained model |
+| Infrastructure diagnostics | 30 episodes per trained model |
+
+The four scenarios are progressively larger configured PublicPST environments. They should be interpreted as **cross-scenario robustness evidence**, rather than as a pure single-factor causal experiment in charging-point count.
+
+---
+
+## Results Summary
+
+### Decision mechanism
+
+The most consistent result is a substantial change in how the continuous action space is used.
+
+| Scenario | Reduction in maximum-boundary action share | Increase in interior-action share |
+| --- | ---: | ---: |
+| 25CP | 48.8 percentage points | 46.4 percentage points |
+| 100CP | 12.1 percentage points | 40.1 percentage points |
+| 500CP | 32.2 percentage points | 41.8 percentage points |
+| 1000CP | 27.3 percentage points | 37.2 percentage points |
+
+Across all four scenarios, hierarchical decision formation shifts substantial control mass away from maximum-boundary charging and toward more graded interior continuous actions.
+
+This mechanism should not be interpreted in isolation: interior actions are not inherently better unless they coexist with acceptable tracking, infrastructure, and EV-service behaviour.
+
+### Control evidence
+
+| Scenario | Reward evidence | Overall interpretation |
+| --- | --- | --- |
+| 25CP | Supported paired improvement | Clearest control benefit and strongest confirmatory evidence |
+| 100CP | Strong favourable direction | Mean effect remains statistically unresolved |
+| 500CP | Mixed | Strong seed dependence and heterogeneous control outcomes |
+| 1000CP | Favourable mean direction | High uncertainty and substantial seed dependence |
+
+The evidence therefore supports a **meaningful architectural improvement**, but not a universal-superiority claim. The hierarchy consistently changes the control mechanism, while reward, transformer loading, and EV-service outcomes become increasingly scenario- and seed-dependent at larger configurations.
+
+Detailed statistical results, figures, metric definitions, and claim boundaries are available in:
+
+- [Formal75K research notebook](docs/EV_GNN_Formal75k_Research_Analysis_v3_2_final_polished.ipynb)
+- [Formal75K research report (PDF)](docs/EV_GNN_Formal75k_Research_Analysis_v3_2_final_polished.pdf)
+
+---
+
+## Repository Structure
 
 ```text
-TD3/
-  TD3_ActionGNN.py                    Original-style baseline ActionGNN
-  TD3_ActionGNN_Controlled.py         Scale-agnostic controlled ActionGNN baseline
-  TD3_HierarchicalActionGNN.py        Main hierarchical actor implementation
-
-utils/
-  state.py                            Original-style graph state utilities
-  state_public_pst_gnn.py             Scale-agnostic PublicPST graph state encoder
-  replay_buffer.py                    Original-style replay buffer
-  replay_buffer_actiongnn.py          Graph replay buffer used by ActionGNN TD3 paths
-  hierarchical_action_projection.py   Standalone projection utility / tested prototype, not the live actor path
-
-tests/
-  test_td3_hierarchical_actiongnn_contracts.py
-  test_hierarchical_projection_batched_replay.py
-  test_hierarchical_action_projection.py
-  test_controlled_evaluator_contract.py
-
-analysis/
-  06_25cp_formal_aggregation.py       Historical 25CP aggregation utility
-  07_100cp_formal_aggregation.py      Formal 100CP eval30 aggregation script
-
-m3_jobs/
-  01_100cp_tiny_smoke.slurm
-  02_100cp_profile_cpu_10k.slurm
-  03_100cp_profile_gpu_10k.slurm
-  04_100cp_formal_baseline_train_50k.slurm
-  05_100cp_formal_hierarchical_train_50k.slurm
-  06_100cp_formal_eval30.slurm
-  07_100cp_formal_aggregation.slurm
-
-train_td3_gnn.py                      Unified scale-agnostic TD3-GNN training entry point
-evaluate_td3_gnn.py                   Unified scale-agnostic controlled evaluator
-evaluator_td3_actiongnn_controlled.py Deprecated evaluator compatibility wrapper
-docs/scale_agnostic_td3_gnn_refactor_note.md
+EV-GNN/
+├── TD3/
+│   ├── TD3_ActionGNN_NonNegative.py
+│   ├── TD3_HierarchicalActionGNN.py
+│   └── ...                         # TD3 / EV-GNN baseline implementations
+│
+├── config_files/
+│   └── ...                         # EV2Gym PublicPST configurations
+│
+├── utils/
+│   └── ...                         # Graph state, replay, projection and diagnostics
+│
+├── scripts/
+│   └── ...                         # Formal experiment, validation and statistics utilities
+│
+├── m3_jobs/
+│   └── ...                         # HPC workflow templates for large-scale experiments
+│
+├── tests/
+│   └── ...                         # Actor, evaluator and workflow contract tests
+│
+├── docs/
+│   ├── EV_GNN_Formal75k_Research_Analysis_v3_2_final_polished.ipynb
+│   └── EV_GNN_Formal75k_Research_Analysis_v3_2_final_polished.pdf
+│
+├── train_td3_gnn.py                # Main TD3 EV-GNN training entry point
+├── evaluate_td3_gnn.py             # Deterministic policy evaluation
+├── evaluate_td3_gnn_infrastructure_diagnostics.py
+├── Results_Analysis/               # Upstream EV-GNN analysis utilities
+├── SAC/                            # Upstream EV-GNN SAC baseline implementation
+├── evaluator.py                    # Upstream evaluator
+├── train_RL_GNN.py                 # Upstream EV-GNN training entry point
+├── train_baselines.py              # Upstream baseline training entry point
+├── requirements.txt
+└── README.md
 ```
 
-## Main implementation change
+The repository keeps the original EV-GNN baseline components required for provenance and compatibility, together with the hierarchical-control extension, configuration, tests, and lightweight research documentation. Large checkpoints and raw experiment outputs are intentionally excluded.
 
-The key contribution is `TD3/TD3_HierarchicalActionGNN.py`.
+---
 
-Instead of predicting EV actions with a flat final GNN layer, the hierarchical actor composes actions through a structured allocation path:
+## Installation
 
-```text
-graph encoding
-→ transformer scores
-→ charger scores
-→ EV gates
-→ hierarchical action composition inside TD3_HierarchicalActionGNN
-→ full_node_action
-→ mapped_action_numpy
+The project dependencies are listed in `requirements.txt`.
+
+```bash
+python -m pip install -r requirements.txt
 ```
 
-The hierarchical action value is conceptually:
+Key dependencies include EV2Gym, PyTorch, Stable-Baselines3 tooling, and Weights & Biases support.
 
-```text
-EV action
-= total graph budget
-× transformer allocation weight
-× charger allocation weight
-× EV gate
+To inspect the available command-line interfaces:
+
+```bash
+python train_td3_gnn.py --help
+python evaluate_td3_gnn.py --help
+python evaluate_td3_gnn_infrastructure_diagnostics.py --help
 ```
 
-The actor still returns compatible outputs for the existing training loop:
+---
 
-```text
-mapped_action_numpy:
-  flat EV2Gym action vector for env.step(...)
+## Training
 
-full_node_action:
-  graph-node action tensor for replay buffer and TD3 critic
-```
+The main training entry point supports the controlled charging-only baseline and the hierarchical actor.
 
-## Scale-agnostic training and evaluation
-
-TD3-GNN algorithm code is scale-agnostic. CP scale comes from the EV2Gym config file, for example `PublicPST_25cp.yaml` or `PublicPST_100.yaml`, and `action_dim` is detected from `env.action_space.shape[0]`. Config files, run names, output paths, and experiment metadata should remain scale-explicit.
-
-Use `actiongnn` as the canonical machine-readable label for the controlled ActionGNN baseline, and `hierarchical` for the hierarchical actor. Legacy labels are accepted only where documented for migration or historical reproducibility.
-
-### ActionGNN training
+### Baseline
 
 ```bash
 python train_td3_gnn.py \
-  --algorithm actiongnn \
-  --config ./config_files/PublicPST_100.yaml \
+  --algorithm actiongnn_nonnegative \
+  --config config_files/PublicPST_25cp.yaml \
   --seed 0 \
   --device cpu \
-  --run_name actiongnn_example \
-  --max_timesteps 50000 \
+  --run_name baseline_25cp_seed0 \
+  --max_timesteps 75000 \
   --start_timesteps 1000 \
   --eval_freq 5000 \
   --eval_episodes 5 \
   --batch_size 64 \
   --replay_buffer_size 100000 \
-  --save_dir ./artifacts/experiments \
+  --save_dir artifacts/experiments \
   --log_to_wandb false
 ```
 
-### Hierarchical training
+### Hierarchical model
 
 ```bash
 python train_td3_gnn.py \
   --algorithm hierarchical \
-  --config ./config_files/PublicPST_100.yaml \
+  --config config_files/PublicPST_25cp.yaml \
   --seed 0 \
   --device cpu \
-  --run_name hierarchical_example \
-  --max_timesteps 50000 \
+  --run_name hierarchical_25cp_seed0 \
+  --max_timesteps 75000 \
   --start_timesteps 1000 \
   --eval_freq 5000 \
   --eval_episodes 5 \
   --batch_size 64 \
   --replay_buffer_size 100000 \
-  --save_dir ./artifacts/experiments \
+  --save_dir artifacts/experiments \
   --log_to_wandb false
 ```
 
-### Controlled evaluation
+The charging-point scale is selected through the EV2Gym configuration file. Formal experiments use scale-explicit PublicPST configurations for 25CP, 100CP, 500CP, and 1000CP.
+
+---
+
+## Evaluation and Diagnostics
+
+Use the evaluator interfaces to inspect their required checkpoint and output arguments:
 
 ```bash
-python evaluate_td3_gnn.py \
-  --algorithm actiongnn \
-  --config ./config_files/PublicPST_100.yaml \
-  --seed 0 \
-  --eval_episodes 30 \
-  --checkpoint ./artifacts/experiments/actiongnn_example/model.best \
-  --device cpu \
-  --output_csv ./artifacts/evaluations/actiongnn_100cp_seed0_eval30.csv \
-  --run_name actiongnn_100cp_seed0_eval30 \
-  --max_episode_steps 112 \
-  --deterministic true \
-  --eval_seed_offset 420000
+python evaluate_td3_gnn.py --help
+python evaluate_td3_gnn_infrastructure_diagnostics.py --help
 ```
 
-## Validation status
-
-### Local contract tests
-
-The repository contains tests for:
-
-```text
-actor/action shape contracts
-hierarchical projection behaviour
-batched replay compatibility
-controlled evaluator contract
-```
-
-Run:
+The repository also provides utilities for the formal experiment matrix:
 
 ```bash
-pytest tests
+python scripts/formal_75k_80cell_workflow.py --print-matrix
 ```
 
-### 25CP controlled evaluation
+For large-scale HPC execution, see the retained workflow templates under `m3_jobs/`.
 
-Formal 25CP evaluation used:
+---
+
+## Testing
+
+Run the repository test suite with:
+
+```bash
+python -m pytest -q
+```
+
+The tests cover core actor contracts, graph-aligned action behaviour, hierarchical projection, evaluator compatibility, infrastructure diagnostics, and the formal experiment workflow.
+
+---
+
+## Current Research Direction
+
+The completed multi-scale comparison establishes the full CPO–Transformer–Charger–EV hierarchy as a meaningful decision architecture, while also revealing infrastructure, service, and seed-variability trade-offs.
+
+The next research question is **architectural attribution**:
+
+> Does explicit charger-level allocation add control value beyond transformer-level hierarchical decision formation, or does it introduce unnecessary allocation constraints?
+
+The planned reduced hierarchy is:
 
 ```text
-Config: PublicPST_25cp.yaml
-Algorithms: controlled ActionGNN baseline and hierarchical actor
-Seeds: 0–4
-Training: 50,000 timesteps
-Final evaluation: 30 controlled episodes per seed
+Graph / CPO-level control scale
+        ↓
+Transformer allocation
+        ↓
+EV decision
+        ↓
+EV charging action
 ```
 
-Summary:
+This experiment is intended to isolate which intermediate infrastructure layer contributes most to the observed control behaviour.
 
-```text
-mean_reward:
-  baseline:      -103,412.13
-  hierarchical:  -76,084.21
-  paired diff:   +27,327.91
-  paired t p:      0.0219
+---
 
-action_fraction_at_max:
-  baseline:        0.5237
-  hierarchical:    0.3025
-  paired diff:    -0.2212
-  paired t p:      0.0104
-```
+## Reference
 
-Interpretation:
+This work builds on the EV-GNN framework introduced by:
 
-```text
-25CP provides favourable evidence that the hierarchical actor improves reward/tracking-related behaviour and reduces action saturation.
-```
-
-### 100CP controlled evaluation
-
-Formal 100CP evaluation used:
-
-```text
-Config: PublicPST_100.yaml
-Algorithms: controlled ActionGNN baseline and hierarchical actor
-Seeds: 0–4
-Training: 50,000 timesteps
-Final evaluation: 30 controlled episodes per seed
-```
-
-Summary:
-
-```text
-mean_reward:
-  baseline:       -1,095,042.44
-  hierarchical:     -847,359.43
-  paired diff:      +247,683.01
-  relative change:       +22.62%
-  paired t p:             0.3650
-  Wilcoxon p:             0.4375
-
-action_fraction_at_max:
-  baseline:            0.4763
-  hierarchical:        0.3264
-  paired diff:        -0.1499
-  relative change:    -31.47%
-  paired t p:          0.0569
-```
-
-Interpretation:
-
-```text
-At 100CP, the hierarchical actor improves reward and tracking-related metrics on average, but the paired evidence is not statistically robust across five seeds. The strongest 100CP behavioural signal is reduced action saturation, but it remains marginal rather than conventionally significant.
-```
-
-### Current status
-
-- Hierarchical actor implemented and vectorised.
-- Controlled evaluator records scalar EV2Gym operational metrics dynamically.
-- 500CP formal eval30 complete.
-- 500CP reward/tracking superiority is statistically inconclusive.
-- 500CP hierarchical policy reduces maximum-action saturation.
-- Full multi-scale/multi-algorithm comparison remains future work.
-
-## Computational efficiency
-
-100CP formal training resource observations:
-
-```text
-Baseline:
-  runtime:        02:13:09
-  CPU efficiency: 93.3%
-  peak memory:    2.8GB / 32GB
-
-Hierarchical:
-  runtime:        11:08:52
-  CPU efficiency: 39.1%
-  peak memory:    1.7GB / 32GB
-```
-
-Interpretation:
-
-```text
-The hierarchical actor introduces substantial computational overhead. The current contribution is therefore best framed as a physically aligned control-architecture contribution, not yet as a computationally optimised replacement for the baseline.
-```
-
-## Current interpretation and limitations
-
-The current implementation provides an end-to-end hierarchical TD3-GNN control pipeline for EV2Gym PublicPST scenarios. The actor preserves the EV2Gym action interface and the TD3 critic/replay-buffer action contract, while introducing an explicit CPO → Transformer → Charger → EV allocation structure.
-
-The 25CP controlled evaluation provides favourable small-scale evidence that the hierarchical actor can improve power-setpoint tracking behaviour and reduce action saturation. The 100CP evaluation provides a more challenging intermediate-scale case study: the hierarchical actor improves mean reward and tracking-related metrics on average, and the clearest behavioural signal is a reduction in maximum-action saturation. However, the 100CP paired evidence is not statistically conclusive across five seeds. The 500CP formal eval30 comparison extends the evidence base to a larger PublicPST setting, but reward/tracking superiority remains statistically inconclusive; the strongest 500CP signal is reduced maximum-action saturation.
-
-A key limitation is computational efficiency. In the 100CP formal runs, the hierarchical actor required substantially longer training time than the controlled ActionGNN baseline and showed lower CPU utilisation on M3. This indicates that the current implementation is primarily an architectural and behavioural research prototype, not yet a computationally optimised replacement for the baseline.
-
-Future work will focus on three directions. First, the paper will develop a clearer PublicPST case study explaining the control scenario, the reward calculation, and the interpretation of tracking, saturation, service, and overload metrics. Second, M3-based profiling will be used to identify remaining bottlenecks in the hierarchical actor, especially actor forward passes, action composition, and Python-side control flow. Third, multi-scale and multi-algorithm readiness will be audited before adding external baseline comparisons or larger formal runs.
-
-## Baseline reference
-
-Orfanoudakis et al. (2025). *Scalable reinforcement learning for large-scale coordination of electric vehicles using graph neural networks*. Communications Engineering, 4:118.
-
+S. Orfanoudakis, V. Robu, E. M. Salazar, P. Palensky, and P. P. Vergara,
+**“Scalable reinforcement learning for large-scale coordination of electric vehicles using graph neural networks,”**
+*Communications Engineering*, 4, 118, 2025.
 DOI: https://doi.org/10.1038/s44172-025-00457-8
 
-Original repository: https://github.com/StavrosOrf/EV-GNN
+Original EV-GNN repository: https://github.com/StavrosOrf/EV-GNN
+
+The TD3 implementation is based on:
+
+S. Fujimoto, H. van Hoof, and D. Meger,
+**“Addressing Function Approximation Error in Actor-Critic Methods,”** 2018.
+arXiv: https://arxiv.org/abs/1802.09477

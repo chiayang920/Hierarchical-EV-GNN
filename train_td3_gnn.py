@@ -1,5 +1,7 @@
 import argparse
 import csv
+import os
+import tempfile
 import time
 from pathlib import Path
 
@@ -17,7 +19,24 @@ from utils.ev2gym_training_utils import (
 )
 
 
-ALGORITHM_CHOICES = ("actiongnn", "hierarchical")
+ALGORITHM_CHOICES = ("actiongnn", "actiongnn_nonnegative", "hierarchical")
+CORRECTED_NONNEGATIVE_PROTOCOLS = {
+    512: {
+        "eval_freq": 256,
+        "eval_episodes": 1,
+        "start_timesteps": 64,
+    },
+    50000: {
+        "eval_freq": 5000,
+        "eval_episodes": 5,
+        "start_timesteps": 1000,
+    },
+    75000: {
+        "eval_freq": 5000,
+        "eval_episodes": 5,
+        "start_timesteps": 1000,
+    },
+}
 
 
 def get_policy_class(algorithm):
@@ -25,11 +44,39 @@ def get_policy_class(algorithm):
         from TD3.TD3_ActionGNN_Controlled import TD3_ActionGNN
 
         return TD3_ActionGNN
+    if algorithm == "actiongnn_nonnegative":
+        from TD3.TD3_ActionGNN_NonNegative import TD3_ActionGNN_NonNegative
+
+        return TD3_ActionGNN_NonNegative
     if algorithm == "hierarchical":
         from TD3.TD3_HierarchicalActionGNN import TD3_HierarchicalActionGNN
 
         return TD3_HierarchicalActionGNN
     raise ValueError(f"Unsupported algorithm: {algorithm}")
+
+
+def validate_corrected_training_protocol(args):
+    if args.algorithm != "actiongnn_nonnegative":
+        return
+
+    if args.max_timesteps not in CORRECTED_NONNEGATIVE_PROTOCOLS:
+        raise ValueError(
+            "actiongnn_nonnegative requires max_timesteps in "
+            f"{tuple(CORRECTED_NONNEGATIVE_PROTOCOLS)}; got {args.max_timesteps!r}"
+        )
+
+    required_values = {
+        "algorithm": "actiongnn_nonnegative",
+        **CORRECTED_NONNEGATIVE_PROTOCOLS[args.max_timesteps],
+        "discrete_actions": 1,
+    }
+    for field_name, expected_value in required_values.items():
+        actual_value = getattr(args, field_name)
+        if actual_value != expected_value:
+            raise ValueError(
+                f"actiongnn_nonnegative requires {field_name}={expected_value!r}; "
+                f"got {actual_value!r}"
+            )
 
 
 def evaluate_policy(policy, args, config_file, eval_episodes):
@@ -75,14 +122,90 @@ def evaluate_policy(policy, args, config_file, eval_episodes):
     return eval_stats
 
 
+def _read_existing_log_rows(log_path):
+    with log_path.open("r", newline="", encoding="utf-8") as file:
+        reader = csv.DictReader(file)
+        fieldnames = list(reader.fieldnames or [])
+        if not fieldnames:
+            raise ValueError(f"training log has no CSV header: {log_path}")
+
+        rows = []
+        for line_number, existing_row in enumerate(reader, start=2):
+            unnamed_values = existing_row.pop(None, None)
+            if unnamed_values:
+                raise ValueError(
+                    "training log contains unnamed extra columns at "
+                    f"line {line_number}: {log_path}"
+                )
+            rows.append(existing_row)
+    return fieldnames, rows
+
+
+def _rewrite_log_with_expanded_schema(log_path, fieldnames, existing_rows, row):
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            newline="",
+            encoding="utf-8",
+            dir=log_path.parent,
+            prefix=f".{log_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            writer = csv.DictWriter(
+                temporary_file,
+                fieldnames=fieldnames,
+                extrasaction="raise",
+            )
+            writer.writeheader()
+            writer.writerows(existing_rows)
+            writer.writerow(row)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.replace(temporary_path, log_path)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
+
+
 def write_log_row(log_path, row):
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    file_exists = log_path.exists()
-    with log_path.open("a", newline="") as file:
-        writer = csv.DictWriter(file, fieldnames=list(row.keys()))
-        if not file_exists:
+    row = dict(row)
+    if not row:
+        raise ValueError("training log row must contain at least one field")
+
+    if not log_path.exists() or log_path.stat().st_size == 0:
+        with log_path.open("w", newline="", encoding="utf-8") as file:
+            writer = csv.DictWriter(
+                file,
+                fieldnames=list(row.keys()),
+                extrasaction="raise",
+            )
             writer.writeheader()
+            writer.writerow(row)
+        return
+
+    fieldnames, existing_rows = _read_existing_log_rows(log_path)
+    new_fieldnames = [field_name for field_name in row if field_name not in fieldnames]
+    if new_fieldnames:
+        expanded_fieldnames = [*fieldnames, *new_fieldnames]
+        _rewrite_log_with_expanded_schema(
+            log_path,
+            expanded_fieldnames,
+            existing_rows,
+            row,
+        )
+        return
+
+    with log_path.open("a", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=fieldnames,
+            extrasaction="raise",
+        )
         writer.writerow(row)
 
 
@@ -127,6 +250,7 @@ def parse_args():
 
 def main():
     args = parse_args()
+    validate_corrected_training_protocol(args)
     args.device = resolve_device(args.device)
     set_global_seed(args.seed)
 
@@ -213,7 +337,11 @@ def main():
     for t in range(args.max_timesteps):
         episode_timesteps += 1
 
-        mapped_action, node_action = policy.select_action(state, expl_noise=args.expl_noise)
+        mapped_action, node_action = policy.select_action(
+            state,
+            expl_noise=args.expl_noise,
+            return_mapped_action=True,
+        )
         next_state, reward, done, stats = normalise_step_result(env.step(mapped_action))
 
         replay_buffer.add(state, node_action, next_state, reward, done)
@@ -255,7 +383,12 @@ def main():
 
             if mean_reward > best_reward:
                 best_reward = mean_reward
-                policy.save(str(save_path / "model.best"))
+                best_checkpoint_prefix = save_path / "model.best"
+                policy.save(str(best_checkpoint_prefix))
+                if args.algorithm == "actiongnn_nonnegative":
+                    from TD3.TD3_ActionGNN_NonNegative import write_checkpoint_metadata
+
+                    write_checkpoint_metadata(best_checkpoint_prefix, args, "best")
                 print(f"Saved new best model: {best_reward:.3f}")
 
             row = {
@@ -277,7 +410,12 @@ def main():
             eta_hours = remaining_steps / max(steps_per_second, 1e-9) / 3600
             print(f"Approx. training throughput: {steps_per_second:.2f} steps/s | ETA: {eta_hours:.2f} h")
 
-    policy.save(str(save_path / "model.last"))
+    last_checkpoint_prefix = save_path / "model.last"
+    policy.save(str(last_checkpoint_prefix))
+    if args.algorithm == "actiongnn_nonnegative":
+        from TD3.TD3_ActionGNN_NonNegative import write_checkpoint_metadata
+
+        write_checkpoint_metadata(last_checkpoint_prefix, args, "last")
     final_stats = evaluate_policy(policy, args, config_file, args.eval_episodes)
     final_row = {
         "type": "final_evaluation",

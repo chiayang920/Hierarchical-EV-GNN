@@ -4,6 +4,7 @@ import sys
 
 import numpy as np
 import pytest
+import yaml
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -37,6 +38,19 @@ def test_policy_factory_supports_actiongnn_and_hierarchical():
     assert hierarchical_policy.__class__.__name__ == "TD3_HierarchicalActionGNN"
 
 
+def test_policy_factory_supports_actiongnn_nonnegative():
+    module = importlib.import_module("evaluate_td3_gnn")
+
+    corrected_policy = module.create_policy(
+        algorithm="actiongnn_nonnegative",
+        action_dim=25,
+        max_action=1.0,
+        device="cpu",
+    )
+
+    assert corrected_policy.__class__.__name__ == "TD3_ActionGNN_NonNegative"
+
+
 def test_legacy_algorithm_aliases_normalise_to_canonical_labels():
     module = importlib.import_module("evaluate_td3_gnn")
 
@@ -44,6 +58,14 @@ def test_legacy_algorithm_aliases_normalise_to_canonical_labels():
         assert module.normalise_algorithm_label("baseline_25cp") == "actiongnn"
     with pytest.warns(DeprecationWarning, match="hierarchical_25cp"):
         assert module.normalise_algorithm_label("hierarchical_25cp") == "hierarchical"
+
+
+def test_actiongnn_nonnegative_is_not_a_legacy_alias():
+    module = importlib.import_module("evaluate_td3_gnn")
+
+    assert module.normalise_algorithm_label("actiongnn_nonnegative") == "actiongnn_nonnegative"
+    assert module.LEGACY_ALGORITHM_ALIASES.get("actiongnn") is None
+    assert module.LEGACY_ALGORITHM_ALIASES.get("actiongnn_nonnegative") is None
 
 
 def test_policy_factory_rejects_invalid_algorithm():
@@ -56,6 +78,148 @@ def test_policy_factory_rejects_invalid_algorithm():
             max_action=1.0,
             device="cpu",
         )
+
+
+class RecordingLoadPolicy:
+    def __init__(self):
+        self.loaded_prefixes = []
+
+    def load(self, checkpoint_prefix):
+        self.loaded_prefixes.append(checkpoint_prefix)
+
+
+def write_yaml(path, payload):
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+
+def corrected_metadata(checkpoint_role="best", algorithm="actiongnn_nonnegative"):
+    return {
+        "metadata_schema": "actiongnn_nonnegative_checkpoint_v1",
+        "algorithm": algorithm,
+        "action_domain_contract": "nonnegative_ev_rows_exact_zero_nonev_v1",
+        "actor_output_transform": "shifted_tanh_v1",
+        "actor_output_transform_formula": "0.5 * max_action * (tanh(z) + 1.0)",
+        "non_ev_action": 0.0,
+        "discrete_actions": 1,
+        "training_budget": 50000,
+        "start_timesteps": 1000,
+        "eval_frequency": 5000,
+        "internal_eval_episodes": 5,
+        "checkpoint_selection_rule": (
+            "model.best selected by strict improvement of scheduled internal eval mean reward "
+            "at 5k-step intervals within the configured training budget; model.last is saved "
+            "at the configured final step but is not used for canonical eval30 or diagnostics."
+        ),
+        "checkpoint_role": checkpoint_role,
+    }
+
+
+def test_load_policy_checkpoint_allows_legacy_checkpoint_without_corrected_metadata(tmp_path):
+    module = importlib.import_module("evaluate_td3_gnn")
+    checkpoint_prefix = tmp_path / "model.best"
+    write_yaml(tmp_path / "run_args.yaml", {"algorithm": "actiongnn"})
+    policy = RecordingLoadPolicy()
+
+    module.load_policy_checkpoint(policy, checkpoint_prefix, "actiongnn")
+
+    assert policy.loaded_prefixes == [str(checkpoint_prefix)]
+
+
+def test_corrected_checkpoint_missing_metadata_is_rejected_before_state_dict_load(tmp_path):
+    module = importlib.import_module("evaluate_td3_gnn")
+    checkpoint_prefix = tmp_path / "model.best"
+    write_yaml(tmp_path / "run_args.yaml", {"algorithm": "actiongnn_nonnegative"})
+    policy = RecordingLoadPolicy()
+
+    with pytest.raises(ValueError, match="metadata"):
+        module.load_policy_checkpoint(policy, checkpoint_prefix, "actiongnn_nonnegative")
+
+    assert policy.loaded_prefixes == []
+
+
+def test_corrected_checkpoint_metadata_mismatch_is_rejected_before_state_dict_load(tmp_path):
+    module = importlib.import_module("evaluate_td3_gnn")
+    checkpoint_prefix = tmp_path / "model.best"
+    write_yaml(tmp_path / "run_args.yaml", {"algorithm": "actiongnn_nonnegative"})
+    write_yaml(
+        tmp_path / "model.best.metadata.yaml",
+        corrected_metadata(algorithm="hierarchical"),
+    )
+    policy = RecordingLoadPolicy()
+
+    with pytest.raises(ValueError, match="metadata.*algorithm"):
+        module.load_policy_checkpoint(policy, checkpoint_prefix, "actiongnn_nonnegative")
+
+    assert policy.loaded_prefixes == []
+
+
+def test_corrected_checkpoint_metadata_accepts_formal_75k_budget(tmp_path):
+    module = importlib.import_module("evaluate_td3_gnn")
+    checkpoint_prefix = tmp_path / "model.best"
+    metadata = corrected_metadata()
+    metadata["training_budget"] = 75000
+    write_yaml(tmp_path / "run_args.yaml", {"algorithm": "actiongnn_nonnegative"})
+    write_yaml(tmp_path / "model.best.metadata.yaml", metadata)
+    policy = RecordingLoadPolicy()
+
+    module.load_policy_checkpoint(policy, checkpoint_prefix, "actiongnn_nonnegative")
+
+    assert policy.loaded_prefixes == [str(checkpoint_prefix)]
+
+
+def test_corrected_checkpoint_metadata_accepts_short_smoke_budget(tmp_path):
+    module = importlib.import_module("evaluate_td3_gnn")
+    checkpoint_prefix = tmp_path / "model.best"
+    metadata = corrected_metadata()
+    metadata["training_budget"] = 512
+    metadata["start_timesteps"] = 64
+    metadata["eval_frequency"] = 256
+    metadata["internal_eval_episodes"] = 1
+    write_yaml(tmp_path / "run_args.yaml", {"algorithm": "actiongnn_nonnegative"})
+    write_yaml(tmp_path / "model.best.metadata.yaml", metadata)
+    policy = RecordingLoadPolicy()
+
+    module.load_policy_checkpoint(policy, checkpoint_prefix, "actiongnn_nonnegative")
+
+    assert policy.loaded_prefixes == [str(checkpoint_prefix)]
+
+
+def test_legacy_run_args_algorithm_mismatch_is_rejected_before_state_dict_load(tmp_path):
+    module = importlib.import_module("evaluate_td3_gnn")
+    checkpoint_prefix = tmp_path / "model.best"
+    write_yaml(tmp_path / "run_args.yaml", {"algorithm": "hierarchical"})
+    policy = RecordingLoadPolicy()
+
+    with pytest.raises(ValueError, match="run_args.yaml.*algorithm"):
+        module.load_policy_checkpoint(policy, checkpoint_prefix, "actiongnn")
+
+    assert policy.loaded_prefixes == []
+
+
+def test_checkpoint_role_mismatch_is_rejected_before_state_dict_load(tmp_path):
+    module = importlib.import_module("evaluate_td3_gnn")
+    checkpoint_prefix = tmp_path / "model.best"
+    write_yaml(tmp_path / "run_args.yaml", {"algorithm": "actiongnn_nonnegative"})
+    write_yaml(tmp_path / "model.best.metadata.yaml", corrected_metadata(checkpoint_role="last"))
+    policy = RecordingLoadPolicy()
+
+    with pytest.raises(ValueError, match="checkpoint_role"):
+        module.load_policy_checkpoint(policy, checkpoint_prefix, "actiongnn_nonnegative")
+
+    assert policy.loaded_prefixes == []
+
+
+def test_hierarchical_evaluator_route_remains_supported():
+    module = importlib.import_module("evaluate_td3_gnn")
+
+    policy = module.create_policy(
+        algorithm="hierarchical",
+        action_dim=25,
+        max_action=1.0,
+        device="cpu",
+    )
+
+    assert policy.__class__.__name__ == "TD3_HierarchicalActionGNN"
 
 
 class RecordingPolicy:

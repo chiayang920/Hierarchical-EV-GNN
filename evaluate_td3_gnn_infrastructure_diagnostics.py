@@ -17,6 +17,7 @@ from evaluate_td3_gnn import (
     normalise_checkpoint_prefix,
     normalise_step_result,
     reset_env_state,
+    validate_checkpoint_identity,
 )
 from utils.ev2gym_training_utils import resolve_device, str2bool
 from utils.infrastructure_diagnostics import (
@@ -376,6 +377,7 @@ def main(argv=None):
     max_action = float(action_bounds["environment_action_high"])
     v2g_metadata = resolve_v2g_metadata(probe_env, args.config)
 
+    validate_checkpoint_identity(checkpoint_prefix, canonical_algorithm)
     policy = create_policy(
         algorithm=canonical_algorithm,
         action_dim=action_dim,
@@ -383,7 +385,7 @@ def main(argv=None):
         device=device,
         checkpoint_kwargs=checkpoint_kwargs,
     )
-    load_policy_checkpoint(policy, checkpoint_prefix)
+    load_policy_checkpoint(policy, checkpoint_prefix, canonical_algorithm)
 
     metadata = {
         "matrix_job_id": args.matrix_job_id,
