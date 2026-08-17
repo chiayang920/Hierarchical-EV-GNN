@@ -19,7 +19,12 @@ from utils.ev2gym_training_utils import (
 )
 
 
-ALGORITHM_CHOICES = ("actiongnn", "actiongnn_nonnegative", "hierarchical")
+ALGORITHM_CHOICES = (
+    "actiongnn",
+    "actiongnn_nonnegative",
+    "hierarchical",
+    "hierarchical_transformer_ev",
+)
 CORRECTED_NONNEGATIVE_PROTOCOLS = {
     512: {
         "eval_freq": 256,
@@ -52,7 +57,23 @@ def get_policy_class(algorithm):
         from TD3.TD3_HierarchicalActionGNN import TD3_HierarchicalActionGNN
 
         return TD3_HierarchicalActionGNN
+    if algorithm == "hierarchical_transformer_ev":
+        from TD3.TD3_TransformerEVActionGNN import TD3_TransformerEVActionGNN
+
+        return TD3_TransformerEVActionGNN
     raise ValueError(f"Unsupported algorithm: {algorithm}")
+
+
+def write_checkpoint_metadata_if_required(checkpoint_prefix, args, checkpoint_role):
+    if args.algorithm == "actiongnn_nonnegative":
+        from TD3.TD3_ActionGNN_NonNegative import write_checkpoint_metadata
+
+        return write_checkpoint_metadata(checkpoint_prefix, args, checkpoint_role)
+    if args.algorithm == "hierarchical_transformer_ev":
+        from TD3.TD3_TransformerEVActionGNN import write_checkpoint_metadata
+
+        return write_checkpoint_metadata(checkpoint_prefix, args, checkpoint_role)
+    return None
 
 
 def validate_corrected_training_protocol(args):
@@ -385,10 +406,7 @@ def main():
                 best_reward = mean_reward
                 best_checkpoint_prefix = save_path / "model.best"
                 policy.save(str(best_checkpoint_prefix))
-                if args.algorithm == "actiongnn_nonnegative":
-                    from TD3.TD3_ActionGNN_NonNegative import write_checkpoint_metadata
-
-                    write_checkpoint_metadata(best_checkpoint_prefix, args, "best")
+                write_checkpoint_metadata_if_required(best_checkpoint_prefix, args, "best")
                 print(f"Saved new best model: {best_reward:.3f}")
 
             row = {
@@ -412,10 +430,7 @@ def main():
 
     last_checkpoint_prefix = save_path / "model.last"
     policy.save(str(last_checkpoint_prefix))
-    if args.algorithm == "actiongnn_nonnegative":
-        from TD3.TD3_ActionGNN_NonNegative import write_checkpoint_metadata
-
-        write_checkpoint_metadata(last_checkpoint_prefix, args, "last")
+    write_checkpoint_metadata_if_required(last_checkpoint_prefix, args, "last")
     final_stats = evaluate_policy(policy, args, config_file, args.eval_episodes)
     final_row = {
         "type": "final_evaluation",
