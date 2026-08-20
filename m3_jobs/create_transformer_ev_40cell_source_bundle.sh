@@ -144,18 +144,13 @@ mkdir -p "${OUTPUT_ROOT}"
 [[ ! -e "${SHA_PATH}" ]] || die "target source archive checksum already exists: ${SHA_PATH}"
 [[ ! -e "${SOURCE_SHA_PATH}" ]] || die "target source identity file already exists: ${SOURCE_SHA_PATH}"
 
-TMP_DIR="$(mktemp -d "${OUTPUT_ROOT}/.transformer_ev_source_bundle.XXXXXX")"
-RAW_ARCHIVE="${TMP_DIR}/${TOP_LEVEL}.tar"
-cleanup_tmp() {
-  rm -rf "${TMP_DIR}"
-}
-trap cleanup_tmp EXIT
-git archive --format=tar --prefix="${TOP_LEVEL}/" "${EXPECTED_HEAD_SHA}" -- "${ALLOWLIST[@]}" > "${RAW_ARCHIVE}"
-mkdir -p "${TMP_DIR}/${TOP_LEVEL}"
-printf "%s\n" "${RECORDED_HEAD_SHA}" > "${TMP_DIR}/${TOP_LEVEL}/SOURCE_COMMIT_SHA.txt"
-touch -t 197001010000 "${TMP_DIR}/${TOP_LEVEL}/SOURCE_COMMIT_SHA.txt"
-tar -rf "${RAW_ARCHIVE}" -C "${TMP_DIR}" "${TOP_LEVEL}/SOURCE_COMMIT_SHA.txt"
-gzip -n -c "${RAW_ARCHIVE}" > "${ARCHIVE_PATH}"
+git archive \
+  --format=tar \
+  --prefix="${TOP_LEVEL}/" \
+  --mtime="@0" \
+  --add-virtual-file="${TOP_LEVEL}/SOURCE_COMMIT_SHA.txt:${RECORDED_HEAD_SHA}" \
+  "${EXPECTED_HEAD_SHA}" \
+  -- "${ALLOWLIST[@]}" | gzip -n > "${ARCHIVE_PATH}"
 tar -tzf "${ARCHIVE_PATH}" >/dev/null
 printf "%s\n" "${RECORDED_HEAD_SHA}" > "${SOURCE_SHA_PATH}"
 write_sha256_file "${ARCHIVE_PATH}" "${SHA_PATH}"

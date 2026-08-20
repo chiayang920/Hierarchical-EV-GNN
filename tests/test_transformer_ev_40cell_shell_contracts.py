@@ -105,6 +105,9 @@ def test_source_bundle_contract_requires_explicit_sha_and_uses_git_archive(tmp_p
 
     text = SOURCE_BUNDLE.read_text(encoding="utf-8")
     assert "git archive" in text
+    assert "--add-virtual-file" in text
+    assert "--mtime" in text
+    assert "tar -rf" not in text
     assert "exp/formal-75k-nonnegative-comparison-v1" not in text
     assert ".superpowers" in text
     assert "EVGNN_Research_Artefacts" in text
