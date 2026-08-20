@@ -147,7 +147,7 @@ mkdir -p "${OUTPUT_ROOT}"
 git archive \
   --format=tar \
   --prefix="${TOP_LEVEL}/" \
-  --mtime="@0" \
+  --mtime="1970-01-01T00:00:00Z" \
   --add-virtual-file="${TOP_LEVEL}/SOURCE_COMMIT_SHA.txt:${RECORDED_HEAD_SHA}" \
   "${EXPECTED_HEAD_SHA}" \
   -- "${ALLOWLIST[@]}" | gzip -n > "${ARCHIVE_PATH}"

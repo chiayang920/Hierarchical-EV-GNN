@@ -1,7 +1,11 @@
+import hashlib
 import os
+import shutil
 import stat
 import subprocess
 import sys
+import tarfile
+import time
 from pathlib import Path
 
 
@@ -28,6 +32,75 @@ def _fake_python(path: Path, version="3.11.15", *, forward=False):
         body.append(f"printf '%s\\n' '{version}'")
     path.write_text("\n".join(body) + "\n", encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
+def _source_bundle_allowlist() -> list[str]:
+    text = SOURCE_BUNDLE.read_text(encoding="utf-8")
+    collecting = False
+    paths: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if line == "ALLOWLIST=(":
+            collecting = True
+            continue
+        if collecting and line == ")":
+            break
+        if collecting and line and not line.startswith("#"):
+            paths.append(line)
+    return paths
+
+
+def _create_committed_source_bundle_fixture(root: Path) -> tuple[Path, str]:
+    repo = root / "fixture_repo"
+    repo.mkdir()
+    allowlist = _source_bundle_allowlist()
+    for relative_path in allowlist:
+        target = repo / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if relative_path == "m3_jobs/create_transformer_ev_40cell_source_bundle.sh":
+            shutil.copy2(SOURCE_BUNDLE, target)
+        elif relative_path == "m3_jobs/lib_transformer_ev_runtime.sh":
+            shutil.copy2(RUNTIME_LIB, target)
+        else:
+            target.write_text(f"fixture content for {relative_path}\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "fixture@example.test"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Fixture"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "--", *allowlist], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "fixture source"], cwd=repo, check=True)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    ).stdout.strip()
+    return repo, head
+
+
+def _build_source_bundle(repo: Path, head: str, output_root: Path, python_bin: Path) -> tuple[Path, str, dict[str, int]]:
+    env = {
+        **os.environ,
+        "EV_GNN_TRANSFORMER_EV_PYTHON": str(python_bin),
+        "EV_GNN_TRANSFORMER_EV_SOURCE_EXPECTED_HEAD_SHA": head,
+        "EV_GNN_TRANSFORMER_EV_SOURCE_OUTPUT_ROOT": str(output_root),
+    }
+    result = subprocess.run(
+        ["bash", str(repo / "m3_jobs" / "create_transformer_ev_40cell_source_bundle.sh")],
+        cwd=repo,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    archive_line = next(line for line in result.stdout.splitlines() if line.startswith("SOURCE_ARCHIVE="))
+    archive_path = Path(archive_line.split("=", 1)[1])
+    digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+    with tarfile.open(archive_path, "r:gz") as archive:
+        timestamps = {member.name: int(member.mtime) for member in archive.getmembers()}
+    return archive_path, digest, timestamps
 
 
 def test_runtime_library_uses_transformer_ev_namespace_and_rejects_bare_python(tmp_path):
@@ -113,6 +186,29 @@ def test_source_bundle_contract_requires_explicit_sha_and_uses_git_archive(tmp_p
     assert "EVGNN_Research_Artefacts" in text
     assert "evidence" in text
     assert "outputs" in text
+
+
+def test_source_bundle_is_reproducible_across_timestamp_seconds(tmp_path):
+    fake = tmp_path / "python311"
+    _fake_python(fake, forward=True)
+    repo, head = _create_committed_source_bundle_fixture(tmp_path)
+
+    archive_a, digest_a, timestamps_a = _build_source_bundle(repo, head, tmp_path / "bundle_a", fake)
+    first_build_second = int(time.time())
+    time.sleep(2.1)
+    archive_b, digest_b, timestamps_b = _build_source_bundle(repo, head, tmp_path / "bundle_b", fake)
+    second_build_second = int(time.time())
+
+    assert second_build_second > first_build_second
+    timestamp_values_a = sorted(set(timestamps_a.values()))
+    timestamp_values_b = sorted(set(timestamps_b.values()))
+    failure_detail = (
+        f"bundle_a={archive_a} sha256={digest_a} timestamps={timestamp_values_a}; "
+        f"bundle_b={archive_b} sha256={digest_b} timestamps={timestamp_values_b}"
+    )
+    assert digest_a == digest_b, failure_detail
+    assert timestamps_a == timestamps_b, failure_detail
+    assert timestamp_values_a == [0], failure_detail
 
 
 def test_source_bundle_wrong_expected_sha_fails_closed(tmp_path):
