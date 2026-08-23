@@ -1,0 +1,136 @@
+EV-GNN LOCAL RESEARCH DATA PATHS
+================================
+
+Purpose
+-------
+This note records the author's current macOS paths required to rerun the two executed research notebooks now stored as reference copies in the EV-GNN repository.
+
+The large research datasets remain outside the Git repository under EVGNN_Research_Artefacts. Do not move raw training/evaluation packages into Git merely to make the notebooks portable.
+
+Local research-project root
+---------------------------
+/Users/jameschen/Desktop/MAIN_HOME/Monash/monash_course/2026S1/Research/Research_project
+
+Local EVGNN_Research_Artefacts root
+-----------------------------------
+/Users/jameschen/Desktop/MAIN_HOME/Monash/monash_course/2026S1/Research/Research_project/EVGNN_Research_Artefacts
+
+
+1. FORMAL75K BASELINE VS FULL HIERARCHY NOTEBOOK
+================================================
+
+Repository reference copy
+-------------------------
+<EV-GNN repository root>/docs/EV_GNN_Formal75k_Research_Analysis_revised_0823.ipynb
+
+Authoritative runnable notebook directory
+-----------------------------------------
+/Users/jameschen/Desktop/MAIN_HOME/Monash/monash_course/2026S1/Research/Research_project/EVGNN_Research_Artefacts/80_audit_and_handover/corrected_nonnegative_flat_actiongnn_design/formal_75k_80cell_workflow/local_repair_20260807_v3_macos_archive/analysis_notebooks
+
+Authoritative runnable notebook
+-------------------------------
+/Users/jameschen/Desktop/MAIN_HOME/Monash/monash_course/2026S1/Research/Research_project/EVGNN_Research_Artefacts/80_audit_and_handover/corrected_nonnegative_flat_actiongnn_design/formal_75k_80cell_workflow/local_repair_20260807_v3_macos_archive/analysis_notebooks/EV_GNN_Formal75k_Research_Analysis_revised_0823.ipynb
+
+Formal75K data root used by the notebook
+----------------------------------------
+/Users/jameschen/Desktop/MAIN_HOME/Monash/monash_course/2026S1/Research/Research_project/EVGNN_Research_Artefacts/80_audit_and_handover/corrected_nonnegative_flat_actiongnn_design/formal_75k_80cell_workflow/local_repair_20260807_v3_macos_archive/outputs/formal_75k_incremental_collection_ae3911d
+
+Historical relative-path contract inside the notebook
+-----------------------------------------------------
+DATA_ROOT = Path("../outputs/formal_75k_incremental_collection_ae3911d").resolve()
+
+Therefore the Formal75K notebook should be run from the analysis_notebooks directory above unless its DATA_ROOT definition is intentionally changed for another machine.
+
+The Formal75K data root contains the four formal scenarios:
+- subset_25_100
+- scale_500cp
+- scale_1000cp
+
+and their training, eval30, and infrastructure-diagnostic evidence.
+
+
+2. FINAL THREE-ARCHITECTURE INTEGRATED NOTEBOOK
+===============================================
+
+Repository reference copy
+-------------------------
+<EV-GNN repository root>/docs/EV_GNN_Final_Integrated_Research_Analysis_0823.ipynb
+
+Authoritative runnable notebook directory
+-----------------------------------------
+/Users/jameschen/Desktop/MAIN_HOME/Monash/monash_course/2026S1/Research/Research_project/EVGNN_Research_Artefacts/00_current_authoritative_evidence/transformer_to_ev_charger_removal_40cell_75k_20260823/06_final_scientific_comparison/analysis_notebooks
+
+Authoritative runnable notebook
+-------------------------------
+/Users/jameschen/Desktop/MAIN_HOME/Monash/monash_course/2026S1/Research/Research_project/EVGNN_Research_Artefacts/00_current_authoritative_evidence/transformer_to_ev_charger_removal_40cell_75k_20260823/06_final_scientific_comparison/analysis_notebooks/EV_GNN_Final_Integrated_Research_Analysis_0823.ipynb
+
+Final scientific-comparison root
+--------------------------------
+/Users/jameschen/Desktop/MAIN_HOME/Monash/monash_course/2026S1/Research/Research_project/EVGNN_Research_Artefacts/00_current_authoritative_evidence/transformer_to_ev_charger_removal_40cell_75k_20260823/06_final_scientific_comparison
+
+Old Formal75K derived comparison-input directory
+------------------------------------------------
+/Users/jameschen/Desktop/MAIN_HOME/Monash/monash_course/2026S1/Research/Research_project/EVGNN_Research_Artefacts/00_current_authoritative_evidence/transformer_to_ev_charger_removal_40cell_75k_20260823/06_final_scientific_comparison/input_data
+
+Required Formal75K comparison files
+-----------------------------------
+/Users/jameschen/Desktop/MAIN_HOME/Monash/monash_course/2026S1/Research/Research_project/EVGNN_Research_Artefacts/00_current_authoritative_evidence/transformer_to_ev_charger_removal_40cell_75k_20260823/06_final_scientific_comparison/input_data/formal75k_eval30_episode_rows_all80.csv
+
+/Users/jameschen/Desktop/MAIN_HOME/Monash/monash_course/2026S1/Research/Research_project/EVGNN_Research_Artefacts/00_current_authoritative_evidence/transformer_to_ev_charger_removal_40cell_75k_20260823/06_final_scientific_comparison/input_data/formal75k_diagnostic_episode_rows_all80.csv
+
+/Users/jameschen/Desktop/MAIN_HOME/Monash/monash_course/2026S1/Research/Research_project/EVGNN_Research_Artefacts/00_current_authoritative_evidence/transformer_to_ev_charger_removal_40cell_75k_20260823/06_final_scientific_comparison/input_data/formal75k_scheduled_evaluation_rows_all80.csv
+
+Charger-level-allocation-removal canonical analysis root
+--------------------------------------------------------
+/Users/jameschen/Desktop/MAIN_HOME/Monash/monash_course/2026S1/Research/Research_project/EVGNN_Research_Artefacts/00_current_authoritative_evidence/transformer_to_ev_charger_removal_40cell_75k_20260823/03_final_analysis_outputs/trainset_59327541_59327542_r26-59340903_59327546_r34-59340910
+
+Required charger-removal analysis files
+---------------------------------------
+/Users/jameschen/Desktop/MAIN_HOME/Monash/monash_course/2026S1/Research/Research_project/EVGNN_Research_Artefacts/00_current_authoritative_evidence/transformer_to_ev_charger_removal_40cell_75k_20260823/03_final_analysis_outputs/trainset_59327541_59327542_r26-59340903_59327546_r34-59340910/transformer_ev_training_matrix_summary.csv
+
+/Users/jameschen/Desktop/MAIN_HOME/Monash/monash_course/2026S1/Research/Research_project/EVGNN_Research_Artefacts/00_current_authoritative_evidence/transformer_to_ev_charger_removal_40cell_75k_20260823/03_final_analysis_outputs/trainset_59327541_59327542_r26-59340903_59327546_r34-59340910/transformer_ev_training_curve_long.csv
+
+/Users/jameschen/Desktop/MAIN_HOME/Monash/monash_course/2026S1/Research/Research_project/EVGNN_Research_Artefacts/00_current_authoritative_evidence/transformer_to_ev_charger_removal_40cell_75k_20260823/03_final_analysis_outputs/trainset_59327541_59327542_r26-59340903_59327546_r34-59340910/transformer_ev_eval30_episode_rows.csv
+
+/Users/jameschen/Desktop/MAIN_HOME/Monash/monash_course/2026S1/Research/Research_project/EVGNN_Research_Artefacts/00_current_authoritative_evidence/transformer_to_ev_charger_removal_40cell_75k_20260823/03_final_analysis_outputs/trainset_59327541_59327542_r26-59340903_59327546_r34-59340910/transformer_ev_diagnostic_episode_rows.csv
+
+/Users/jameschen/Desktop/MAIN_HOME/Monash/monash_course/2026S1/Research/Research_project/EVGNN_Research_Artefacts/00_current_authoritative_evidence/transformer_to_ev_charger_removal_40cell_75k_20260823/03_final_analysis_outputs/trainset_59327541_59327542_r26-59340903_59327546_r34-59340910/transformer_ev_diagnostic_same_pass_eval30_rows.csv
+
+/Users/jameschen/Desktop/MAIN_HOME/Monash/monash_course/2026S1/Research/Research_project/EVGNN_Research_Artefacts/00_current_authoritative_evidence/transformer_to_ev_charger_removal_40cell_75k_20260823/03_final_analysis_outputs/trainset_59327541_59327542_r26-59340903_59327546_r34-59340910/transformer_ev_diagnostic_package_summary.csv
+
+/Users/jameschen/Desktop/MAIN_HOME/Monash/monash_course/2026S1/Research/Research_project/EVGNN_Research_Artefacts/00_current_authoritative_evidence/transformer_to_ev_charger_removal_40cell_75k_20260823/03_final_analysis_outputs/trainset_59327541_59327542_r26-59340903_59327546_r34-59340910/recovery_training_set_manifest.json
+
+
+3. DATA-LAYER USE
+=================
+
+Formal75K notebook
+------------------
+Primary source:
+the original Formal75K training, eval30, and diagnostic evidence stored under formal_75k_incremental_collection_ae3911d.
+
+Integrated three-architecture notebook
+--------------------------------------
+Use:
+- formal75k_eval30_episode_rows_all80.csv and transformer_ev_eval30_episode_rows.csv for final selected-policy control/service performance;
+- formal75k_diagnostic_episode_rows_all80.csv and transformer_ev_diagnostic_episode_rows.csv for action composition, allocation concentration, transformer overload, and other diagnostic mechanisms;
+- formal75k_scheduled_evaluation_rows_all80.csv together with transformer_ev_training_curve_long.csv and transformer_ev_training_matrix_summary.csv for scheduled-evaluation and selected-checkpoint analysis.
+
+The diagnostic same-pass eval30 file is an integrity/reconciliation artefact and is not the primary independent eval30 result source.
+
+
+4. REPOSITORY / PORTABILITY NOTE
+================================
+
+The notebook copies stored under the Git repository's docs/ directory are executed research reference snapshots.
+
+They are not intended to carry the large raw experiment datasets inside Git.
+
+The absolute paths above are specific to the author's current macOS research environment. On another machine:
+
+1. restore an equivalent EVGNN_Research_Artefacts directory structure; or
+2. update the notebook data-root definitions to point to the restored local research data.
+
+Do not interpret these machine-specific absolute paths as a portable public-data interface.
+
+The repository should contain the notebooks and this path map, not the large raw training/evaluation package archive.

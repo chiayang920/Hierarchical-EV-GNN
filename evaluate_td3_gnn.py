@@ -9,7 +9,12 @@ import yaml
 from utils.ev2gym_training_utils import make_env, normalise_step_result, reset_env, resolve_device, str2bool
 
 
-ALGORITHM_CHOICES = ("actiongnn", "actiongnn_nonnegative", "hierarchical")
+ALGORITHM_CHOICES = (
+    "actiongnn",
+    "actiongnn_nonnegative",
+    "hierarchical",
+    "hierarchical_transformer_ev",
+)
 
 LEGACY_ALGORITHM_ALIASES = {
     "baseline_25cp": "actiongnn",
@@ -68,6 +73,10 @@ def get_policy_class(algorithm):
         from TD3.TD3_HierarchicalActionGNN import TD3_HierarchicalActionGNN
 
         return TD3_HierarchicalActionGNN
+    if algorithm == "hierarchical_transformer_ev":
+        from TD3.TD3_TransformerEVActionGNN import TD3_TransformerEVActionGNN
+
+        return TD3_TransformerEVActionGNN
     raise ValueError(f"Unsupported algorithm: {algorithm}")
 
 
@@ -165,6 +174,73 @@ def _validate_corrected_metadata(checkpoint_prefix, metadata):
             )
 
 
+def _expected_transformer_ev_metadata(checkpoint_role):
+    from TD3.TD3_TransformerEVActionGNN import (
+        ACTION_DOMAIN_CONTRACT,
+        ACTOR_OUTPUT_TRANSFORM,
+        ACTOR_OUTPUT_TRANSFORM_FORMULA,
+        CANONICAL_ALGORITHM_LABEL,
+        CHECKPOINT_METADATA_SCHEMA,
+        CHECKPOINT_SELECTION_RULE,
+        NON_EV_ACTION,
+    )
+
+    return {
+        "metadata_schema": CHECKPOINT_METADATA_SCHEMA,
+        "algorithm": CANONICAL_ALGORITHM_LABEL,
+        "action_domain_contract": ACTION_DOMAIN_CONTRACT,
+        "actor_output_transform": ACTOR_OUTPUT_TRANSFORM,
+        "actor_output_transform_formula": ACTOR_OUTPUT_TRANSFORM_FORMULA,
+        "non_ev_action": NON_EV_ACTION,
+        "discrete_actions": 1,
+        "checkpoint_selection_rule": CHECKPOINT_SELECTION_RULE,
+        "checkpoint_role": checkpoint_role,
+    }
+
+
+def _validate_transformer_ev_metadata(checkpoint_prefix, metadata, run_args=None):
+    expected_checkpoint_role = _checkpoint_role_from_prefix(checkpoint_prefix)
+    expected_metadata = _expected_transformer_ev_metadata(expected_checkpoint_role)
+    for metadata_key, expected_value in expected_metadata.items():
+        actual_value = metadata.get(metadata_key)
+        if actual_value != expected_value:
+            raise ValueError(
+                f"hierarchical_transformer_ev checkpoint metadata {metadata_key} mismatch: "
+                f"expected {expected_value!r}; got {actual_value!r}"
+            )
+
+    for metadata_key in (
+        "training_budget",
+        "start_timesteps",
+        "eval_frequency",
+        "internal_eval_episodes",
+    ):
+        actual_value = metadata.get(metadata_key)
+        if not isinstance(actual_value, int) or actual_value <= 0:
+            raise ValueError(
+                f"hierarchical_transformer_ev checkpoint metadata {metadata_key} "
+                f"must be a positive integer; got {actual_value!r}"
+            )
+
+    if run_args is not None:
+        run_arg_to_metadata_key = {
+            "max_timesteps": "training_budget",
+            "start_timesteps": "start_timesteps",
+            "eval_freq": "eval_frequency",
+            "eval_episodes": "internal_eval_episodes",
+        }
+        for run_args_key, metadata_key in run_arg_to_metadata_key.items():
+            if run_args_key not in run_args:
+                continue
+            expected_value = int(run_args[run_args_key])
+            actual_value = metadata.get(metadata_key)
+            if actual_value != expected_value:
+                raise ValueError(
+                    f"hierarchical_transformer_ev checkpoint metadata {metadata_key} mismatch: "
+                    f"expected run_args.yaml {run_args_key}={expected_value!r}; got {actual_value!r}"
+                )
+
+
 def validate_checkpoint_identity(checkpoint_prefix, canonical_algorithm):
     from TD3.TD3_ActionGNN_NonNegative import checkpoint_metadata_path
 
@@ -196,6 +272,16 @@ def validate_checkpoint_identity(checkpoint_prefix, canonical_algorithm):
                 f"actiongnn_nonnegative checkpoint metadata is required at {metadata_path}"
             )
         _validate_corrected_metadata(checkpoint_prefix, corrected_metadata)
+    if canonical_algorithm == "hierarchical_transformer_ev":
+        if corrected_metadata is None:
+            raise ValueError(
+                f"hierarchical_transformer_ev checkpoint metadata is required at {metadata_path}"
+            )
+        _validate_transformer_ev_metadata(
+            checkpoint_prefix,
+            corrected_metadata,
+            run_args=run_args,
+        )
 
 
 def create_policy(
