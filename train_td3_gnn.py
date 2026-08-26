@@ -23,6 +23,7 @@ ALGORITHM_CHOICES = (
     "actiongnn",
     "actiongnn_nonnegative",
     "hierarchical",
+    "hierarchical_transformer_constraint",
     "hierarchical_transformer_ev",
 )
 CORRECTED_NONNEGATIVE_PROTOCOLS = {
@@ -57,6 +58,12 @@ def get_policy_class(algorithm):
         from TD3.TD3_HierarchicalActionGNN import TD3_HierarchicalActionGNN
 
         return TD3_HierarchicalActionGNN
+    if algorithm == "hierarchical_transformer_constraint":
+        from TD3.TD3_HierarchicalActionGNN_TransformerConstraint import (
+            TD3_HierarchicalActionGNN_TransformerConstraint,
+        )
+
+        return TD3_HierarchicalActionGNN_TransformerConstraint
     if algorithm == "hierarchical_transformer_ev":
         from TD3.TD3_TransformerEVActionGNN import TD3_TransformerEVActionGNN
 
@@ -71,6 +78,12 @@ def write_checkpoint_metadata_if_required(checkpoint_prefix, args, checkpoint_ro
         return write_checkpoint_metadata(checkpoint_prefix, args, checkpoint_role)
     if args.algorithm == "hierarchical_transformer_ev":
         from TD3.TD3_TransformerEVActionGNN import write_checkpoint_metadata
+
+        return write_checkpoint_metadata(checkpoint_prefix, args, checkpoint_role)
+    if args.algorithm == "hierarchical_transformer_constraint":
+        from TD3.TD3_HierarchicalActionGNN_TransformerConstraint import (
+            write_checkpoint_metadata,
+        )
 
         return write_checkpoint_metadata(checkpoint_prefix, args, checkpoint_role)
     return None
@@ -98,6 +111,17 @@ def validate_corrected_training_protocol(args):
                 f"actiongnn_nonnegative requires {field_name}={expected_value!r}; "
                 f"got {actual_value!r}"
             )
+
+
+def validate_transformer_constraint_training_contract(args, config):
+    if args.algorithm != "hierarchical_transformer_constraint":
+        return {}
+
+    from utils.transformer_feasibility_projection import (
+        validate_transformer_constraint_config,
+    )
+
+    return validate_transformer_constraint_config(config)
 
 
 def evaluate_policy(policy, args, config_file, eval_episodes):
@@ -278,6 +302,10 @@ def main():
     config_file = args.config
     with open(config_file, "r") as file:
         config = yaml.load(file, Loader=yaml.FullLoader)
+    transformer_constraint_kwargs = validate_transformer_constraint_training_contract(
+        args,
+        config,
+    )
 
     env = make_env(config_file, seed=args.seed)
     state, _ = reset_env(env, seed=args.seed)
@@ -327,6 +355,7 @@ def main():
         "critic_num_gcn_layers": args.critic_num_gcn_layers,
         "device": args.device,
     }
+    kwargs.update(transformer_constraint_kwargs)
 
     with (save_path / "config.yaml").open("w") as file:
         yaml.dump(config, file)
